@@ -1,0 +1,14 @@
+[package]
+name = "tagsy-ipc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tagsy-api = { workspace = true }
+tagsy-core = { workspace = true }
+futures-util = { workspace = true }
+log = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["net", "sync", "rt"] }
+tokio-tungstenite = { workspace = true }

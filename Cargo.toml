@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members = ["tagsyd", "tagsy-core", "tagsy-api", "tagsy-ipc", "tagsy", "tagsy-bridge"]
+
+[workspace.dependencies]
+tagsy-core = { path = "tagsy-core" }
+tagsy-api = { path = "tagsy-api" }
+tagsy-ipc = { path = "tagsy-ipc" }
+tagsyd = { path = "tagsyd" }
+
+android_logger = "0.15.1"
+base64 = "0.23.0"
+blake3 = "1.8.5"
+clap = { version = "4.5.20", features = ["derive"] }
+comfy-table = { version = "7", features = ["custom_styling"] }
+ed25519-dalek = "3.0.0"
+env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+infer = { version = "0.16", default-features = false }
+# PDF first-page rasterization for previews. Binds to libpdfium at *runtime*
+# via libloading (dynamic), so the build does not link pdfium; the daemon
+# locates `libpdfium.so` at runtime (its path is provided by the Nix wrapper /
+# TAGSY_PDFIUM_LIB_PATH; see flake.nix). Only ever compiled into a build with
+# tagsyd's `preview-generation` feature. `image_latest` pins the same `image`
+# crate version we use elsewhere (0.25) so `PdfBitmap::as_image()` yields a
+# compatible `DynamicImage`.
+#
+# The `pdfium_*` API version MUST NOT be newer than the `libpdfium.so` we bind
+# at runtime, or newer symbols the crate references fail to resolve at load time
+# (e.g. `undefined symbol: FPDFTextObj_SetFontSize`). nixpkgs pins
+# `pdfium-binaries` at build 7749; `pdfium_7543` is the highest crate-supported
+# API version <= 7749, so every bound symbol exists in that binary. Bump this to
+# track nixpkgs' pdfium when it updates.
+pdfium-render = { version = "0.9", default-features = false, features = ["image_latest", "pdfium_7543", "thread_safe"] }
+# Pinned to the exact version of `flutter_rust_bridge_codegen` in the dev shell
+# (flake.nix); the runtime crate and the generator must match.
+flutter_rust_bridge = "=2.12.0"
+futures-util = "0.3.33"
+jni = "0.22.4"
+log = "0.4.33"
+notify = "8.2.0"
+owo-colors = "4.3.0"
+rand = "0.10.2"
+# Tag-rule pattern matching (`Configuration::tag_rules`). The default feature
+# set is kept: `unicode` matters because logical paths are arbitrary UTF-8, so
+# `\w`/`.` must not silently mean "ASCII only" for a user whose filenames are
+# not. `regex` guarantees linear-time matching with no backtracking, so an
+# operator cannot write a rule that hangs the ingest path on a crafted filename.
+regex = "1.12"
+rmp-serde = "1.3.1"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tar = "0.4"
+thiserror = "2.0"
+tokio = { version = "1.48" }
+tokio-tungstenite = "0.30"
+tokio-util = "0.7"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+walkdir = "2.5"
+zstd = "0.13"

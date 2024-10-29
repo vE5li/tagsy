@@ -1,0 +1,10 @@
+[package]
+name = "tagsy-api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tagsy-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }

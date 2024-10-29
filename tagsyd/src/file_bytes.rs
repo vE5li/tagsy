@@ -1,0 +1,390 @@
+//! Daemon-internal representation of a file's content in transit.
+//!
+//! Carrying content as an owned, fully-buffered `Vec<u8>` (as the wire types
+//! in `tagsy-core` do) does not scale to large files. [`FileBytes`] lets an
+//! internal producer describe *where* a file's content lives and *how* the
+//! consumer is allowed to obtain it, without eagerly reading it into memory:
+//!
+//! - [`FileBytes::InMemory`] — the bytes are already in memory (e.g. a small
+//!   programmatic upload through the API). Nothing to read from disk.
+//! - [`FileBytes::FileToCopy`] — the bytes live at a path the producer still
+//!   owns. The consumer must *copy* (or stream-read) from it and must never
+//!   remove it. Safe to hand to any number of consumers.
+//! - [`FileBytes::FileToMove`] — the bytes live at a path whose lifetime the
+//!   producer relinquishes to the consumer. The consumer may `rename` it into
+//!   place, which is destructive and can therefore be honored by *exactly one*
+//!   consumer.
+//!
+//! This type is deliberately **daemon-only** and is never serialized: the
+//! `FileToMove`/`FileToCopy` variants carry machine-local paths that are
+//! meaningless to a peer. Content bound for a peer is streamed chunk-by-chunk
+//! via [`FileBytes::read_chunk_at`] over the transfer protocol.
+//!
+//! ## Ownership / cleanup
+//!
+//! `FileToMove`/`FileToCopy` reference files their *producer* owns; dropping a
+//! `FileBytes` without consuming it does **not** delete anything. Most
+//! producers point these variants at real files (a watched file, a CLI upload
+//! source) rather than throwaway daemon temporaries, so a leak-on-drop is not a
+//! concern for them.
+//!
+//! The on-demand fetch path *does* create daemon-owned temp files (a completed
+//! peer transfer, and the staging done by `ApiService::fetch_file`); those live
+//! under the fetch temp dir (`Paths::fetch_temp_dir`) and are cleaned up in
+//! bulk on daemon start (`Paths::clean_fetch_temp_dir`) rather than by a
+//! per-value drop guard, since their consumer (the co-located CLI / UI) takes
+//! over ownership with move semantics.
+
+use std::path::{Path, PathBuf};
+
+// The streaming hash and its error now live in `tagsy-core` so the IPC client
+// (`tagsy-ipc`) can share them; re-exported here since `FileBytes`'s own
+// methods return `FileBytesError` and many `crate::file_bytes::FileBytesError`
+// call sites depend on the path.
+pub use tagsy_core::content::{FileBytesError, hash_and_len};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// Where a file's content lives and how a consumer may obtain it.
+///
+/// See the module documentation for the semantics of each variant. This type
+/// intentionally does not implement `Clone`: cloning a `FileToMove` would
+/// silently create a second "mover" for a single source, which can only be
+/// honored once. The one place that fans a single ingested file out to several
+/// sync directories (`handle_changes`) constructs each command's variant
+/// explicitly instead, so it can guarantee at most one `FileToMove`.
+#[derive(Debug)]
+pub enum FileBytes {
+    /// Content already resident in memory.
+    InMemory(Vec<u8>),
+    /// Content at a producer-owned path; the consumer must copy, never remove.
+    FileToCopy(PathBuf),
+    /// Content whose lifetime is handed to the consumer; may be renamed into
+    /// place. Honorable by exactly one consumer.
+    FileToMove(PathBuf),
+}
+
+impl FileBytes {
+    /// The on-disk path backing this content, if any. `InMemory` has none.
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            FileBytes::InMemory(_) => None,
+            FileBytes::FileToCopy(path) | FileBytes::FileToMove(path) => Some(path),
+        }
+    }
+
+    /// Reinterpret a file-backed content as a *move* (the source should not
+    /// survive ingestion). A `FileToCopy` becomes a `FileToMove` for the same
+    /// path; a `FileToMove` is returned unchanged. `InMemory` has no source to
+    /// move and is returned unchanged.
+    pub fn into_move(self) -> FileBytes {
+        match self {
+            FileBytes::FileToCopy(path) | FileBytes::FileToMove(path) => {
+                FileBytes::FileToMove(path)
+            }
+            in_memory @ FileBytes::InMemory(_) => in_memory,
+        }
+    }
+
+    /// The total byte length of this content.
+    pub async fn byte_len(&self) -> Result<u64, FileBytesError> {
+        match self {
+            FileBytes::InMemory(bytes) => Ok(bytes.len() as u64),
+            FileBytes::FileToCopy(path) | FileBytes::FileToMove(path) => {
+                let metadata = tokio::fs::metadata(path)
+                    .await
+                    .map_err(|source| FileBytesError::io(path, source))?;
+                Ok(metadata.len())
+            }
+        }
+    }
+
+    /// Read up to `max_len` bytes starting at `offset`, returning the bytes and
+    /// whether this chunk reaches the end of the content.
+    ///
+    /// Used by the transfer *sender* to answer a chunk request without holding
+    /// the whole file in memory (the file-backed variants seek + read a bounded
+    /// window). An `offset` at or past the end yields an empty final chunk.
+    pub async fn read_chunk_at(
+        &self,
+        offset: u64,
+        max_len: usize,
+    ) -> Result<(Vec<u8>, bool), FileBytesError> {
+        match self {
+            FileBytes::InMemory(bytes) => {
+                let total = bytes.len() as u64;
+                let start = offset.min(total) as usize;
+                let end = (start + max_len).min(bytes.len());
+                let chunk = bytes[start..end].to_vec();
+                let last = end as u64 >= total;
+                Ok((chunk, last))
+            }
+            FileBytes::FileToCopy(path) | FileBytes::FileToMove(path) => {
+                use tokio::io::AsyncSeekExt;
+                let total = self.byte_len().await?;
+                let mut file = tokio::fs::File::open(path)
+                    .await
+                    .map_err(|source| FileBytesError::io(path, source))?;
+                file.seek(std::io::SeekFrom::Start(offset))
+                    .await
+                    .map_err(|source| FileBytesError::io(path, source))?;
+                let mut buffer = vec![0u8; max_len];
+                let mut filled = 0;
+                // `read` may return fewer bytes than requested; loop until the
+                // buffer is full or EOF so each chunk is a predictable size.
+                while filled < max_len {
+                    let read = file
+                        .read(&mut buffer[filled..])
+                        .await
+                        .map_err(|source| FileBytesError::io(path, source))?;
+                    if read == 0 {
+                        break;
+                    }
+                    filled += read;
+                }
+                buffer.truncate(filled);
+                let last = offset + filled as u64 >= total;
+                Ok((buffer, last))
+            }
+        }
+    }
+
+    /// Read the entire content into memory, up to `max_len` bytes.
+    ///
+    /// Returns `(bytes, complete)` where `complete` is `true` iff the whole
+    /// file fit within `max_len` (i.e. it was not truncated). Used by
+    /// preview generation, which needs the full bytes in memory to
+    /// decode/snippet but must be bounded so an enormous file cannot
+    /// exhaust memory — the caller decides what a truncated read means for
+    /// each preview kind.
+    pub async fn read_all_bounded(
+        &self,
+        max_len: usize,
+    ) -> Result<(Vec<u8>, bool), FileBytesError> {
+        match self {
+            FileBytes::InMemory(bytes) => {
+                let complete = bytes.len() <= max_len;
+                Ok((bytes[..bytes.len().min(max_len)].to_vec(), complete))
+            }
+            FileBytes::FileToCopy(_) | FileBytes::FileToMove(_) => {
+                let total = self.byte_len().await?;
+                let (bytes, _last) = self.read_chunk_at(0, max_len).await?;
+                // Complete iff the whole file fit within `max_len` (i.e. we did
+                // not stop short of the end).
+                let complete = total as usize <= bytes.len();
+                Ok((bytes, complete))
+            }
+        }
+    }
+
+    /// Compute the BLAKE3 hex digest of this content, streaming from disk for
+    /// the file-backed variants so the whole file is never held in memory.
+    ///
+    /// Returns the 64-char lowercase hex string used in `file_versions`.
+    pub async fn hash(&self) -> Result<String, FileBytesError> {
+        match self {
+            FileBytes::InMemory(bytes) => Ok(blake3::hash(bytes).to_hex().to_string()),
+            FileBytes::FileToCopy(path) | FileBytes::FileToMove(path) => {
+                hash_and_len(path).await.map(|(hash, _)| hash)
+            }
+        }
+    }
+
+    /// Place this content at `dest`, consuming `self`.
+    ///
+    /// - `InMemory` writes the buffer to `dest`.
+    /// - `FileToCopy` streams the source into `dest`, leaving the source in
+    ///   place (the producer still owns it).
+    /// - `FileToMove` renames the source to `dest` (single destructive
+    ///   consumer). If the rename crosses filesystems (`EXDEV`) — common,
+    ///   because sync directories are user-configured paths that may live on a
+    ///   different mount than the daemon's temp dir — it falls back to a
+    ///   stream-copy followed by removing the source, preserving move
+    ///   semantics.
+    ///
+    /// The parent directory of `dest` must already exist.
+    pub async fn materialize_to(self, dest: &Path) -> Result<(), FileBytesError> {
+        match self {
+            FileBytes::InMemory(bytes) => {
+                let mut file = tokio::fs::File::create(dest)
+                    .await
+                    .map_err(|source| FileBytesError::io(dest, source))?;
+                file.write_all(&bytes)
+                    .await
+                    .map_err(|source| FileBytesError::io(dest, source))?;
+                file.flush()
+                    .await
+                    .map_err(|source| FileBytesError::io(dest, source))?;
+                Ok(())
+            }
+            FileBytes::FileToCopy(source) => stream_copy(&source, dest).await,
+            FileBytes::FileToMove(source) => match tokio::fs::rename(&source, dest).await {
+                Ok(()) => Ok(()),
+                Err(error) if is_cross_device(&error) => {
+                    // Cross-filesystem rename: copy then delete the source so
+                    // the move still consumes it. `dest` and the temp source
+                    // routinely live on different mounts.
+                    stream_copy(&source, dest).await?;
+                    if let Err(error) = tokio::fs::remove_file(&source).await {
+                        // The bytes are safely at `dest`; a leftover source is a
+                        // leak, not a correctness problem. Log and continue.
+                        log::warn!(
+                            "Cross-device move copied {} -> {} but failed to remove source: \
+                             {error}",
+                            source.display(),
+                            dest.display()
+                        );
+                    }
+                    Ok(())
+                }
+                Err(source_error) => Err(FileBytesError::io(&source, source_error)),
+            },
+        }
+    }
+}
+
+/// Stream-copy `source` into `dest` without buffering the whole file.
+async fn stream_copy(source: &Path, dest: &Path) -> Result<(), FileBytesError> {
+    let mut reader = tokio::fs::File::open(source)
+        .await
+        .map_err(|error| FileBytesError::io(source, error))?;
+    let mut writer = tokio::fs::File::create(dest)
+        .await
+        .map_err(|error| FileBytesError::io(dest, error))?;
+
+    tokio::io::copy(&mut reader, &mut writer)
+        .await
+        .map_err(|error| FileBytesError::io(dest, error))?;
+    writer
+        .flush()
+        .await
+        .map_err(|error| FileBytesError::io(dest, error))?;
+    Ok(())
+}
+
+/// Whether an I/O error is a cross-filesystem (`EXDEV`) rename failure.
+fn is_cross_device(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc_exdev())
+    }
+    #[cfg(not(unix))]
+    {
+        // On non-unix targets there is no stable EXDEV constant here; fall back
+        // to treating it as a generic I/O error (never a cross-device rename).
+        let _ = error;
+        false
+    }
+}
+
+/// `EXDEV` errno. Defined inline to avoid pulling in the `libc` crate for a
+/// single constant; it is 18 on Linux and the BSDs/macOS.
+#[cfg(unix)]
+const fn libc_exdev() -> i32 {
+    18
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A unique temp directory that removes itself (and everything under it)
+    /// when the guard is dropped at the end of a test. Deref-s to `Path` so it
+    /// drops in for the old `PathBuf` at every `dir.join(..)` call site.
+    struct TempDir(PathBuf);
+
+    impl std::ops::Deref for TempDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            // Best-effort: a leftover temp dir is a leak, not a test failure.
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir() -> TempDir {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!(
+            "tagsy-filebytes-test-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        TempDir(base)
+    }
+
+    #[tokio::test]
+    async fn in_memory_hash_matches_blake3() {
+        let bytes = b"hello world".to_vec();
+        let file_bytes = FileBytes::InMemory(bytes.clone());
+        assert_eq!(
+            file_bytes.hash().await.unwrap(),
+            blake3::hash(&bytes).to_hex().to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn file_hash_matches_in_memory_hash() {
+        let dir = temp_dir();
+        let source = dir.join("source.bin");
+        // Larger than the hashing buffer to exercise the streaming read loop.
+        let bytes: Vec<u8> = (0..(tagsy_core::content::CHUNK_SIZE * 3 + 7))
+            .map(|i| i as u8)
+            .collect();
+        std::fs::write(&source, &bytes).unwrap();
+
+        let file_hash = FileBytes::FileToCopy(source).hash().await.unwrap();
+        let expected = FileBytes::InMemory(bytes).hash().await.unwrap();
+        assert_eq!(file_hash, expected);
+    }
+
+    #[tokio::test]
+    async fn materialize_in_memory_writes_bytes() {
+        let dir = temp_dir();
+        let dest = dir.join("dest.bin");
+        FileBytes::InMemory(b"payload".to_vec())
+            .materialize_to(&dest)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"payload");
+    }
+
+    #[tokio::test]
+    async fn materialize_copy_preserves_source() {
+        let dir = temp_dir();
+        let source = dir.join("source.bin");
+        let dest = dir.join("dest.bin");
+        std::fs::write(&source, b"copy me").unwrap();
+
+        FileBytes::FileToCopy(source.clone())
+            .materialize_to(&dest)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"copy me");
+        assert!(source.exists(), "FileToCopy must leave the source in place");
+    }
+
+    #[tokio::test]
+    async fn materialize_move_consumes_source() {
+        let dir = temp_dir();
+        let source = dir.join("source.bin");
+        let dest = dir.join("dest.bin");
+        std::fs::write(&source, b"move me").unwrap();
+
+        FileBytes::FileToMove(source.clone())
+            .materialize_to(&dest)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"move me");
+        assert!(!source.exists(), "FileToMove must remove the source");
+    }
+}

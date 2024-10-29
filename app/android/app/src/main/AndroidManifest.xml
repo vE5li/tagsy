@@ -1,0 +1,113 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- tagsy: peer sync (outbound / optional listener). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- tagsy: keep the tokio runtime + inotify alive under Doze. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Required on API 34+ (Android 14) for a data-sync foreground service. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Needed to post the ongoing notification on API 33+. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- tagsy: the sync directory lives in shared storage (Documents/tagsy)
+         so synced files are browsable in the Files app / Gallery. Broad "All
+         files access"; the user must grant it via the system settings screen
+         (see MainActivity). Requested via MANAGE_APP_ALL_FILES_ACCESS_PERMISSION. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <application
+        android:label="Tagsy"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher">
+        <!-- launchMode="singleTask" is recommended by receive_sharing_intent:
+             it reuses the existing activity/task for share intents instead of
+             spawning a new instance each time a file is shared. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- tagsy: appear in the Android share sheet as an upload target.
+                 A single shared item (ACTION_SEND) or several at once
+                 (ACTION_SEND_MULTIPLE); "*/*" accepts any file type. The
+                 receive_sharing_intent plugin reads the EXTRA_STREAM URI(s)
+                 and hands them to Dart, which uploads via TagsyApp.uploadFile. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="*/*"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="*/*"/>
+            </intent-filter>
+        </activity>
+        <!-- tagsy: foreground service hosting the native runtime. Not
+             exported; the type must match FOREGROUND_SERVICE_DATA_SYNC. -->
+        <service
+            android:name=".TagsyService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <!-- tagsy: FileProvider used by the external-editor launcher
+             (EditorChannel) to hand files to third-party editors as
+             `content://` URIs. Raw filesystem paths under the app's private
+             storage are not readable by other apps on modern Android, so we
+             expose the daemon's fetch temp dir (under `filesDir`) and the
+             sync directory (under external storage) through this provider.
+             See res/xml/tagsy_editor_paths.xml for the exposed roots. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.editorprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/tagsy_editor_paths" />
+        </provider>
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- Package visibility (Android 11+ enforces this): the
+             external-editor launcher (EditorChannel) probes whether any
+             installed app handles ACTION_EDIT / ACTION_VIEW for a given
+             MIME so it can pick the right one. Without these queries,
+             resolveActivity() returns null even when an editor exists. -->
+        <intent>
+            <action android:name="android.intent.action.EDIT"/>
+            <data android:mimeType="*/*"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:mimeType="*/*"/>
+        </intent>
+    </queries>
+</manifest>

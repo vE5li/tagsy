@@ -1,0 +1,16 @@
+{
+  "sync_directories": [
+    {
+      "path": "$DOCUMENTS/sylvie-phone",
+      "sync_type": { "TagBased": { "tags": ["6450a8fe6eb945cc8b40adf4b97408bd", "52bbf75854a84b8cb2b715c237d0c8c8"] } }
+    }
+  ],
+  "listen_port": null,
+  "peers": [
+    {
+      "address": ["192.168.188.10", 3468],
+      "name": "central",
+      "public_key": "AYWQNMCy5y20bjB1oxU79x5fUYQI4CGPbsqk7N+Qrgs="
+    }
+  ]
+}

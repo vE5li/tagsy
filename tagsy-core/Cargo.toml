@@ -1,0 +1,15 @@
+[package]
+name = "tagsy-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+blake3 = { workspace = true }
+serde = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util"] }
+uuid = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
