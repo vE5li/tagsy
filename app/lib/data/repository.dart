@@ -56,6 +56,22 @@ class TagsyRepository {
     required tagsy.SubtagRule subtagRule,
   }) => _client.tagIdsForFile(fileId: fileId, subtagRule: subtagRule);
 
+  /// The tags applied directly to a file, resolved to full [tagsy.TagEntry]
+  /// rows (name + color). Direct tags only (no subtag recursion), live-only.
+  /// Convenience over [tagIdsForFile] + per-id [getTagEntry], used where the UI
+  /// wants to render a file's tag chips (e.g. the large-tile result view).
+  Future<List<tagsy.TagEntry>> tagsForFile({required String fileId}) async {
+    final ids = await tagIdsForFile(
+      fileId: fileId,
+      subtagRule: tagsy.SubtagRule.exclude,
+    );
+    return Future.wait(
+      ids.map(
+        (id) => getTagEntry(tagId: id, deletedRule: tagsy.DeletedRule.exclude),
+      ),
+    );
+  }
+
   /// The parent tag ids of a tag.
   Future<List<String>> tagIdsForTag({
     required String tagId,

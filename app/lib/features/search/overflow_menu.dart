@@ -1,7 +1,8 @@
 // The home AppBar's overflow menu: a single three-dot button that hosts the
-// four low-frequency actions (Operations, deleted-search toggle, purge cached
-// previews, copy public key) so they don't clutter the AppBar. The storage
-// indicator stays inline because it's a passive readout, not an action.
+// low-frequency actions (Operations, deleted-search toggle, the file result
+// view-mode selectors, purge cached previews, copy public key) so they don't
+// clutter the AppBar. The storage indicator stays inline because it's a passive
+// readout, not an action.
 //
 // The Operations item still needs its live active-count badge, so this widget
 // itself subscribes to the operations stream — the badge renders on the
@@ -17,6 +18,7 @@ import 'package:flutter/services.dart';
 import '../../rust/api.dart' as tagsy;
 import '../../screens/operations_screen.dart';
 import '../../session/session.dart';
+import 'view_mode.dart';
 
 class OverflowMenu extends StatefulWidget {
   const OverflowMenu({
@@ -25,6 +27,8 @@ class OverflowMenu extends StatefulWidget {
     required this.publicKey,
     required this.showDeleted,
     required this.onToggleShowDeleted,
+    required this.fileViewMode,
+    required this.onSelectViewMode,
   });
 
   final TagsySession? session;
@@ -41,13 +45,28 @@ class OverflowMenu extends StatefulWidget {
   /// Invoked when the deleted-search toggle item is picked.
   final VoidCallback onToggleShowDeleted;
 
+  /// The active file result view mode. Each mode has its own dedicated menu
+  /// item; the active one is marked with a check.
+  final FileViewMode fileViewMode;
+
+  /// Invoked with the mode whose menu item was picked.
+  final ValueChanged<FileViewMode> onSelectViewMode;
+
   @override
   State<OverflowMenu> createState() => _OverflowMenuState();
 }
 
 /// Menu-item identifiers. Kept as a private enum so the switch in `onSelected`
 /// is exhaustive.
-enum _MenuAction { operations, toggleDeleted, purgePreviews, copyPublicKey }
+enum _MenuAction {
+  operations,
+  toggleDeleted,
+  viewModeList,
+  viewModeTile,
+  viewModeLarge,
+  purgePreviews,
+  copyPublicKey,
+}
 
 class _OverflowMenuState extends State<OverflowMenu> {
   /// Currently-active operations, keyed by id. Peer connections are no longer
@@ -180,6 +199,12 @@ class _OverflowMenuState extends State<OverflowMenu> {
         _openOperations();
       case _MenuAction.toggleDeleted:
         widget.onToggleShowDeleted();
+      case _MenuAction.viewModeList:
+        widget.onSelectViewMode(FileViewMode.list);
+      case _MenuAction.viewModeTile:
+        widget.onSelectViewMode(FileViewMode.tile);
+      case _MenuAction.viewModeLarge:
+        widget.onSelectViewMode(FileViewMode.large);
       case _MenuAction.purgePreviews:
         _purgePreviews();
       case _MenuAction.copyPublicKey:
@@ -215,6 +240,39 @@ class _OverflowMenuState extends State<OverflowMenu> {
                   ? 'Showing deleted — tap to search live'
                   : 'Search deleted files and tags',
             ),
+          ),
+        ),
+        PopupMenuItem<_MenuAction>(
+          value: _MenuAction.viewModeList,
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.view_list_outlined),
+            title: const Text('View as list'),
+            trailing: widget.fileViewMode == FileViewMode.list
+                ? const Icon(Icons.check)
+                : null,
+          ),
+        ),
+        PopupMenuItem<_MenuAction>(
+          value: _MenuAction.viewModeTile,
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.grid_view_outlined),
+            title: const Text('View as tiles'),
+            trailing: widget.fileViewMode == FileViewMode.tile
+                ? const Icon(Icons.check)
+                : null,
+          ),
+        ),
+        PopupMenuItem<_MenuAction>(
+          value: _MenuAction.viewModeLarge,
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.view_agenda_outlined),
+            title: const Text('View as large tiles'),
+            trailing: widget.fileViewMode == FileViewMode.large
+                ? const Icon(Icons.check)
+                : null,
           ),
         ),
         PopupMenuItem<_MenuAction>(

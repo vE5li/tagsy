@@ -24,6 +24,7 @@ import '../features/search/result_rows.dart';
 import '../features/search/search_field.dart';
 import '../features/search/sections_view.dart';
 import '../features/search/storage_stats_indicator.dart';
+import '../features/search/view_mode.dart';
 import '../rust/api.dart' as tagsy;
 import '../session/session.dart';
 import '../widgets/roving_focus_list.dart';
@@ -80,6 +81,13 @@ class _HomeScreenState extends State<HomeScreen> {
   /// small button next to the search field. Off by default: the standard
   /// search only ever shows live rows.
   bool _showDeleted = false;
+
+  /// How the *files* section of active-search results is rendered. Only affects
+  /// the live-query result surface, not the config-defined home sections
+  /// ([SectionsView], which always renders rows). Ephemeral (resets on
+  /// restart), mirroring [_showDeleted]. Cycled by a horizontal swipe over the
+  /// results and set directly from the overflow menu.
+  FileViewMode _fileViewMode = FileViewMode.list;
 
   /// Change-stream watcher: re-runs the *current* query whenever the underlying
   /// data changes so the results stay accurate. Deliberately does nothing when
@@ -310,6 +318,19 @@ class _HomeScreenState extends State<HomeScreen> {
     _rows.restoreRow(restoreIndex);
   }
 
+  /// Open a tag by id (from a large-tile tag chip, which only carries the id).
+  /// Unlike [_openTag] there's no roving-focus row to restore — tile chips are
+  /// outside the keyboard navigation.
+  Future<void> _openTagById(String tagId) async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => TagDetailScreen(session: widget.session!, tagId: tagId),
+      ),
+    );
+  }
+
   /// See [_openTag].
   Future<void> _openFile(
     tagsy.FileEntry file, {
@@ -363,6 +384,9 @@ class _HomeScreenState extends State<HomeScreen> {
               // change is visible without waiting for a keystroke.
               if (_results != null) _runQuery();
             },
+            fileViewMode: _fileViewMode,
+            onSelectViewMode: (mode) =>
+                setState(() => _fileViewMode = mode),
           ),
         ],
       ),
@@ -446,12 +470,29 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!hasTags && !hasFiles && createCandidate == null) {
       return const Center(child: Text('No matches.'));
     }
-    // Describe the list as headers + rows in render order (tags → create-tag →
-    // files); [RovingFocusList] owns the per-row focus nodes and the arrow-key
-    // navigation. `restoreIndex` is the row's position among *focusable* rows
-    // only (headers don't count), matching the index RovingFocusList assigns —
-    // the tap and Enter handlers pass it back to `_openTag` / `_openFile` so
-    // focus resumes on the right row after a detail route pops.
+    // A horizontal swipe cycles the file view mode (left = next, right = prev).
+    // Wraps whichever surface the current mode builds. `onHorizontalDragEnd`
+    // reads the fling velocity so it doesn't fight vertical scrolling.
+    return switch (_fileViewMode) {
+      FileViewMode.list =>
+        _buildListResults(results, createCandidate, hasTags, hasFiles),
+      FileViewMode.tile || FileViewMode.large =>
+        _buildTileResults(results, createCandidate, hasTags, hasFiles),
+    };
+  }
+
+  /// The original text-list result surface: tags → create-tag → files, all as
+  /// focusable rows in a [RovingFocusList] (owns per-row focus + arrow-key nav).
+  /// `restoreIndex` is the row's position among *focusable* rows only (headers
+  /// don't count), matching the index RovingFocusList assigns — the tap and
+  /// Enter handlers pass it back to `_openTag` / `_openFile` so focus resumes on
+  /// the right row after a detail route pops.
+  Widget _buildListResults(
+    tagsy.QueryEntries results,
+    String? createCandidate,
+    bool hasTags,
+    bool hasFiles,
+  ) {
     var rowIndex = 0;
     final items = <RovingFocusItem>[];
     if (hasTags || createCandidate != null) {
@@ -505,5 +546,96 @@ class _HomeScreenState extends State<HomeScreen> {
       // the user can keep typing without Shift-Tabbing past anything.
       onExitTop: _queryFocus.requestFocus,
     );
+  }
+
+  /// The tile result surfaces (shared by [FileViewMode.tile] and
+  /// [FileViewMode.large]): tags stay as rows at the top, files render below as
+  /// either a grid of small thumbnails ([FileTile]) or one full-width tile per
+  /// file with tags ([FileLargeTile]). Composed as a [CustomScrollView] since
+  /// the two sections have different layouts. Tiles are tappable but not part of
+  /// the roving arrow-key navigation, so `restoreRow` doesn't apply here —
+  /// passing index 0 just parks focus back near the top on return.
+  Widget _buildTileResults(
+    tagsy.QueryEntries results,
+    String? createCandidate,
+    bool hasTags,
+    bool hasFiles,
+  ) {
+    final session = widget.session!;
+    final slivers = <Widget>[];
+    if (hasTags || createCandidate != null) {
+      final tagChildren = <Widget>[const SectionHeader('Tags')];
+      for (final tag in results.tags) {
+        tagChildren.add(
+          TagRow(
+            tag: tag,
+            onActivate: () => _openTag(tag, restoreIndex: 0),
+          ),
+        );
+      }
+      if (createCandidate != null) {
+        tagChildren.add(
+          CreateTagRow(
+            name: createCandidate,
+            onCreate: () => _createTag(createCandidate),
+          ),
+        );
+      }
+      slivers.add(SliverList(delegate: SliverChildListDelegate(tagChildren)));
+    }
+    if (hasFiles) {
+      slivers.add(
+        const SliverToBoxAdapter(child: SectionHeader('Files')),
+      );
+      if (_fileViewMode == FileViewMode.large) {
+        // One full-width tile per file, stacked; each shows a large preview,
+        // the name, and the file's tags.
+        slivers.add(
+          SliverPadding(
+            padding: const EdgeInsets.all(8),
+            sliver: SliverList(
+              delegate: SliverChildBuilderDelegate((context, i) {
+                final file = results.files[i];
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: FileLargeTile(
+                    key: ValueKey('${file.fileId}:${file.contentHash}'),
+                    file: file,
+                    repository: session.repository,
+                    onActivate: () => _openFile(file, restoreIndex: 0),
+                    onOpenTag: _openTagById,
+                  ),
+                );
+              }, childCount: results.files.length),
+            ),
+          ),
+        );
+      } else {
+        slivers.add(
+          SliverPadding(
+            padding: const EdgeInsets.all(8),
+            sliver: SliverGrid(
+              gridDelegate:
+                  const SliverGridDelegateWithMaxCrossAxisExtent(
+                    maxCrossAxisExtent: 180,
+                    mainAxisSpacing: 8,
+                    crossAxisSpacing: 8,
+                    childAspectRatio: 0.85,
+                  ),
+              delegate: SliverChildBuilderDelegate((context, i) {
+                final file = results.files[i];
+                return FileTile(
+                  key: ValueKey('${file.fileId}:${file.contentHash}'),
+                  file: file,
+                  repository: session.repository,
+                  onActivate: () => _openFile(file, restoreIndex: 0),
+                );
+              }, childCount: results.files.length),
+            ),
+          ),
+        );
+      }
+    }
+    return CustomScrollView(slivers: slivers);
   }
 }
