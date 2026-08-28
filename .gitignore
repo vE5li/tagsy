@@ -34,5 +34,5 @@ app/android/build/
 app/android/.gradle/
 
 # Per-device runtime config, copied in from app/config/<name>.json by the
-# flake's run-android apps (via ONISYNC_CONFIG). Build artefact, not source.
-app/android/app/src/main/assets/tagsy.json
+# flake's run-android apps (via TAGSY_CONFIG). Build artefact, not source.
+app/android/app/src/main/assets/tagsy_config.json
