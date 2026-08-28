@@ -18,9 +18,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../features/search/copy_public_key_button.dart';
-import '../features/search/operations_button.dart';
-import '../features/search/purge_previews_button.dart';
+import '../features/search/overflow_menu.dart';
 import '../features/search/result_rows.dart';
 import '../features/search/search_field.dart';
 import '../features/search/sections_view.dart';
@@ -353,25 +351,17 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('Tagsy'),
         actions: [
           StorageStatsIndicator(session: widget.session),
-          // Toggle: search live vs. tombstoned rows. When on, the daemon
-          // returns only soft-deleted files/tags for the same query text;
-          // when off, only live ones.
-          IconButton(
-            isSelected: _showDeleted,
-            tooltip: _showDeleted
-                ? 'Showing deleted — tap to search live'
-                : 'Search deleted files and tags',
-            icon: Icon(_showDeleted ? Icons.delete : Icons.delete_outline),
-            onPressed: () {
+          OverflowMenu(
+            session: widget.session,
+            publicKey: publicKey,
+            showDeleted: _showDeleted,
+            onToggleShowDeleted: () {
               setState(() => _showDeleted = !_showDeleted);
               // Re-run immediately if a query is already active so the mode
               // change is visible without waiting for a keystroke.
               if (_results != null) _runQuery();
             },
           ),
-          OperationsButton(session: widget.session),
-          PurgePreviewsButton(session: widget.session),
-          if (publicKey != null) CopyPublicKeyButton(publicKey: publicKey),
         ],
       ),
       body: SafeArea(
