@@ -5,9 +5,11 @@
 //
 // The Operations item still needs its live active-count badge, so this widget
 // itself subscribes to the operations stream — the badge renders on the
-// three-dot menu button whenever any operation is active, doubling as the
-// connected-peer count when nothing else is in flight. This mirrors the
-// behavior the standalone OperationsButton had before it moved into the menu.
+// three-dot menu button whenever real sync work is in flight (transfers,
+// reconciliation, fetches, connect attempts). Steady-state peer connections are
+// NOT operations any more — they are connection *state*, shown by the AppBar's
+// connection indicator — so the badge is no longer permanently lit whenever a
+// peer is connected. It is now a genuine "something is happening" signal.
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -48,8 +50,8 @@ class OverflowMenu extends StatefulWidget {
 enum _MenuAction { operations, toggleDeleted, purgePreviews, copyPublicKey }
 
 class _OverflowMenuState extends State<OverflowMenu> {
-  /// Currently-active operations, keyed by id. Includes steady-state
-  /// peer-connection rows (see [_countsAsWork]).
+  /// Currently-active operations, keyed by id. Peer connections are no longer
+  /// operations, so this is now purely real sync work (see [_countsAsWork]).
   final Map<BigInt, tagsy.OperationEntry> _working = {};
 
   /// True while a preview purge is in flight, so the menu item shows a spinner
@@ -78,8 +80,9 @@ class _OverflowMenuState extends State<OverflowMenu> {
     super.dispose();
   }
 
-  /// Whether an operation should count toward the badge: any active operation
-  /// (including steady-state peer connections).
+  /// Whether an operation should count toward the badge: any active operation.
+  /// (All operations are now genuine work — connections moved out of this
+  /// stream — so no kind special-casing is needed here.)
   static bool _countsAsWork(tagsy.OperationEntry op) {
     return op.status is tagsy.OperationStatusDto_Active;
   }

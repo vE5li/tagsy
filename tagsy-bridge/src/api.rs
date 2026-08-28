@@ -26,13 +26,17 @@
 pub use tagsy_core::{FileInfo, Preview};
 pub use tagsyd::configuration::EditorRule;
 pub use tagsyd::configuration::HomeSection;
+pub use tagsyd::connections::{ConnectedPeer, ConnectionEvent};
 pub use tagsyd::frontend::api::{ApiError, ApiEvent, StorageStats};
 pub use tagsyd::operations::{
     Direction, Operation, OperationEvent, OperationKind, OperationStatus,
 };
-use tagsyd::paths::Paths;
+pub use tagsyd::paths::Paths;
 pub use tagsyd::store::{DeletedRule, SubtagRule, Tag};
-use tagsyd::transport::{AnyBackend, Backend, EventStream, OperationStream, OperationUpdate};
+use tagsyd::transport::{
+    AnyBackend, Backend, ConnectionStream, ConnectionUpdate, EventStream, OperationStream,
+    OperationUpdate,
+};
 use tokio::sync::Mutex;
 
 use crate::runtime::StartError;
@@ -397,19 +401,6 @@ fn flatten_kind(kind: &OperationKind) -> (String, Option<String>, Option<String>
             Some(peer_name.clone()),
             None,
         ),
-        OperationKind::PeerConnected {
-            peer_name,
-            direction,
-            ..
-        } => (
-            match direction {
-                Direction::Outbound => "peer_connected_outbound",
-                Direction::Inbound => "peer_connected_inbound",
-            }
-            .to_owned(),
-            Some(peer_name.clone()),
-            None,
-        ),
         OperationKind::ReceivingFile { file_id, peer_name } => (
             "receiving_file".to_owned(),
             Some(peer_name.clone()),
@@ -448,6 +439,50 @@ fn flatten_status(status: &OperationStatus) -> (OperationStatusDto, Option<u64>,
             None,
         ),
         OperationStatus::Aborted => (OperationStatusDto::Aborted, None, None),
+    }
+}
+
+/// A peer we currently hold a live session with, flattened for the Dart UI.
+///
+/// A connection is *state*, not an operation: it does not appear among
+/// [`OperationEntry`] rows. The UI renders these as its connection indicator.
+pub struct ConnectedPeerDto {
+    /// The peer's configured human-facing name.
+    pub peer_name: String,
+    /// The peer's stable public-key identity. Keys a disconnect back to the
+    /// matching row.
+    pub public_key: String,
+    /// Which end established the link.
+    pub direction: ConnectionDirectionDto,
+    /// Wall-clock milliseconds when the connection came up.
+    pub since: i64,
+}
+
+/// Which end a connection was established from, as a real Dart enum.
+pub enum ConnectionDirectionDto {
+    /// We dialed the peer.
+    Outbound,
+    /// The peer dialed us.
+    Inbound,
+}
+
+impl From<Direction> for ConnectionDirectionDto {
+    fn from(direction: Direction) -> Self {
+        match direction {
+            Direction::Outbound => ConnectionDirectionDto::Outbound,
+            Direction::Inbound => ConnectionDirectionDto::Inbound,
+        }
+    }
+}
+
+impl From<ConnectedPeer> for ConnectedPeerDto {
+    fn from(peer: ConnectedPeer) -> Self {
+        Self {
+            peer_name: peer.peer_name,
+            public_key: peer.public_key,
+            direction: peer.direction.into(),
+            since: peer.since,
+        }
     }
 }
 
@@ -1002,6 +1037,38 @@ impl Tagsy {
                 .map(|backend| Mutex::new(backend.subscribe_operations())),
         }
     }
+
+    /// Snapshot every currently-connected peer as flattened
+    /// [`ConnectedPeerDto`] rows for the Dart UI.
+    ///
+    /// The UI calls this for the initial paint of its connection indicator,
+    /// then applies live updates from
+    /// [`subscribe_connections`](Self::subscribe_connections) (and re-calls
+    /// this on a [`ConnectionUpdateDto::Resynced`]).
+    pub async fn connected_peers(&self) -> Result<Vec<ConnectedPeerDto>, ApiError> {
+        Ok(self
+            .try_backend()?
+            .connected_peers()
+            .await?
+            .into_iter()
+            .map(ConnectedPeerDto::from)
+            .collect())
+    }
+
+    /// Subscribe to the live peer-connection stream.
+    ///
+    /// Returns a [`ConnectionSubscription`] the UI polls with
+    /// [`ConnectionSubscription::next`]. Each item is a
+    /// [`ConnectionUpdateDto`]; a `None` means the stream is unavailable
+    /// (runtime not running) or closed.
+    pub fn subscribe_connections(&self) -> ConnectionSubscription {
+        ConnectionSubscription {
+            stream: self
+                .try_backend()
+                .ok()
+                .map(|backend| Mutex::new(backend.subscribe_connections())),
+        }
+    }
 }
 
 /// A live subscription to the change stream.
@@ -1176,6 +1243,52 @@ impl OperationSubscription {
                 Some(OperationUpdateDto::Updated {
                     operation: OperationEntry::from(operation),
                 })
+            }
+        }
+    }
+}
+
+/// A live update on the connection stream, for the Dart UI.
+///
+/// The FFI-facing counterpart of
+/// [`ConnectionUpdate`](tagsyd::transport::ConnectionUpdate).
+pub enum ConnectionUpdateDto {
+    /// The stream lagged or reconnected; the UI should re-call
+    /// [`Tagsy::connected_peers`] to re-sync its view.
+    Resynced,
+    /// A peer connected.
+    Connected { peer: ConnectedPeerDto },
+    /// A peer disconnected, identified by its public key.
+    Disconnected { public_key: String },
+}
+
+/// A live subscription to the peer-connection stream.
+///
+/// The connection counterpart of [`OperationSubscription`]:
+/// `flutter_rust_bridge` maps [`ConnectionSubscription::next`] onto a Dart
+/// `Future<ConnectionUpdateDto?>` the UI awaits in a loop; on `null` the stream
+/// is done.
+#[cfg_attr(feature = "flutter_rust_bridge", flutter_rust_bridge::frb(opaque))]
+pub struct ConnectionSubscription {
+    /// `None` if the runtime was not running when the subscription was made.
+    stream: Option<Mutex<ConnectionStream>>,
+}
+
+impl ConnectionSubscription {
+    /// Await the next connection update, or `None` once the stream is
+    /// permanently closed (or was never available).
+    pub async fn next(&self) -> Option<ConnectionUpdateDto> {
+        let stream = self.stream.as_ref()?;
+        let mut guard = stream.lock().await;
+        match guard.recv().await? {
+            ConnectionUpdate::Resynced => Some(ConnectionUpdateDto::Resynced),
+            ConnectionUpdate::Event(ConnectionEvent::Connected(peer)) => {
+                Some(ConnectionUpdateDto::Connected {
+                    peer: ConnectedPeerDto::from(peer),
+                })
+            }
+            ConnectionUpdate::Event(ConnectionEvent::Disconnected { public_key }) => {
+                Some(ConnectionUpdateDto::Disconnected { public_key })
             }
         }
     }

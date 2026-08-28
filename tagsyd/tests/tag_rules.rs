@@ -23,6 +23,7 @@ use tagsyd::configuration::{
     CompiledTagRules, Configuration, PreviewGenerationPolicy, RuntimeConfiguration, TagRule,
 };
 use tagsyd::frontend::api::ApiService;
+use tagsyd::connections::Connections;
 use tagsyd::operations::Operations;
 use tagsyd::peer::relay::{ChunkRelay, PreviewRelay};
 use tagsyd::store::CatalogStore;
@@ -103,6 +104,7 @@ impl Harness {
             pending_fetches.clone(),
             data_dir.join("fetch-temp"),
             operations.clone(),
+            Connections::new(),
             Vec::new(),
             Vec::new(),
             compiled.clone(),

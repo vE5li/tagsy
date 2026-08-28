@@ -82,6 +82,10 @@ pub struct PeerContext {
     /// Live sync-operation registry, so peer sessions can surface what they are
     /// doing (serving/receiving files, reconciling, fetching) to the UI.
     pub operations: crate::operations::Operations,
+    /// Live peer-connection registry. A session registers itself here for its
+    /// whole lifetime so the UI can show which peers are connected right now —
+    /// connection *state*, distinct from the operations above.
+    pub connections: crate::connections::Connections,
 }
 
 /// Drive a fully-handshaken WebSocket connection until it closes.
@@ -116,16 +120,15 @@ pub async fn run_peer_session<S>(
         can_generate_previews,
         verified_hashes,
         operations,
+        connections,
     } = context;
 
-    // The steady-state "connected to this peer" operation. Held for the life of
-    // the session; dropped (its terminal `Aborted`/`Completed`) when the
-    // session ends. We `complete` it on a clean close below.
-    let _peer_connected = operations.begin(operations::OperationKind::peer_connected(
-        peer_name,
-        peer_public_key,
-        direction,
-    ));
+    // Register this peer as connected for the life of the session. A connection
+    // is *state*, not an operation: the guard's `Drop` (when the session ends,
+    // cleanly or not) removes the peer from the connected set and broadcasts a
+    // `Disconnected` — no `Aborted`-means-disconnected lie, and the operations
+    // UI's work indicator no longer stays lit for the whole session.
+    let _connection = connections.register(peer_public_key, peer_name, direction);
 
     // CatalogStore wraps a rusqlite Connection which is Send but not Sync.
     // We must never hold `&CatalogStore` across an `.await` in this task,

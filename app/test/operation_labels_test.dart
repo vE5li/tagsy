@@ -19,8 +19,6 @@ import 'package:tagsy_app/format/operation_labels.dart';
 /// test enforces.
 const Set<String> _bridgeKinds = {
   'connecting_to_peer',
-  'peer_connected_outbound',
-  'peer_connected_inbound',
   'receiving_file',
   'fetching',
   'reconciling_manifest',

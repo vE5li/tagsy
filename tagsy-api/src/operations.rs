@@ -32,7 +32,8 @@ impl OperationId {
     }
 }
 
-/// Which end of a peer link an operation runs over.
+/// Which end of a peer link a connection (or an operation running over it) was
+/// established from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Direction {
     /// We initiated the connection to the peer.
@@ -50,13 +51,12 @@ pub enum Direction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationKind {
     /// Establishing an outbound connection to a configured peer.
+    ///
+    /// A connect *attempt* is a genuine operation: it starts, and it ends —
+    /// `Completed` on a successful handshake, `Failed`/`Aborted` otherwise. The
+    /// resulting live link is **not** an operation; it is connection *state*,
+    /// tracked separately (see [`ConnectedPeer`] / the connection stream).
     ConnectingToPeer { peer_name: String, url: String },
-    /// A peer session is up and idle (the steady-state "connected" row).
-    PeerConnected {
-        peer_name: String,
-        public_key: String,
-        direction: Direction,
-    },
     /// Receiving a file's bytes from a peer. "fetching 123 from peer B".
     ///
     /// Note: there is no sender-side counterpart. In the content-addressed
@@ -80,18 +80,6 @@ impl OperationKind {
         OperationKind::ConnectingToPeer {
             peer_name: peer_name.into(),
             url: url.into(),
-        }
-    }
-
-    pub fn peer_connected(
-        peer_name: impl Into<String>,
-        public_key: impl Into<String>,
-        direction: Direction,
-    ) -> Self {
-        OperationKind::PeerConnected {
-            peer_name: peer_name.into(),
-            public_key: public_key.into(),
-            direction,
         }
     }
 

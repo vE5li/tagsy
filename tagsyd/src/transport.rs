@@ -43,10 +43,13 @@ use std::path::PathBuf;
 // lives in `tagsy-api`. This module keeps the daemon's *implementations*
 // (`InProcessBackend`, `AnyBackend`) and re-exports the port so external
 // callers keep using `tagsyd::transport::{Backend, EventStream, ...}`.
-pub use tagsy_api::{Backend, EventStream, OperationStream, OperationUpdate};
+pub use tagsy_api::{
+    Backend, ConnectionStream, ConnectionUpdate, EventStream, OperationStream, OperationUpdate,
+};
 use tagsy_core::{FileId, FileInfo, Preview, TagId};
 
 use crate::configuration::{EditorRule, HomeSection};
+use crate::connections::ConnectedPeer;
 use crate::frontend::api::{
     ApiError, ApiService, BackupOutcome, EditOutcome, RetagSummary, SearchResults, StorageStats,
     TagRuleReport,
@@ -283,6 +286,14 @@ impl Backend for InProcessBackend {
 
     fn subscribe_operations(&self) -> OperationStream {
         OperationStream::InProcess(self.api.subscribe_operations())
+    }
+
+    async fn connected_peers(&self) -> Result<Vec<ConnectedPeer>, ApiError> {
+        Ok(self.api.connected_peers())
+    }
+
+    fn subscribe_connections(&self) -> ConnectionStream {
+        ConnectionStream::InProcess(self.api.subscribe_connections())
     }
 }
 
@@ -626,6 +637,20 @@ impl Backend for AnyBackend {
         match self {
             AnyBackend::InProcess(backend) => backend.subscribe_operations(),
             AnyBackend::Ipc(backend) => backend.subscribe_operations(),
+        }
+    }
+
+    async fn connected_peers(&self) -> Result<Vec<ConnectedPeer>, ApiError> {
+        match self {
+            AnyBackend::InProcess(backend) => backend.connected_peers().await,
+            AnyBackend::Ipc(backend) => backend.connected_peers().await,
+        }
+    }
+
+    fn subscribe_connections(&self) -> ConnectionStream {
+        match self {
+            AnyBackend::InProcess(backend) => backend.subscribe_connections(),
+            AnyBackend::Ipc(backend) => backend.subscribe_connections(),
         }
     }
 }

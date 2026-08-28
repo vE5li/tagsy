@@ -191,4 +191,13 @@ class TagsyRepository {
   /// Subscribe to the live sync-operation stream.
   Future<tagsy.OperationSubscription> subscribeOperations() =>
       _client.subscribeOperations();
+
+  /// Snapshot every currently-connected peer. A connection is state, not an
+  /// operation, so it has its own snapshot/stream distinct from operations.
+  Future<List<tagsy.ConnectedPeerDto>> connectedPeers() =>
+      _client.connectedPeers();
+
+  /// Subscribe to the live peer-connection stream.
+  Future<tagsy.ConnectionSubscription> subscribeConnections() =>
+      _client.subscribeConnections();
 }

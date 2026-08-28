@@ -13,6 +13,7 @@ use tagsy_core::state::Change;
 use tagsy_core::{FileId, FileInfo, Preview, TagId};
 use tokio::sync::broadcast;
 
+use crate::connections::{ConnectedPeer, ConnectionEvent};
 use crate::operations::{Operation, OperationEvent};
 use crate::{
     ApiError, ApiEvent, BackupOutcome, DeletedRule, EditOutcome, EditorRule, HomeSection,
@@ -314,6 +315,21 @@ pub trait Backend {
     /// [`OperationStream`] whose [`recv`](OperationStream::recv) yields
     /// [`OperationUpdate`]s.
     fn subscribe_operations(&self) -> OperationStream;
+
+    /// Snapshot the peers we currently hold a live session with. The read the
+    /// UI issues for its initial paint of the connection indicator before
+    /// applying live [`ConnectionEvent`]s from
+    /// [`subscribe_connections`](Self::subscribe_connections).
+    ///
+    /// A connection is *state*, not an operation: it does not appear in
+    /// [`list_operations`](Self::list_operations). Only the connect *attempt*
+    /// ([`ConnectingToPeer`](crate::OperationKind::ConnectingToPeer)) does.
+    fn connected_peers(&self) -> impl Future<Output = Result<Vec<ConnectedPeer>, ApiError>> + Send;
+
+    /// Subscribe to the live peer-connection stream. Returns a
+    /// [`ConnectionStream`] whose [`recv`](ConnectionStream::recv) yields
+    /// [`ConnectionUpdate`]s.
+    fn subscribe_connections(&self) -> ConnectionStream;
 }
 
 /// The transport-agnostic event stream returned by [`Backend::subscribe`].
@@ -408,6 +424,53 @@ impl OperationStream {
         match receiver.recv().await {
             Ok(event) => Some(OperationUpdate::Event(event)),
             Err(broadcast::error::RecvError::Lagged(_)) => Some(OperationUpdate::Resynced),
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    }
+}
+
+/// A live update on the connection stream, normalized across transports.
+///
+/// The connection counterpart of [`OperationUpdate`]: a subscriber that lags
+/// past the channel capacity (or an IPC client that reconnected) gets a
+/// [`Resynced`](ConnectionUpdate::Resynced) prompt to re-snapshot via
+/// [`connected_peers`](Backend::connected_peers) rather than silently dropping
+/// connect/disconnect edges.
+#[derive(Debug, Clone)]
+pub enum ConnectionUpdate {
+    /// The stream lagged (or reconnected over IPC); the UI should re-snapshot.
+    Resynced,
+    /// A concrete connection event (a peer connected or disconnected).
+    Event(ConnectionEvent),
+}
+
+/// The transport-agnostic connection stream returned by
+/// [`Backend::subscribe_connections`].
+///
+/// The connection counterpart of [`OperationStream`]; same two delivery
+/// mechanisms behind one type. Poll it with [`ConnectionStream::recv`].
+pub enum ConnectionStream {
+    /// In-process delivery: a direct subscription to the runtime's connection
+    /// broadcast.
+    InProcess(broadcast::Receiver<ConnectionEvent>),
+    /// IPC delivery: a subscription to the control client's broadcast of
+    /// connection events decoded off the control socket.
+    Ipc(broadcast::Receiver<ConnectionEvent>),
+}
+
+impl ConnectionStream {
+    /// Await the next connection update.
+    ///
+    /// Returns `Some(ConnectionUpdate::Event(_))` per connection event,
+    /// `Some(ConnectionUpdate::Resynced)` when the subscriber lagged
+    /// (re-snapshot needed), and `None` once the stream is permanently closed.
+    pub async fn recv(&mut self) -> Option<ConnectionUpdate> {
+        let receiver = match self {
+            ConnectionStream::InProcess(receiver) | ConnectionStream::Ipc(receiver) => receiver,
+        };
+        match receiver.recv().await {
+            Ok(event) => Some(ConnectionUpdate::Event(event)),
+            Err(broadcast::error::RecvError::Lagged(_)) => Some(ConnectionUpdate::Resynced),
             Err(broadcast::error::RecvError::Closed) => None,
         }
     }

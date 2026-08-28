@@ -212,6 +212,12 @@ pub enum Commands {
     /// sending/receiving files, reconciling, ...).
     #[command(visible_alias = "ops")]
     ListOperations,
+    /// List the peers the daemon currently holds a live connection with.
+    ///
+    /// A connection is state, not an operation, so it has its own command
+    /// rather than appearing in `list-operations`.
+    #[command(visible_alias = "peers")]
+    ConnectedPeers,
     /// Purge the daemon's cached file previews, forcing them to regenerate on
     /// demand. Useful after the set of previewable file types changes (e.g. new
     /// PDF/video support). Prints how many cached previews were removed.

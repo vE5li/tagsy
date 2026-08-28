@@ -12,11 +12,15 @@
 //! *declaration* and the DTOs are here.
 
 mod backend;
+pub mod connections;
 mod error;
 pub mod operations;
 mod types;
 
-pub use backend::{Backend, EventStream, OperationStream, OperationUpdate};
+pub use backend::{
+    Backend, ConnectionStream, ConnectionUpdate, EventStream, OperationStream, OperationUpdate,
+};
+pub use connections::{ConnectedPeer, ConnectionEvent};
 pub use error::ApiError;
 pub use operations::{
     Direction, Operation, OperationEvent, OperationId, OperationKind, OperationStatus, Progress,

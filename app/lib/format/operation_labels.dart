@@ -22,8 +22,6 @@ typedef OperationLabel = (IconData icon, String label);
 /// test enumerates the expected set and fails if this map drifts from it.
 const Map<String, OperationLabel> kOperationLabels = {
   'connecting_to_peer': (Icons.sync, 'Connecting to peer'),
-  'peer_connected_outbound': (Icons.link, 'Connected (outbound)'),
-  'peer_connected_inbound': (Icons.link, 'Connected (inbound)'),
   'receiving_file': (Icons.download, 'Receiving file'),
   'fetching': (Icons.cloud_download, 'Fetching file'),
   'reconciling_manifest': (Icons.compare_arrows, 'Reconciling manifest'),

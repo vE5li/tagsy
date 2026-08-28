@@ -37,6 +37,7 @@ use crate::sync_directories::{SyncDirectories, SyncDirectoryCommand};
 pub mod catalog;
 pub mod clock;
 pub mod configuration;
+pub mod connections;
 pub mod control;
 pub mod file_bytes;
 pub mod frontend;
@@ -285,6 +286,11 @@ pub async fn run(
     // subscribe) and every peer session (to report work in progress).
     let operations = crate::operations::Operations::new();
 
+    // Live peer-connection registry. Connections are *state*, not operations,
+    // so they get their own registry: the UI-facing API snapshots / subscribes
+    // it, and every peer session registers itself in it for the session's life.
+    let connections = crate::connections::Connections::new();
+
     let fetch_temp_dir = paths.fetch_temp_dir();
     if let Err(error) = paths.clean_fetch_temp_dir().await {
         log::warn!(
@@ -304,6 +310,7 @@ pub async fn run(
         pending_fetches.clone(),
         fetch_temp_dir,
         operations.clone(),
+        connections.clone(),
         configuration.editor_rules.clone(),
         configuration.home_sections.clone(),
         tag_rules.clone(),
@@ -375,6 +382,7 @@ pub async fn run(
         can_generate_previews,
         verified_hashes: VerifiedHashCache::new(),
         operations: operations.clone(),
+        connections: connections.clone(),
     };
 
     let mut peer_handles = Vec::new();

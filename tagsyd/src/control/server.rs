@@ -16,7 +16,9 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_util::sync::CancellationToken;
 
 use crate::frontend::api::{ApiEvent, ApiService};
-use crate::transport::{EventStream, OperationStream, OperationUpdate};
+use crate::transport::{
+    ConnectionStream, ConnectionUpdate, EventStream, OperationStream, OperationUpdate,
+};
 
 /// Bind the control socket and serve control clients until `shutdown` fires.
 ///
@@ -115,6 +117,10 @@ async fn handle_control_connection(
     // neither.
     let mut operation_events: Option<OperationStream> = None;
 
+    // Populated once the client sends `SubscribeConnections`. Independent of the
+    // two subscriptions above.
+    let mut connection_events: Option<ConnectionStream> = None;
+
     // Provider protocol state for this connection. A `ProviderSource` (held by
     // the transfer subsystem) asks for a chunk by sending `(offset, reply)` on
     // `provider_req`; we assign a `chunk_id`, remember the reply oneshot, and
@@ -172,6 +178,25 @@ async fn handle_control_connection(
                     // already prompts a full re-fetch of live state, so drop the
                     // marker here and let the next event catch the client up.
                     Some(OperationUpdate::Resynced) => {}
+                    None => break,
+                }
+            }
+            // Forward live connection events to a subscribed client. A lag
+            // surfaces as `Resynced`, forwarded verbatim so the client
+            // re-snapshots via `ConnectedPeers`.
+            connection = async { connection_events.as_mut().unwrap().recv().await }, if connection_events.is_some() => {
+                match connection {
+                    Some(ConnectionUpdate::Event(event)) => {
+                        if let Err(error) =
+                            send_control(&mut outgoing, &ControlFrame::ConnectionEvent(event)).await
+                        {
+                            log::debug!("Failed to push connection event: {error}");
+                            break;
+                        }
+                    }
+                    // A lag: the client should re-snapshot. Mirrors the
+                    // operation-stream handling above.
+                    Some(ConnectionUpdate::Resynced) => {}
                     None => break,
                 }
             }
@@ -253,6 +278,7 @@ async fn handle_control_connection(
                             request,
                             &mut events,
                             &mut operation_events,
+                            &mut connection_events,
                             &provider_req_tx,
                             &provider_done_tx,
                             &mut active_provider,
@@ -297,6 +323,7 @@ async fn dispatch(
     request: ControlRequest,
     events: &mut Option<EventStream>,
     operation_events: &mut Option<OperationStream>,
+    connection_events: &mut Option<ConnectionStream>,
     provider_req_tx: &mpsc::UnboundedSender<crate::peer::transfer::ProviderChunkRequest>,
     provider_done_tx: &mpsc::UnboundedSender<()>,
     active_provider: &mut Option<(FileId, String)>,
@@ -510,6 +537,11 @@ async fn dispatch(
         ControlRequest::SubscribeOperations => {
             *operation_events = Some(OperationStream::InProcess(api.subscribe_operations()));
             ControlResponse::OperationsSubscribed
+        }
+        ControlRequest::ConnectedPeers => ControlResponse::ConnectedPeers(api.connected_peers()),
+        ControlRequest::SubscribeConnections => {
+            *connection_events = Some(ConnectionStream::InProcess(api.subscribe_connections()));
+            ControlResponse::ConnectionsSubscribed
         }
     }
 }

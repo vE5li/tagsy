@@ -13,9 +13,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use tagsy_api::{
-    ApiError, ApiEvent, Backend, BackupOutcome, DeletedRule, EditOutcome, EditorRule, EventStream,
-    HomeSection, Operation, OperationEvent, OperationStream, RetagSummary, SearchResults,
-    StorageStats, SubtagRule, Tag, TagRuleReport,
+    ApiError, ApiEvent, Backend, BackupOutcome, ConnectedPeer, ConnectionEvent, ConnectionStream,
+    DeletedRule, EditOutcome, EditorRule, EventStream, HomeSection, Operation, OperationEvent,
+    OperationStream, RetagSummary, SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,
 };
 use tagsy_core::content::hash_and_len;
 use tagsy_core::{FileId, FileInfo, Preview, TagId};
@@ -92,6 +92,9 @@ struct IpcClientInner {
     /// Broadcast of operation events received on this connection.
     /// `subscribe_operations` taps it.
     operation_events: tokio::sync::broadcast::Sender<OperationEvent>,
+    /// Broadcast of connection events received on this connection.
+    /// `subscribe_connections` taps it.
+    connection_events: tokio::sync::broadcast::Sender<ConnectionEvent>,
     /// The local file this client is currently serving as a temporary provider
     /// (an in-flight upload/edit). The reader task answers the daemon's
     /// `ProviderChunkRequest`s by reading chunks from this path.
@@ -133,12 +136,14 @@ impl IpcBackend {
 
         let (events, _) = tokio::sync::broadcast::channel(1024);
         let (operation_events, _) = tokio::sync::broadcast::channel(1024);
+        let (connection_events, _) = tokio::sync::broadcast::channel(256);
         let inner = Arc::new(IpcClientInner {
             writer: Mutex::new(outgoing),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(0),
             events: events.clone(),
             operation_events: operation_events.clone(),
+            connection_events: connection_events.clone(),
             provider_path: Mutex::new(None),
         });
 
@@ -183,6 +188,10 @@ impl IpcBackend {
                     ControlFrame::OperationEvent(event) => {
                         // Best-effort: if no one is subscribed, drop.
                         let _ = reader_inner.operation_events.send(event);
+                    }
+                    ControlFrame::ConnectionEvent(event) => {
+                        // Best-effort: if no one is subscribed, drop.
+                        let _ = reader_inner.connection_events.send(event);
                     }
                     // The daemon is pulling a chunk of the file we're currently
                     // providing (an in-flight upload/edit). Read it from the
@@ -246,6 +255,13 @@ impl IpcBackend {
         // `operation_events` broadcast is fed for `subscribe_operations` taps.
         match client.call(ControlRequest::SubscribeOperations).await? {
             ControlResponse::OperationsSubscribed => {}
+            other => return Err(unexpected(other)),
+        }
+
+        // And to the connection stream, so the reader feeds `connection_events`
+        // for `subscribe_connections` taps.
+        match client.call(ControlRequest::SubscribeConnections).await? {
+            ControlResponse::ConnectionsSubscribed => {}
             other => return Err(unexpected(other)),
         }
 
@@ -724,5 +740,16 @@ impl Backend for IpcBackend {
 
     fn subscribe_operations(&self) -> OperationStream {
         OperationStream::Ipc(self.inner.operation_events.subscribe())
+    }
+
+    async fn connected_peers(&self) -> Result<Vec<ConnectedPeer>, ApiError> {
+        match self.call(ControlRequest::ConnectedPeers).await? {
+            ControlResponse::ConnectedPeers(peers) => Ok(peers),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    fn subscribe_connections(&self) -> ConnectionStream {
+        ConnectionStream::Ipc(self.inner.connection_events.subscribe())
     }
 }

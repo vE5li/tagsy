@@ -18,6 +18,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../features/search/connection_indicator.dart';
 import '../features/search/overflow_menu.dart';
 import '../features/search/result_rows.dart';
 import '../features/search/search_field.dart';
@@ -351,6 +352,7 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('Tagsy'),
         actions: [
           StorageStatsIndicator(session: widget.session),
+          ConnectionIndicator(session: widget.session),
           OverflowMenu(
             session: widget.session,
             publicKey: publicKey,

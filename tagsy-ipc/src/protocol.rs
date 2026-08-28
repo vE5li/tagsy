@@ -211,6 +211,13 @@ pub enum ControlRequest {
     /// starts emitting [`ControlFrame::OperationEvent`]s on this connection;
     /// the response is [`ControlResponse::OperationsSubscribed`].
     SubscribeOperations,
+    /// Snapshot every currently-connected peer. Answered with
+    /// [`ControlResponse::ConnectedPeers`].
+    ConnectedPeers,
+    /// Subscribe to the connection stream. After this is accepted the daemon
+    /// starts emitting [`ControlFrame::ConnectionEvent`]s on this connection;
+    /// the response is [`ControlResponse::ConnectionsSubscribed`].
+    SubscribeConnections,
 }
 
 /// The result of a [`ControlRequest`], returned as [`ControlFrame::Response`].
@@ -277,6 +284,12 @@ pub enum ControlResponse {
     /// The operation subscription was established; operation events will follow
     /// on this connection.
     OperationsSubscribed,
+    /// A snapshot of currently-connected peers (answer to
+    /// [`ControlRequest::ConnectedPeers`]).
+    ConnectedPeers(Vec<tagsy_api::ConnectedPeer>),
+    /// The connection subscription was established; connection events will
+    /// follow on this connection.
+    ConnectionsSubscribed,
     /// The request failed. Carries the single UI-facing error type.
     Error(ApiError),
 }
@@ -298,6 +311,9 @@ pub enum ControlFrame {
     /// Daemon -> client: an unsolicited sync-operation event on a connection
     /// that sent [`ControlRequest::SubscribeOperations`].
     OperationEvent(tagsy_api::OperationEvent),
+    /// Daemon -> client: an unsolicited peer-connection event on a connection
+    /// that sent [`ControlRequest::SubscribeConnections`].
+    ConnectionEvent(tagsy_api::ConnectionEvent),
 
     // Reverse-direction request/reply used while the client is serving an
     // upload/edit's bytes on demand. Correlated by `chunk_id` (per connection).

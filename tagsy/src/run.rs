@@ -11,7 +11,8 @@ use tagsy_ipc::IpcBackend;
 use crate::commands::Commands;
 use crate::common;
 use crate::output::{
-    OutputMode, emit_files, emit_operations, emit_scalar, emit_tags, emit_tags_and_files,
+    OutputMode, emit_connected_peers, emit_files, emit_operations, emit_scalar, emit_tags,
+    emit_tags_and_files,
     print_json, print_tag_rule_report,
 };
 
@@ -525,6 +526,14 @@ pub async fn run(
                 .map_err(|error| error.to_string())?;
 
             emit_operations(output_mode, &operations);
+        }
+        Commands::ConnectedPeers => {
+            let peers = backend
+                .connected_peers()
+                .await
+                .map_err(|error| error.to_string())?;
+
+            emit_connected_peers(output_mode, &peers);
         }
         Commands::PurgePreviews => {
             let purged = backend

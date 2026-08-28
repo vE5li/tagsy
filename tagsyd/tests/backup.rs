@@ -17,6 +17,7 @@ use tagsyd::configuration::{
     SyncType,
 };
 use tagsyd::frontend::api::ApiService;
+use tagsyd::connections::Connections;
 use tagsyd::operations::Operations;
 use tagsyd::paths::Paths;
 use tagsyd::peer::relay::ChunkRelay;
@@ -89,6 +90,7 @@ async fn backup_bundles_databases_sync_files_and_manifest() {
         pending_fetches,
         data_dir.join("fetch-temp"),
         Operations::new(),
+        Connections::new(),
         Vec::new(),
         Vec::new(),
         compiled,
@@ -220,6 +222,7 @@ async fn backup_without_backup_dir_errors() {
         pending_fetches,
         data_dir.join("fetch-temp"),
         Operations::new(),
+        Connections::new(),
         Vec::new(),
         Vec::new(),
         compiled,

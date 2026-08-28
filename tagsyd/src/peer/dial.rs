@@ -196,8 +196,9 @@ pub async fn connect_to_peer(
                     continue;
                 }
 
-                // Connected: the attempt operation is done. The session's own
-                // `PeerConnected` operation now represents the live link.
+                // Connected: the attempt operation is done. The live link is
+                // now tracked as connection *state* by `run_peer_session` (it
+                // registers with the connection registry), not as an operation.
                 connecting.complete();
 
                 run_peer_session(

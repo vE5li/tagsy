@@ -93,6 +93,10 @@ pub struct ApiService {
     /// `subscribe_operations` taps its event broadcast. Fed by the peer
     /// sessions, not by this API.
     operations: crate::operations::Operations,
+    /// Live peer-connection registry. Reads (`connected_peers`) snapshot it;
+    /// `subscribe_connections` taps its event broadcast. Fed by the peer
+    /// sessions (each registers itself for its lifetime), not by this API.
+    connections: crate::connections::Connections,
     /// External-editor rules the desktop UI consults for its "edit" action
     /// (see [`crate::configuration::EditorRule`]). Snapshot of the startup
     /// configuration; the daemon does not act on these but stores them so
@@ -142,6 +146,7 @@ impl ApiService {
         pending_fetches: ChunkRelay,
         fetch_temp_dir: PathBuf,
         operations: crate::operations::Operations,
+        connections: crate::connections::Connections,
         editor_rules: Vec<EditorRule>,
         home_sections: Vec<HomeSection>,
         tag_rules: Arc<CompiledTagRules>,
@@ -155,6 +160,7 @@ impl ApiService {
             pending_fetches,
             fetch_temp_dir,
             operations,
+            connections,
             editor_rules,
             home_sections,
             tag_rules,
@@ -214,5 +220,27 @@ impl ApiService {
     /// `RecvError::Lagged`, which the transport maps onto a re-snapshot prompt.
     pub fn subscribe_operations(&self) -> broadcast::Receiver<crate::operations::OperationEvent> {
         self.operations.subscribe()
+    }
+
+    /// Snapshot every currently-connected peer.
+    ///
+    /// The read counterpart of
+    /// [`subscribe_connections`](Self::subscribe_connections): the UI calls
+    /// this for its initial paint of the connection indicator (and after an IPC
+    /// `Resynced`), then applies live
+    /// [`ConnectionEvent`](crate::connections::ConnectionEvent)s on top.
+    pub fn connected_peers(&self) -> Vec<crate::connections::ConnectedPeer> {
+        self.connections.snapshot()
+    }
+
+    /// Subscribe to the live peer-connection stream.
+    ///
+    /// Yields every [`ConnectionEvent`](crate::connections::ConnectionEvent)
+    /// (a peer connected or disconnected) after this call. Best-effort, exactly
+    /// like [`subscribe`](Self::subscribe).
+    pub fn subscribe_connections(
+        &self,
+    ) -> broadcast::Receiver<crate::connections::ConnectionEvent> {
+        self.connections.subscribe()
     }
 }

@@ -7,7 +7,7 @@ use comfy_table::{Cell, ContentArrangement, Table};
 use owo_colors::OwoColorize;
 use serde::Serialize;
 use serde_json::json;
-use tagsy_api::{Operation, OperationKind, OperationStatus, Tag};
+use tagsy_api::{ConnectedPeer, Direction, Operation, OperationKind, OperationStatus, Tag};
 use tagsy_core::{FileId, FileInfo, TagId};
 
 /// How command results are rendered to stdout.
@@ -300,10 +300,6 @@ pub fn emit_error(output_mode: OutputMode, message: &str) {
 fn operation_kind_label(kind: &OperationKind) -> String {
     match kind {
         OperationKind::ConnectingToPeer { url, .. } => format!("Connecting ({url})"),
-        OperationKind::PeerConnected { direction, .. } => match direction {
-            tagsy_api::Direction::Outbound => "Connected (outbound)".to_owned(),
-            tagsy_api::Direction::Inbound => "Connected (inbound)".to_owned(),
-        },
         OperationKind::ReceivingFile { .. } => "Receiving".to_owned(),
         OperationKind::Fetching { .. } => "Fetching".to_owned(),
         OperationKind::ReconcilingManifest { .. } => "Reconciling manifest".to_owned(),
@@ -316,7 +312,6 @@ fn operation_kind_label(kind: &OperationKind) -> String {
 fn operation_peer(kind: &OperationKind) -> Option<&str> {
     match kind {
         OperationKind::ConnectingToPeer { peer_name, .. }
-        | OperationKind::PeerConnected { peer_name, .. }
         | OperationKind::ReceivingFile { peer_name, .. }
         | OperationKind::ReconcilingManifest { peer_name }
         | OperationKind::ReconcilingTags { peer_name } => Some(peer_name),
@@ -331,7 +326,6 @@ fn operation_file(kind: &OperationKind) -> Option<&str> {
         | OperationKind::Fetching { file_id }
         | OperationKind::PlacingFile { file_id } => Some(file_id),
         OperationKind::ConnectingToPeer { .. }
-        | OperationKind::PeerConnected { .. }
         | OperationKind::ReconcilingManifest { .. }
         | OperationKind::ReconcilingTags { .. } => None,
     }
@@ -393,6 +387,46 @@ pub fn emit_operations(output_mode: OutputMode, operations: &[Operation]) {
     }
 }
 
+/// Build the connected-peers table.
+fn connected_peers_table(peers: &[ConnectedPeer]) -> Table {
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["Peer", "Direction", "Public key"]);
+
+    for peer in peers {
+        let direction = match peer.direction {
+            Direction::Outbound => "outbound",
+            Direction::Inbound => "inbound",
+        };
+        table.add_row(vec![
+            Cell::new(&peer.peer_name),
+            Cell::new(direction),
+            Cell::new(&peer.public_key),
+        ]);
+    }
+
+    table
+}
+
+/// Emit the currently-connected peers in the selected [`OutputMode`].
+///
+/// A connection is *state*, not an operation, so it has its own command and
+/// output rather than appearing among the operations.
+pub fn emit_connected_peers(output_mode: OutputMode, peers: &[ConnectedPeer]) {
+    match output_mode {
+        OutputMode::Human => {
+            if peers.is_empty() {
+                println!("(no connected peers)");
+            } else {
+                println!("{}", connected_peers_table(peers));
+            }
+        }
+        OutputMode::Json => print_json(&peers),
+    }
+}
+
 /// Render tag-rule diagnostics for `retag --check`.
 ///
 /// Both problem classes are reported as warnings rather than errors: neither
@@ -426,7 +460,7 @@ pub fn print_tag_rule_report(report: &tagsy_api::TagRuleReport) {
 
 #[cfg(test)]
 mod tests {
-    use tagsy_api::{Direction, OperationKind, OperationStatus, Progress};
+    use tagsy_api::{OperationKind, OperationStatus, Progress};
 
     use super::*;
 
@@ -523,22 +557,6 @@ mod tests {
                 url: "ws://b".to_owned(),
             }),
             "Connecting (ws://b)"
-        );
-        assert_eq!(
-            operation_kind_label(&OperationKind::PeerConnected {
-                peer_name: "B".to_owned(),
-                public_key: "k".to_owned(),
-                direction: Direction::Outbound,
-            }),
-            "Connected (outbound)"
-        );
-        assert_eq!(
-            operation_kind_label(&OperationKind::PeerConnected {
-                peer_name: "B".to_owned(),
-                public_key: "k".to_owned(),
-                direction: Direction::Inbound,
-            }),
-            "Connected (inbound)"
         );
         assert_eq!(
             operation_kind_label(&OperationKind::ReceivingFile {
