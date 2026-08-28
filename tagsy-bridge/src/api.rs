@@ -24,8 +24,7 @@
 // `frb_generated.rs`. A plain private `use` would not be visible through that
 // glob and the generated code fails to compile.
 pub use tagsy_core::{FileInfo, Preview};
-pub use tagsyd::configuration::EditorRule;
-pub use tagsyd::configuration::HomeSection;
+pub use tagsyd::configuration::{EditorRule, HomeSection};
 pub use tagsyd::connections::{ConnectedPeer, ConnectionEvent};
 pub use tagsyd::frontend::api::{ApiError, ApiEvent, StorageStats};
 pub use tagsyd::operations::{

@@ -12,13 +12,23 @@
 //! 1. An optional `!` (negation) — must be a standalone whitespace-delimited
 //!    token; `!foo` is **not** a negation, it's a literal token whose text
 //!    starts with `!`.
-//! 2. An optional *kind prefix* — one of `/t`, `/l`, `/p`, again standalone:
-//!    - `/t` — tag token: match tags whose name/id resolves from the payload.
+//! 2. An optional *kind prefix* — one of `/t`, `/T`, `/i`, `/h`, `/n`, `/l`,
+//!    again standalone:
+//!    - `/t` — tag token: match tags whose name **or** id resolves from the
+//!      payload.
+//!    - `/T` — tag-id token: match tags by id prefix **only** (no name
+//!      matching). The uppercase counterpart of `/t`, for when a payload that
+//!      also happens to be a tag name should nonetheless resolve by id.
+//!    - `/i` — file-id token: match files by id prefix only.
+//!    - `/h` — content-hash token: match files whose latest version's content
+//!      hash starts with the payload.
+//!    - `/n` — name token: substring match on the file's logical path or the
+//!      tag's name.
 //!    - `/l` — logical-path token: substring match on the file's logical path.
-//!    - `/p` — physical-path token (reserved; not wired up yet).
 //!
-//!    Unknown `/x` tokens are **not** prefixes: they become literal tokens
-//!    whose payload starts with `/`. This keeps `/home/lucas` searchable.
+//!    Prefixes are case-sensitive (`/t` and `/T` differ). Unknown `/x` tokens
+//!    are **not** prefixes: they become literal tokens whose payload starts
+//!    with `/`. This keeps `/home/lucas` searchable.
 //! 3. A *payload*, one of:
 //!    - A double-quoted string `"..."` — a literal substring, capturing
 //!      whitespace verbatim. Supports backslash escapes `\"` and `\\`; any
@@ -29,7 +39,9 @@
 //!    - Or a bare run of non-whitespace characters — a literal substring.
 //!
 //! A token without a kind prefix is [`TokenKind::Any`] — the resolver will
-//! match its payload against *both* names and tags (union).
+//! match its payload against names, tags, *and* ids (union): its logical path
+//! or a tag name, a tag resolved from it, or a file/tag whose id starts with
+//! it (a pasted short id).
 //!
 //! # Why the delimiter selects the matcher
 //!
@@ -70,16 +82,20 @@
 /// What kind of filter a token expresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
-    /// Match names *and* tags (union).
+    /// Match names, tags, *and* ids (union across every axis).
     Any,
-    /// The payload names a tag.
+    /// The payload names a tag (matched by name **or** id prefix).
     Tag,
+    /// The payload is a tag id prefix — id only, no name matching.
+    TagId,
+    /// The payload is a file id prefix — id only.
+    FileId,
+    /// The payload is a content-hash prefix — files by content hash.
+    ContentHash,
     /// The payload is a logical-path substring or tag name.
     Name,
     /// The payload is a logical-path substring.
     Logical,
-    /// The payload is a physical-path substring.
-    Physical,
 }
 
 /// One parsed token of the query.
@@ -148,15 +164,17 @@ fn lex_one_token(cursor: &str) -> (Option<Token>, &str) {
                 }
                 negated = true;
             }
-            "/t" | "/n" | "/l" | "/p" => {
+            "/t" | "/T" | "/i" | "/h" | "/n" | "/l" => {
                 if kind.is_some() {
                     return (None, &rest[word_end..]);
                 }
                 kind = Some(match word {
                     "/t" => TokenKind::Tag,
+                    "/T" => TokenKind::TagId,
+                    "/i" => TokenKind::FileId,
+                    "/h" => TokenKind::ContentHash,
                     "/n" => TokenKind::Name,
                     "/l" => TokenKind::Logical,
-                    "/p" => TokenKind::Physical,
                     _ => unreachable!(),
                 });
             }
@@ -262,6 +280,33 @@ mod tests {
     fn tag(text: &str) -> Token {
         Token {
             kind: TokenKind::Tag,
+            text: text.to_owned(),
+            negated: false,
+            regex: false,
+        }
+    }
+
+    fn tag_id(text: &str) -> Token {
+        Token {
+            kind: TokenKind::TagId,
+            text: text.to_owned(),
+            negated: false,
+            regex: false,
+        }
+    }
+
+    fn file_id(text: &str) -> Token {
+        Token {
+            kind: TokenKind::FileId,
+            text: text.to_owned(),
+            negated: false,
+            regex: false,
+        }
+    }
+
+    fn content_hash(text: &str) -> Token {
+        Token {
+            kind: TokenKind::ContentHash,
             text: text.to_owned(),
             negated: false,
             regex: false,
@@ -398,6 +443,32 @@ mod tests {
     fn kind_prefixes_apply_to_the_next_chunk() {
         assert_eq!(lex_query("/t foo"), vec![tag("foo")]);
         assert_eq!(lex_query("/l foo"), vec![logical("foo")]);
+    }
+
+    /// The id-only prefixes `/T` (tag) and `/i` (file) lex to their own kinds,
+    /// distinct from the name-or-id `/t`.
+    #[test]
+    fn id_only_kind_prefixes_lex_distinctly() {
+        assert_eq!(lex_query("/T abc123"), vec![tag_id("abc123")]);
+        assert_eq!(lex_query("/i abc123"), vec![file_id("abc123")]);
+        assert_eq!(lex_query("! /i abc123"), vec![negate(file_id("abc123"))]);
+    }
+
+    /// The content-hash prefix `/h` lexes to its own kind.
+    #[test]
+    fn content_hash_prefix_lexes_distinctly() {
+        assert_eq!(lex_query("/h deadbeef"), vec![content_hash("deadbeef")]);
+        assert_eq!(lex_query("! /h deadbeef"), vec![negate(content_hash(
+            "deadbeef"
+        ))]);
+    }
+
+    /// Prefixes are case-sensitive: `/T` is the tag-id prefix while `/t` is the
+    /// name-or-id tag prefix; they must not be conflated.
+    #[test]
+    fn tag_prefix_is_case_sensitive() {
+        assert_eq!(lex_query("/t foo"), vec![tag("foo")]);
+        assert_eq!(lex_query("/T foo"), vec![tag_id("foo")]);
     }
 
     #[test]

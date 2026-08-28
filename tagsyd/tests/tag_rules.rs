@@ -22,8 +22,8 @@ use tagsyd::clock;
 use tagsyd::configuration::{
     CompiledTagRules, Configuration, PreviewGenerationPolicy, RuntimeConfiguration, TagRule,
 };
-use tagsyd::frontend::api::ApiService;
 use tagsyd::connections::Connections;
+use tagsyd::frontend::api::ApiService;
 use tagsyd::operations::Operations;
 use tagsyd::peer::relay::{ChunkRelay, PreviewRelay};
 use tagsyd::store::CatalogStore;

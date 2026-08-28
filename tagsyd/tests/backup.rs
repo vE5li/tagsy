@@ -16,8 +16,8 @@ use tagsyd::configuration::{
     CompiledTagRules, Configuration, PreviewGenerationPolicy, RuntimeConfiguration, SyncDirectory,
     SyncType,
 };
-use tagsyd::frontend::api::ApiService;
 use tagsyd::connections::Connections;
+use tagsyd::frontend::api::ApiService;
 use tagsyd::operations::Operations;
 use tagsyd::paths::Paths;
 use tagsyd::peer::relay::ChunkRelay;

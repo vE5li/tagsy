@@ -64,10 +64,14 @@ pub enum Commands {
     /// The query is a whitespace-separated list of chunks combined
     /// conjunctively. Each chunk may be prefixed:
     ///
-    /// - `/t foo` — require the tag(s) matching `foo`
+    /// - `/t foo` — require the tag(s) matching `foo` by name or id prefix
+    /// - `/T foo` — require the tag(s) matching `foo` by id prefix only
+    /// - `/i foo` — require the file(s) whose id starts with `foo`
+    /// - `/h foo` — require the file(s) whose content hash starts with `foo`
     /// - `/l foo` — logical-path substring
     /// - `!` — invert the following chunk (e.g. `! /t foo`)
-    /// - no prefix — match `foo` as *either* a logical-path substring OR a tag
+    /// - no prefix — match `foo` as a logical-path substring, a tag, OR the
+    ///   file/tag's own id prefix
     ///
     /// Payloads can be written three ways: bare (`foo`), double-quoted to
     /// include whitespace (`"my file"`), or `%`-delimited to make the payload a

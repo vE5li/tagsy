@@ -31,8 +31,11 @@ use super::types::DatabaseError;
 /// The `Any`/`NotAny` variants correspond to a *prefix-less* chunk: the user
 /// wrote `foo`, and it should match anything that could reasonably relate to
 /// `foo` — its logical path contains `foo`, *or* it carries/subtags a tag
-/// resolved from `foo`. These variants carry both the raw substring and the
-/// resolved tag set so both sides of the disjunction can be evaluated.
+/// resolved from `foo`, *or* its own id starts with `foo` (a pasted short id).
+/// These variants carry the raw substring, the resolved tag set, and the
+/// resolved file-id set so every side of the disjunction can be evaluated. The
+/// file-id set is only meaningful on the file side (a tag is never matched by a
+/// file's id).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryTerm {
     /// Must carry *at least one* tag in this set.
@@ -48,14 +51,31 @@ pub enum QueryTerm {
     LogicalMatches(TextPattern),
     /// The logical path of the file must *not* match the pattern.
     NotLogicalMatches(TextPattern),
-    /// Matches on *either* text OR tag (union across both axes). The
+    /// The file's id must be in this set (a resolved id-prefix). Backs the
+    /// `/i` prefix — files by id only. Purely a file-side filter: on the tag
+    /// side it matches no tag (an id-prefix set built from `files_v2` says
+    /// nothing about a tag), so `tag_ids_for_query` treats it like
+    /// [`QueryTerm::LogicalMatches`]. An empty set matches no file.
+    FileIdMatches(Vec<FileId>),
+    /// The file's id must *not* be in this set. Negation of
+    /// [`QueryTerm::FileIdMatches`]; an empty set excludes nothing.
+    NotFileIdMatches(Vec<FileId>),
+    /// Matches on *any* of text, tag, or file id (union across all axes). The
     /// [`TextPattern`] is the text side; the [`Vec<TagId>`] is the resolved tag
-    /// set for the same token. An empty tag set here does **not** mean "matches
-    /// nothing" — the text side still stands.
-    AnyMatch(TextPattern, Vec<TagId>),
-    /// Negation of [`QueryTerm::AnyMatch`]: must match *neither* the text nor
-    /// any tag in the set.
-    NotAnyMatch(TextPattern, Vec<TagId>),
+    /// set for the same token; the [`Vec<FileId>`] is the resolved file-id set
+    /// (empty on the tag side, since a file id never identifies a tag). An
+    /// empty tag or id set here does **not** mean "matches nothing" — the text
+    /// side still stands.
+    ///
+    /// The tag set is read differently on each side: on the file side it means
+    /// "files carrying any of these tags" (like `HasTag`); on the tag side it
+    /// means "any of these tags *or* their subtags" — the resolved tags
+    /// themselves are included so a bare id-prefix token surfaces the tag it
+    /// names, not merely that tag's children.
+    AnyMatch(TextPattern, Vec<TagId>, Vec<FileId>),
+    /// Negation of [`QueryTerm::AnyMatch`]: must match *none* of the text, any
+    /// tag in the set, or any file id in the set.
+    NotAnyMatch(TextPattern, Vec<TagId>, Vec<FileId>),
 }
 
 /// How the text half of a [`QueryTerm`] should be interpreted.
@@ -153,9 +173,11 @@ impl CatalogStore {
     /// - [`QueryTerm::LogicalMatches`] / [`QueryTerm::NotLogicalMatches`]: its
     ///   logical path matches / does not match the [`TextPattern`],
     ///   case-insensitively either way.
+    /// - [`QueryTerm::FileIdMatches`] / [`QueryTerm::NotFileIdMatches`]: its id
+    ///   is / is not in the resolved id-prefix set.
     /// - [`QueryTerm::AnyMatch`] / [`QueryTerm::NotAnyMatch`]: its logical path
-    ///   matches the pattern **or** it carries any tag in the set — the
-    ///   "prefix-less" chunk semantics.
+    ///   matches the pattern **or** it carries any tag in the set **or** its id
+    ///   is in the resolved id set — the "prefix-less" chunk semantics.
     ///
     /// An empty term list matches every file; an empty tag set inside a term
     /// matches no tag (so `HasTag([])` matches nothing and `NotTag([])`
@@ -228,12 +250,30 @@ impl CatalogStore {
             }
         }
 
-        // Text-bearing terms (`LogicalContains`, `NotLogicalContains`,
+        // Membership-only terms (`FileIdMatches` / `NotFileIdMatches`) filter
+        // by the resolved id set directly, no path lookup required. Apply them
+        // before the text pass so a pure `/i` query need not build the path map.
+        for term in terms {
+            match term {
+                QueryTerm::FileIdMatches(file_ids) => {
+                    let allowed: BTreeSet<FileId> = file_ids.iter().copied().collect();
+                    candidates.retain(|file_id| allowed.contains(file_id));
+                }
+                QueryTerm::NotFileIdMatches(file_ids) => {
+                    let excluded: BTreeSet<FileId> = file_ids.iter().copied().collect();
+                    candidates.retain(|file_id| !excluded.contains(file_id));
+                }
+                _ => {}
+            }
+        }
+
+        // Text-bearing terms (`NameMatches`, `LogicalMatches`, their negations,
         // `AnyMatch`, `NotAnyMatch`) need each candidate's logical path *and*,
-        // for the `Any` variants, the union of files-carrying-any-of-the-set.
-        // Build both lookups once, then apply every text term as one retain
-        // pass — cheaper than rebuilding per term and keeps the semantics
-        // obvious.
+        // for the `Any` variants, the union of files-carrying-any-of-the-tag-set
+        // together with the resolved file-id set (both sides of the id/tag/text
+        // disjunction). Build the lookups once, then apply every text term as
+        // one retain pass — cheaper than rebuilding per term and keeps the
+        // semantics obvious.
         let has_text_term = terms.iter().any(|term| {
             matches!(
                 term,
@@ -241,8 +281,8 @@ impl CatalogStore {
                     | QueryTerm::NotNameMatches(_)
                     | QueryTerm::LogicalMatches(_)
                     | QueryTerm::NotLogicalMatches(_)
-                    | QueryTerm::AnyMatch(_, _)
-                    | QueryTerm::NotAnyMatch(_, _),
+                    | QueryTerm::AnyMatch(..)
+                    | QueryTerm::NotAnyMatch(..),
             )
         });
 
@@ -274,11 +314,17 @@ impl CatalogStore {
                     QueryTerm::NotNameMatches(pattern) | QueryTerm::NotLogicalMatches(pattern) => {
                         patterns.push((pattern.compile(), true));
                     }
-                    QueryTerm::AnyMatch(pattern, tag_ids) => {
-                        any_tag_sets.push((pattern.compile(), files_for_any_tag(tag_ids)?, false));
+                    QueryTerm::AnyMatch(pattern, tag_ids, file_ids) => {
+                        // The `Any` membership side is the union of files
+                        // carrying any matched tag and the resolved file-id set.
+                        let mut member_files = files_for_any_tag(tag_ids)?;
+                        member_files.extend(file_ids.iter().copied());
+                        any_tag_sets.push((pattern.compile(), member_files, false));
                     }
-                    QueryTerm::NotAnyMatch(pattern, tag_ids) => {
-                        any_tag_sets.push((pattern.compile(), files_for_any_tag(tag_ids)?, true));
+                    QueryTerm::NotAnyMatch(pattern, tag_ids, file_ids) => {
+                        let mut member_files = files_for_any_tag(tag_ids)?;
+                        member_files.extend(file_ids.iter().copied());
+                        any_tag_sets.push((pattern.compile(), member_files, true));
                     }
                     _ => continue,
                 }
@@ -293,8 +339,8 @@ impl CatalogStore {
                         return false;
                     }
                 }
-                for (pattern, tagged_files, negated) in &any_tag_sets {
-                    let hit = pattern.is_match(path, lowercased) || tagged_files.contains(file_id);
+                for (pattern, member_files, negated) in &any_tag_sets {
+                    let hit = pattern.is_match(path, lowercased) || member_files.contains(file_id);
                     if hit == *negated {
                         return false;
                     }
@@ -317,11 +363,18 @@ impl CatalogStore {
     /// - [`QueryTerm::NameMatches`] / [`QueryTerm::NotNameMatches`]: the tag's
     ///   name matches / does not match the [`TextPattern`], compared
     ///   case-insensitively.
-    /// - [`QueryTerm::LogicalMatches`] / [`QueryTerm::NotLogicalMatches`]:
-    ///   doesn't match.
+    /// - [`QueryTerm::LogicalMatches`] / [`QueryTerm::NotLogicalMatches`] and
+    ///   [`QueryTerm::FileIdMatches`] / [`QueryTerm::NotFileIdMatches`]: these
+    ///   are file-only axes (a tag has neither a logical path nor a file id),
+    ///   so any of them empties the tag result.
     /// - [`QueryTerm::AnyMatch`] / [`QueryTerm::NotAnyMatch`]: the tag's name
-    ///   matches the pattern **or** the tag is a subtag of any tag in the set —
-    ///   the tag analogue of the file-side `Any` semantics.
+    ///   matches the pattern **or** the tag *is* one of the tags in the set
+    ///   **or** it is a subtag of one — the tag analogue of the file-side `Any`
+    ///   semantics. Including the resolved tags *themselves* (not just their
+    ///   subtags) is what lets a bare id-prefix token surface the very tag it
+    ///   names; `HasTag` (`/t` / `/T`) deliberately stays subtags-only. The
+    ///   `Any` file-id set is ignored here, since a file id never identifies a
+    ///   tag.
     ///
     /// An empty term list matches every tag; an empty tag set inside a term
     /// matches no tag. For [`QueryTerm::AnyMatch`] the text side still
@@ -383,7 +436,14 @@ impl CatalogStore {
 
         for term in terms {
             match term {
-                QueryTerm::LogicalMatches(..) | QueryTerm::NotLogicalMatches(..) => {
+                // Logical-path and file-id terms are file-only axes: a tag has
+                // neither a logical path nor a file id, so any such term (in
+                // either polarity) makes the tag result empty — the same rule
+                // as the logical case, extended to `/i`.
+                QueryTerm::LogicalMatches(..)
+                | QueryTerm::NotLogicalMatches(..)
+                | QueryTerm::FileIdMatches(..)
+                | QueryTerm::NotFileIdMatches(..) => {
                     candidates.clear();
                     return Ok(candidates);
                 }
@@ -400,8 +460,8 @@ impl CatalogStore {
                 term,
                 QueryTerm::NameMatches(_)
                     | QueryTerm::NotNameMatches(_)
-                    | QueryTerm::AnyMatch(_, _)
-                    | QueryTerm::NotAnyMatch(_, _),
+                    | QueryTerm::AnyMatch(..)
+                    | QueryTerm::NotAnyMatch(..),
             )
         });
 
@@ -425,11 +485,28 @@ impl CatalogStore {
                     QueryTerm::NotNameMatches(pattern) => {
                         patterns.push((pattern.compile(), true));
                     }
-                    QueryTerm::AnyMatch(pattern, tag_ids) => {
-                        any_tag_sets.push((pattern.compile(), subtags_of_any(tag_ids)?, false));
+                    // The file-id set is ignored on the tag side: a file id
+                    // never identifies a tag, so only the name and tag-set
+                    // halves of an `Any` token can match here.
+                    //
+                    // Membership on the tag side is the resolved tags
+                    // *themselves* together with their subtags — not subtags
+                    // alone. A bare token can resolve a tag by *id* (e.g. a
+                    // pasted short id), and the user's intent is to find that
+                    // tag, which its name pattern won't match; folding the
+                    // resolved ids in makes the tag surface itself. (For `/t` /
+                    // `/T`, which mean "things carrying this tag", the
+                    // subtags-only `HasTag` semantics are deliberately left
+                    // unchanged.)
+                    QueryTerm::AnyMatch(pattern, tag_ids, _file_ids) => {
+                        let mut members = subtags_of_any(tag_ids)?;
+                        members.extend(tag_ids.iter().copied());
+                        any_tag_sets.push((pattern.compile(), members, false));
                     }
-                    QueryTerm::NotAnyMatch(pattern, tag_ids) => {
-                        any_tag_sets.push((pattern.compile(), subtags_of_any(tag_ids)?, true));
+                    QueryTerm::NotAnyMatch(pattern, tag_ids, _file_ids) => {
+                        let mut members = subtags_of_any(tag_ids)?;
+                        members.extend(tag_ids.iter().copied());
+                        any_tag_sets.push((pattern.compile(), members, true));
                     }
                     _ => continue,
                 }
@@ -768,5 +845,162 @@ mod tests {
             .unwrap();
         assert!(!live_info.deleted);
         assert!(dead_info.deleted);
+    }
+
+    /// A `FileIdMatches` term (the `/i` prefix) keeps only files whose id is in
+    /// the resolved set.
+    #[test]
+    fn file_ids_for_query_file_id_term_filters_by_id() {
+        use crate::store::fixtures::file_id_from_hex;
+        let mut database = memory_db();
+        let wanted = file_id_from_hex("abcd000000000000000000000000000a");
+        let other = file_id_from_hex("ffff000000000000000000000000000f");
+        for (id, path) in [(wanted, "a"), (other, "b")] {
+            database.add_file(id, &LogicalPath::new(path), 0).unwrap();
+            database.record_version(id, "hash", "local", 1).unwrap();
+        }
+
+        let terms = vec![QueryTerm::FileIdMatches(vec![wanted])];
+        assert_eq!(matching_files(&database, &terms), BTreeSet::from([wanted]));
+
+        // An empty resolved set matches no file.
+        let terms = vec![QueryTerm::FileIdMatches(vec![])];
+        assert!(matching_files(&database, &terms).is_empty());
+    }
+
+    /// `NotFileIdMatches` excludes the resolved ids and keeps the rest.
+    #[test]
+    fn file_ids_for_query_negated_file_id_term_excludes_id() {
+        use crate::store::fixtures::file_id_from_hex;
+        let mut database = memory_db();
+        let excluded = file_id_from_hex("abcd000000000000000000000000000a");
+        let kept = file_id_from_hex("ffff000000000000000000000000000f");
+        for (id, path) in [(excluded, "a"), (kept, "b")] {
+            database.add_file(id, &LogicalPath::new(path), 0).unwrap();
+            database.record_version(id, "hash", "local", 1).unwrap();
+        }
+
+        let terms = vec![QueryTerm::NotFileIdMatches(vec![excluded])];
+        assert_eq!(matching_files(&database, &terms), BTreeSet::from([kept]));
+    }
+
+    /// The bare-token `AnyMatch` unions its file-id set into the membership
+    /// side: a file whose *path* doesn't match the substring but whose *id* is
+    /// in the resolved set still matches.
+    #[test]
+    fn file_ids_for_query_any_match_unions_file_id_set() {
+        use crate::store::fixtures::file_id_from_hex;
+        let mut database = memory_db();
+        // `by_id`'s path shares nothing with the search text; `by_path` does.
+        let by_id = file_id_from_hex("abcd000000000000000000000000000a");
+        let by_path = file_id_from_hex("ffff000000000000000000000000000f");
+        database
+            .add_file(by_id, &LogicalPath::new("unrelated"), 0)
+            .unwrap();
+        database.record_version(by_id, "hash", "local", 1).unwrap();
+        database
+            .add_file(by_path, &LogicalPath::new("abcd-name"), 0)
+            .unwrap();
+        database
+            .record_version(by_path, "hash", "local", 1)
+            .unwrap();
+
+        // Text "abcd" matches `by_path`'s name; the file-id set pulls in
+        // `by_id`. Both should match under the union.
+        let terms = vec![QueryTerm::AnyMatch(
+            TextPattern::Substring("abcd".to_owned()),
+            vec![],
+            vec![by_id],
+        )];
+        assert_eq!(
+            matching_files(&database, &terms),
+            BTreeSet::from([by_id, by_path])
+        );
+    }
+
+    /// The `Any` file-id set is ignored on the tag side: a token that resolves
+    /// a file id but whose text matches no tag name yields no tags.
+    #[test]
+    fn tag_ids_for_query_any_match_ignores_file_id_set() {
+        use crate::store::fixtures::file_id_from_hex;
+        let database = memory_db();
+        let tag_id = TagId::new();
+        database.add_tag(tag_id, "photos", "red", 1).unwrap();
+
+        let some_file = file_id_from_hex("abcd000000000000000000000000000a");
+        let terms = vec![QueryTerm::AnyMatch(
+            TextPattern::Substring("no-such-name".to_owned()),
+            vec![],
+            vec![some_file],
+        )];
+        let matched: BTreeSet<TagId> = database
+            .tag_ids_for_query(&terms, SubtagRule::Exclude, DeletedRule::Exclude)
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert!(matched.is_empty());
+    }
+
+    /// A file-id term empties the tag result, exactly like a logical-path term:
+    /// tags have no file id, so `/i` is a file-only axis.
+    #[test]
+    fn tag_ids_for_query_file_id_term_yields_no_tags() {
+        use crate::store::fixtures::file_id_from_hex;
+        let database = memory_db();
+        let tag_id = TagId::new();
+        database.add_tag(tag_id, "photos", "red", 1).unwrap();
+
+        let some_file = file_id_from_hex("abcd000000000000000000000000000a");
+        for term in [
+            QueryTerm::FileIdMatches(vec![some_file]),
+            QueryTerm::NotFileIdMatches(vec![some_file]),
+        ] {
+            let matched: BTreeSet<TagId> = database
+                .tag_ids_for_query(&[term], SubtagRule::Exclude, DeletedRule::Exclude)
+                .unwrap()
+                .into_iter()
+                .collect();
+            assert!(matched.is_empty());
+        }
+    }
+
+    /// A bare token that resolved a tag by id must surface the *tag itself* on
+    /// the tag side — not just its subtags. The bare token's pattern is the hex
+    /// id (which won't match the tag's name), so the tag only appears because
+    /// the resolved id is folded into the `Any` membership set.
+    #[test]
+    fn tag_ids_for_query_any_match_surfaces_the_resolved_tag_itself() {
+        use crate::store::fixtures::tag_id_from_hex;
+        let database = memory_db();
+        let parent = tag_id_from_hex("abcd000000000000000000000000000a");
+        let child = TagId::new();
+        let unrelated = TagId::new();
+        database.add_tag(parent, "work", "red", 1).unwrap();
+        database.add_tag(child, "urgent", "red", 1).unwrap();
+        database.add_tag(unrelated, "leisure", "red", 1).unwrap();
+        // `urgent` is a subtag of `work`.
+        database.tag_tag(parent, child, 1).unwrap();
+
+        // A bare token whose payload is `parent`'s id prefix. Its text side is
+        // the hex string (matches no name); the tag set is the resolved parent.
+        let terms = vec![QueryTerm::AnyMatch(
+            TextPattern::Substring("abcd".to_owned()),
+            vec![parent],
+            vec![],
+        )];
+        let matched: BTreeSet<TagId> = database
+            .tag_ids_for_query(&terms, SubtagRule::Include, DeletedRule::Exclude)
+            .unwrap()
+            .into_iter()
+            .collect();
+
+        // The resolved tag itself *and* its subtag are returned; the unrelated
+        // tag is not.
+        assert!(
+            matched.contains(&parent),
+            "the tag named by the id must appear"
+        );
+        assert!(matched.contains(&child), "its subtags still appear too");
+        assert!(!matched.contains(&unrelated));
     }
 }

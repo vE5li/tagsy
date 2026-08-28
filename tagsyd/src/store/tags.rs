@@ -327,20 +327,39 @@ impl CatalogStore {
         }
 
         // Id prefix (only when the text is a valid hex id prefix at all).
-        if let Some(prefix) = normalize_id_prefix(text) {
-            let id_pattern = format!("{prefix}%");
-            let id_sql = format!(
-                "SELECT id FROM tags_v1 WHERE id LIKE ?1{}",
-                and_deleted_clause(deleted_rule),
-            );
-            let mut statement = self.connection.prepare(&id_sql)?;
-            let id_matches = statement.query_map([&id_pattern], |row| row.get::<_, TagId>(0))?;
-            for id in id_matches {
-                ids.insert(id?);
-            }
-        }
+        ids.extend(self.tag_ids_matching_id_prefix(text, deleted_rule)?);
 
         Ok(ids.into_iter().collect())
+    }
+
+    /// Find every tag id whose id starts with `text` interpreted as a hex id
+    /// prefix (hyphens stripped, case-insensitive). Returns an empty vector if
+    /// `text` is not a valid hex id prefix at all — the same rule
+    /// [`Self::tag_ids_matching_pattern`] applies to its id half.
+    ///
+    /// This is the id-only counterpart backing the `/T` query prefix, where
+    /// [`Self::tag_ids_matching_pattern`] resolves *both* name and id. Regexes
+    /// are deliberately not an id surface (see the note in
+    /// `tag_ids_matching_pattern`), so callers pass the raw payload text, not a
+    /// [`TextPattern`].
+    pub fn tag_ids_matching_id_prefix(
+        &self,
+        text: &str,
+        deleted_rule: DeletedRule,
+    ) -> Result<Vec<TagId>, DatabaseError> {
+        let Some(prefix) = normalize_id_prefix(text) else {
+            return Ok(Vec::new());
+        };
+        let id_pattern = format!("{prefix}%");
+        let id_sql = format!(
+            "SELECT id FROM tags_v1 WHERE id LIKE ?1{}",
+            and_deleted_clause(deleted_rule),
+        );
+        let mut statement = self.connection.prepare(&id_sql)?;
+        let id_matches = statement.query_map([&id_pattern], |row| row.get::<_, TagId>(0))?;
+        id_matches
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// Get the id of a tag by the name. Excludes soft-deleted (tombstoned)
@@ -363,7 +382,34 @@ impl CatalogStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::fixtures::memory_db;
+    use crate::store::fixtures::{memory_db, tag_id_from_hex};
+
+    /// `tag_ids_matching_id_prefix` resolves by id only — a payload that is a
+    /// tag *name* but not a hex prefix returns nothing, distinguishing it from
+    /// `tag_ids_matching_pattern` which also matches names.
+    #[test]
+    fn tag_ids_matching_id_prefix_is_id_only() {
+        let database = memory_db();
+        let tag_id = tag_id_from_hex("abcd000000000000000000000000000a");
+        database.add_tag(tag_id, "abcd", "red", 1).unwrap();
+
+        // The hex prefix resolves the tag.
+        assert_eq!(
+            database
+                .tag_ids_matching_id_prefix("abcd", DeletedRule::Exclude)
+                .unwrap(),
+            vec![tag_id]
+        );
+
+        // A name-only payload (non-hex) resolves nothing on the id-only path,
+        // even though the tag is literally named that.
+        assert!(
+            database
+                .tag_ids_matching_id_prefix("zzzz", DeletedRule::Exclude)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn add_tag_newer_modified_at_wins_older_is_noop() {

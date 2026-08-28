@@ -10,8 +10,8 @@ use tagsy_core::{FileId, FileInfo, LogicalPath};
 
 use super::CatalogStore;
 use super::previews::delete_previews_for;
-use super::short_id::common_prefix_length;
-use super::types::{DatabaseError, DeletionState};
+use super::short_id::{common_prefix_length, normalize_id_prefix};
+use super::types::{DatabaseError, DeletionState, and_deleted_clause};
 use super::versions::VersionHistory;
 
 /// One row of [`CatalogStore::manifest_entries`]: a file id, its full
@@ -606,13 +606,83 @@ impl CatalogStore {
             .query_row(&sql, params, |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok((total as u64, count as u64))
     }
+
+    /// Find every file id whose id starts with `text` interpreted as a hex id
+    /// prefix (hyphens stripped, case-insensitive). Returns an empty vector if
+    /// `text` is not a valid hex id prefix at all.
+    ///
+    /// The file-side counterpart of
+    /// [`Self::tag_ids_matching_id_prefix`](CatalogStore::tag_ids_matching_id_prefix):
+    /// it backs the `/i` query prefix (files by id only) and the id half of a
+    /// prefix-less token. Ids are opaque hex, so — like the tag id resolver —
+    /// this takes the raw payload text rather than a
+    /// [`TextPattern`](super::query::TextPattern); a regex is never an id
+    /// surface.
+    ///
+    /// `deleted_rule` controls whether tombstoned files participate, mirroring
+    /// [`Self::tag_ids_matching_id_prefix`].
+    pub fn file_ids_matching_id_prefix(
+        &self,
+        text: &str,
+        deleted_rule: DeletedRule,
+    ) -> Result<Vec<FileId>, DatabaseError> {
+        let Some(prefix) = normalize_id_prefix(text) else {
+            return Ok(Vec::new());
+        };
+        let id_pattern = format!("{prefix}%");
+        let id_sql = format!(
+            "SELECT id FROM files_v2 WHERE id LIKE ?1{}",
+            and_deleted_clause(deleted_rule),
+        );
+        let mut statement = self.connection.prepare(&id_sql)?;
+        let id_matches = statement.query_map([&id_pattern], |row| row.get::<_, FileId>(0))?;
+        id_matches
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::clock::now_millis;
-    use crate::store::fixtures::memory_db;
+    use crate::store::fixtures::{file_id_from_hex, memory_db};
+
+    #[test]
+    fn file_ids_matching_id_prefix_resolves_hex_prefix() {
+        let database = memory_db();
+        let a = file_id_from_hex("abcd000000000000000000000000000a");
+        let b = file_id_from_hex("abcd000000000000000000000000000b");
+        let far = file_id_from_hex("ffff000000000000000000000000000f");
+        for (id, name) in [(a, "a"), (b, "b"), (far, "c")] {
+            database.add_file(id, &LogicalPath::new(name), 0).unwrap();
+        }
+
+        // A shared prefix returns every file under it.
+        let mut matched = database
+            .file_ids_matching_id_prefix("abcd", DeletedRule::Exclude)
+            .unwrap();
+        matched.sort();
+        let mut expected = vec![a, b];
+        expected.sort();
+        assert_eq!(matched, expected);
+
+        // A hyphenated / uppercase prefix normalizes the same way.
+        assert_eq!(
+            database
+                .file_ids_matching_id_prefix("FFFF", DeletedRule::Exclude)
+                .unwrap(),
+            vec![far]
+        );
+
+        // Non-hex text is not an id surface: it resolves to nothing.
+        assert!(
+            database
+                .file_ids_matching_id_prefix("zzzz", DeletedRule::Exclude)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn logical_path_for_file_id_roundtrips() {

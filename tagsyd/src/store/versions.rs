@@ -7,6 +7,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tagsy_api::DeletedRule;
 use tagsy_core::FileId;
 
 use super::CatalogStore;
@@ -117,6 +118,60 @@ impl CatalogStore {
         }
 
         Ok(hashes)
+    }
+
+    /// Find every file whose **latest** version's `content_hash` starts with
+    /// `text` interpreted as a hex prefix (case-insensitive). Returns an empty
+    /// vector if `text` is not a valid hex prefix at all.
+    ///
+    /// Backs the `/h` query prefix — files by content hash. Content hashes are
+    /// BLAKE3 hex digests (see [`crate::file_bytes::FileBytes::hash`]), so a
+    /// prefix match mirrors the short-hash convention used in logs and lets a
+    /// user paste a truncated digest. Only the latest version participates,
+    /// matching what a search result row displays; a payload that only matches
+    /// a *superseded* version's hash does not match the file.
+    ///
+    /// Unlike [`CatalogStore::file_ids_matching_id_prefix`], no hyphen
+    /// stripping happens: a hash has no hyphenated form, so a hyphen is simply
+    /// a non-hex character that makes the payload resolve to nothing.
+    ///
+    /// `deleted_rule` controls whether tombstoned files participate, mirroring
+    /// the id resolvers.
+    pub fn file_ids_matching_content_hash_prefix(
+        &self,
+        text: &str,
+        deleted_rule: DeletedRule,
+    ) -> Result<Vec<FileId>, DatabaseError> {
+        // A hash prefix is lowercase hex with no separators. Reject anything
+        // else so the value is safe to splice into a `LIKE` pattern (no `%`/`_`
+        // wildcards) and so junk resolves to nothing rather than everything.
+        if text.is_empty() || !text.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(Vec::new());
+        }
+        let hash_pattern = format!("{}%", text.to_ascii_lowercase());
+
+        // `f.deleted` is aliased in the join, so inline the tombstone guard
+        // rather than the bare-`deleted` shared fragment (same reasoning as
+        // `get_all_files`).
+        let deleted_clause = match deleted_rule {
+            DeletedRule::Exclude => " AND f.deleted = 0",
+            DeletedRule::Include => "",
+        };
+        let sql = format!(
+            "SELECT f.id
+             FROM files_v2 AS f
+             JOIN file_versions_v1 AS v
+               ON v.file_id = f.id
+              AND v.version_number = (
+                  SELECT MAX(version_number)
+                  FROM file_versions_v1 AS inner
+                  WHERE inner.file_id = f.id
+              )
+             WHERE v.content_hash LIKE ?1{deleted_clause}"
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let matches = statement.query_map([&hash_pattern], |row| row.get::<_, FileId>(0))?;
+        matches.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Return the most recent recorded version for `file_id`, or `None` if the
@@ -252,5 +307,76 @@ mod tests {
             (1, "h1".to_owned(), 10),
             (2, "h2".to_owned(), 20),
         ]);
+    }
+
+    #[test]
+    fn file_ids_matching_content_hash_prefix_matches_latest_version() {
+        let mut database = memory_db();
+        let a = FileId::new();
+        let b = FileId::new();
+        database.add_file(a, &LogicalPath::new("a"), 0).unwrap();
+        database.add_file(b, &LogicalPath::new("b"), 0).unwrap();
+        // `a`'s latest hash starts with `dead`; `b`'s with `beef`.
+        database
+            .record_version(a, "deadbeef00000000", "local", 1)
+            .unwrap();
+        database
+            .record_version(b, "beef000000000000", "local", 1)
+            .unwrap();
+
+        assert_eq!(
+            database
+                .file_ids_matching_content_hash_prefix("dead", DeletedRule::Exclude)
+                .unwrap(),
+            vec![a]
+        );
+
+        // Case-insensitive: an uppercase prefix normalizes to lowercase hex.
+        assert_eq!(
+            database
+                .file_ids_matching_content_hash_prefix("BEEF", DeletedRule::Exclude)
+                .unwrap(),
+            vec![b]
+        );
+
+        // Non-hex text is not a hash surface: it resolves to nothing.
+        assert!(
+            database
+                .file_ids_matching_content_hash_prefix("zzzz", DeletedRule::Exclude)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Only the *latest* version's hash participates: a prefix that matches
+    /// only a superseded version does not match the file.
+    #[test]
+    fn file_ids_matching_content_hash_prefix_ignores_superseded_versions() {
+        let mut database = memory_db();
+        let file_id = FileId::new();
+        database
+            .add_file(file_id, &LogicalPath::new("a"), 0)
+            .unwrap();
+        database
+            .record_version(file_id, "aaaa000000000000", "local", 1)
+            .unwrap();
+        database
+            .record_version(file_id, "bbbb000000000000", "local", 1)
+            .unwrap();
+
+        // The latest hash (`bbbb...`) matches.
+        assert_eq!(
+            database
+                .file_ids_matching_content_hash_prefix("bbbb", DeletedRule::Exclude)
+                .unwrap(),
+            vec![file_id]
+        );
+        // The superseded hash (`aaaa...`) no longer identifies the file.
+        assert!(
+            database
+                .file_ids_matching_content_hash_prefix("aaaa", DeletedRule::Exclude)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

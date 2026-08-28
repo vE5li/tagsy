@@ -60,14 +60,22 @@ impl ApiService {
     /// conjunctively (a result must satisfy every token). Each token is
     /// optionally prefixed by `!` (negation) and/or a kind prefix:
     ///
-    /// - `/t foo` — require the tag(s) resolved from `foo`. A file matches if
-    ///   it carries any such tag; a tag matches if it is a subtag of any.
+    /// - `/t foo` — require the tag(s) resolved from `foo` by name **or** id
+    ///   prefix. A file matches if it carries any such tag; a tag matches if it
+    ///   is a subtag of any.
+    /// - `/T foo` — like `/t`, but resolves tags by id prefix **only** (no name
+    ///   matching).
+    /// - `/i foo` — require the file(s) whose id starts with `foo`. File-only:
+    ///   the tag result is empty when this token is present.
+    /// - `/h foo` — require the file(s) whose latest content hash starts with
+    ///   `foo`. File-only, like `/i`.
+    /// - `/n foo` — case-insensitive substring against the logical path or tag
+    ///   name.
     /// - `/l foo` — case-insensitive substring against the file's logical path
     ///   (or the tag's name on the tag side).
-    /// - `/p foo` — reserved for physical-path search; currently a no-op.
-    /// - `foo` (no prefix) — matches on *either* side: logical/name substring
-    ///   OR tag membership. This is the "just find anything that looks like
-    ///   `foo`" token.
+    /// - `foo` (no prefix) — matches on *any* axis: logical/name substring OR
+    ///   tag membership OR the file/tag's own id prefix. This is the "just find
+    ///   anything that looks like `foo`" token.
     /// - `!` in front of any of the above inverts the filter.
     ///
     /// Tokens with whitespace can be quoted: `/t "foo bar"`.
@@ -176,16 +184,16 @@ impl ApiService {
     /// (pure, no DB access — see the [`token`] module docs for the grammar and
     /// error-recovery contract), then this function resolves each token into
     /// one [`QueryTerm`], expanding tag references via
-    /// [`CatalogStore::tag_ids_matching_pattern`].
+    /// [`CatalogStore::tag_ids_matching_pattern`] (name-or-id, for `/t` and a
+    /// bare token), [`CatalogStore::tag_ids_matching_id_prefix`] (id only, for
+    /// `/T`), [`CatalogStore::file_ids_matching_id_prefix`] (id only, for `/i`
+    /// and the id half of a bare token), and
+    /// [`CatalogStore::file_ids_matching_content_hash_prefix`] (for `/h`).
     ///
-    /// Both stages are forgiving:
-    /// - the lexer silently drops malformed tokens (see its module docs);
-    /// - this resolver silently drops any [`TokenKind::Physical`] token, since
-    ///   physical-path search is not wired up yet — the grammar accepts `/p` so
-    ///   users see consistent parsing, but the filter is a no-op.
-    ///
-    /// The only remaining fallible step is `tag_ids_matching_pattern`, which
-    /// can surface a real database error; that is propagated as-is.
+    /// The lexer stage is forgiving: it silently drops malformed tokens (see
+    /// its module docs). The only fallible step here is the tag/file-id
+    /// resolution, which can surface a real database error; that is propagated
+    /// as-is.
     ///
     /// `deleted_rule` is forwarded to
     /// [`CatalogStore::tag_ids_matching_pattern`] so a search that wants to
@@ -193,7 +201,6 @@ impl ApiService {
     /// tags.
     ///
     /// [`Token`]: token::Token
-    /// [`TokenKind::Physical`]: token::TokenKind::Physical
     fn parse_query(
         database: &CatalogStore,
         query: &str,
@@ -212,28 +219,59 @@ impl ApiService {
             };
 
             // Resolved before the match so the pattern can be moved into the
-            // term afterwards. Only the tag-bearing kinds need it, and the
-            // lookup is the one fallible step here.
+            // term afterwards. Only the id/tag-bearing kinds need each lookup,
+            // and these are the only fallible steps here.
+            //
+            // `/t` and a bare token resolve tags by name-or-id
+            // (`tag_ids_matching_pattern`); `/T` resolves tags by id only. Id
+            // resolution runs against the raw payload text, never a regex — ids
+            // are opaque hex — so it is skipped for a regex payload (a `%...%`
+            // token then has empty id sets, and only its text side stands).
             let tag_ids = match token.kind {
                 TokenKind::Tag | TokenKind::Any => {
                     database.tag_ids_matching_pattern(&pattern, deleted_rule)?
+                }
+                TokenKind::TagId => match &pattern {
+                    TextPattern::Substring(text) => {
+                        database.tag_ids_matching_id_prefix(text, deleted_rule)?
+                    }
+                    TextPattern::Regex(_) => Vec::new(),
+                },
+                _ => Vec::new(),
+            };
+            // File-id resolution serves `/i` (by id), `/h` (by content hash),
+            // and the id half of a bare token. All three resolve a *set of file
+            // ids* and never a regex — ids and hashes are opaque hex.
+            let file_ids = match (token.kind, &pattern) {
+                (TokenKind::FileId | TokenKind::Any, TextPattern::Substring(text)) => {
+                    database.file_ids_matching_id_prefix(text, deleted_rule)?
+                }
+                (TokenKind::ContentHash, TextPattern::Substring(text)) => {
+                    database.file_ids_matching_content_hash_prefix(text, deleted_rule)?
                 }
                 _ => Vec::new(),
             };
 
             let term = match (token.kind, token.negated) {
-                (TokenKind::Tag, false) => QueryTerm::HasTag(tag_ids),
-                (TokenKind::Tag, true) => QueryTerm::NotTag(tag_ids),
+                // `/T` (tag by id only) resolves into the same HasTag/NotTag
+                // terms as `/t`; the difference lived entirely in resolution.
+                (TokenKind::Tag | TokenKind::TagId, false) => QueryTerm::HasTag(tag_ids),
+                (TokenKind::Tag | TokenKind::TagId, true) => QueryTerm::NotTag(tag_ids),
+                // `/i` and `/h` both resolve to a file-id set, so they share the
+                // `FileIdMatches`/`NotFileIdMatches` terms; the difference lived
+                // entirely in how `file_ids` above was resolved.
+                (TokenKind::FileId | TokenKind::ContentHash, false) => {
+                    QueryTerm::FileIdMatches(file_ids)
+                }
+                (TokenKind::FileId | TokenKind::ContentHash, true) => {
+                    QueryTerm::NotFileIdMatches(file_ids)
+                }
                 (TokenKind::Name, false) => QueryTerm::NameMatches(pattern),
                 (TokenKind::Name, true) => QueryTerm::NotNameMatches(pattern),
                 (TokenKind::Logical, false) => QueryTerm::LogicalMatches(pattern),
                 (TokenKind::Logical, true) => QueryTerm::NotLogicalMatches(pattern),
-                (TokenKind::Any, false) => QueryTerm::AnyMatch(pattern, tag_ids),
-                (TokenKind::Any, true) => QueryTerm::NotAnyMatch(pattern, tag_ids),
-                // `/p` is reserved but not yet supported — drop the token so
-                // the rest of the query still works, matching the "forgiving
-                // search box" contract.
-                (TokenKind::Physical, _) => continue,
+                (TokenKind::Any, false) => QueryTerm::AnyMatch(pattern, tag_ids, file_ids),
+                (TokenKind::Any, true) => QueryTerm::NotAnyMatch(pattern, tag_ids, file_ids),
             };
             terms.push(term);
         }
