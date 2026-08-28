@@ -9,12 +9,11 @@ use tagsy_core::FileInfo;
 use tagsy_ipc::IpcBackend;
 
 use crate::commands::Commands;
-use crate::common;
 use crate::output::{
     OutputMode, emit_connected_peers, emit_files, emit_operations, emit_scalar, emit_tags,
-    emit_tags_and_files,
-    print_json, print_tag_rule_report,
+    emit_tags_and_files, print_json, print_tag_rule_report,
 };
+use crate::{common, upload};
 
 pub async fn run(
     backend: &IpcBackend,
@@ -22,70 +21,93 @@ pub async fn run(
     output_mode: OutputMode,
 ) -> Result<(), String> {
     match command {
-        Commands::Upload { path, tags, keep } => {
-            let path_name = path
-                .file_name()
-                .ok_or_else(|| format!("{} has no file name", path.display()))?
-                .to_string_lossy()
-                .to_string();
+        Commands::Upload {
+            paths,
+            tags,
+            keep,
+            hidden,
+            many,
+        } => {
+            // Expand the file/directory arguments into the flat list of files to
+            // upload before touching the daemon, so the count guard below can
+            // trip without any bytes having moved.
+            let planned = upload::expand_paths(&paths, hidden)?;
+
+            if planned.len() > upload::MANY_THRESHOLD && !many {
+                return Err(format!(
+                    "refusing to upload {} files; pass --many to confirm",
+                    planned.len()
+                ));
+            }
 
             // Resolve each `--tag` argument (full id or short prefix) via the
             // daemon, so tagging on upload accepts short ids like every other
-            // tag-id command.
+            // tag-id command. Resolved once and applied to every file.
             let mut resolved_tags = Vec::with_capacity(tags.len());
             for tag in &tags {
                 resolved_tags.push(common::resolve_tag_id(backend, tag).await?);
             }
 
-            // Serve the file to the daemon as a temporary chunk provider: no
-            // bytes are read into memory here. This call blocks until the daemon
-            // has handed the content off to the storing peer(s).
-            let file_id = backend
-                .upload_file(path.clone(), path_name.clone(), resolved_tags.clone())
-                .await
-                .map_err(|error| error.to_string())?;
-
-            if !keep {
-                std::fs::remove_file(&path).map_err(|error| {
-                    format!(
-                        "uploaded as file {}, but failed to delete {}: {error}",
-                        file_id.to_string(),
-                        path.display()
-                    )
-                })?;
-            }
-
-            // Render the full entry from locally-known data rather than fetching
-            // it back (the metadata write is enqueued asynchronously and would
-            // race). We know the id, logical path, applied tags, and that this is
-            // the first version. The content hash is computed daemon-side and is
-            // not known here, so it renders empty in JSON output.
-            let file = FileInfo {
-                file_id,
-                logical_path: tagsy_core::LogicalPath::new(path_name),
-                content_hash: String::new(),
-                version_number: 1,
-                // The size is computed daemon-side and is not known here.
-                size: 0,
-                // Only one id is known locally; highlight the whole id.
-                short_id_length: file_id.to_string().len(),
-                // A freshly-added file is live by construction.
-                deleted: false,
-                // Freshly added: its only version was recorded just now. The
-                // authoritative timestamps are stamped daemon-side; approximate
-                // with now for this optimistic local render.
-                first_recorded_at: tagsy_core::clock::now_millis(),
-                latest_change_at: tagsy_core::clock::now_millis(),
-            };
-
             let mut name_cache = common::NameCache::new();
             let mut file_tags = HashMap::new();
+            let mut files = Vec::with_capacity(planned.len());
 
-            let tag_names =
-                common::resolve_tag_names(backend, &mut name_cache, &resolved_tags).await?;
-            file_tags.insert(file_id, tag_names);
+            // Fail fast: on the first upload error we stop, leaving any
+            // already-uploaded files in place.
+            for item in &planned {
+                // Serve the file to the daemon as a temporary chunk provider: no
+                // bytes are read into memory here. This call blocks until the
+                // daemon has handed the content off to the storing peer(s).
+                let file_id = backend
+                    .upload_file(
+                        item.disk_path.clone(),
+                        item.path_name.clone(),
+                        resolved_tags.clone(),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
 
-            emit_files(output_mode, std::slice::from_ref(&file), &file_tags);
+                if !keep {
+                    std::fs::remove_file(&item.disk_path).map_err(|error| {
+                        format!(
+                            "uploaded as file {}, but failed to delete {}: {error}",
+                            file_id.to_string(),
+                            item.disk_path.display()
+                        )
+                    })?;
+                }
+
+                // Render the full entry from locally-known data rather than
+                // fetching it back (the metadata write is enqueued
+                // asynchronously and would race). We know the id, logical path,
+                // applied tags, and that this is the first version. The content
+                // hash is computed daemon-side and is not known here, so it
+                // renders empty in JSON output.
+                let file = FileInfo {
+                    file_id,
+                    logical_path: tagsy_core::LogicalPath::new(item.path_name.clone()),
+                    content_hash: String::new(),
+                    version_number: 1,
+                    // The size is computed daemon-side and is not known here.
+                    size: 0,
+                    // Only one id is known locally; highlight the whole id.
+                    short_id_length: file_id.to_string().len(),
+                    // A freshly-added file is live by construction.
+                    deleted: false,
+                    // Freshly added: its only version was recorded just now. The
+                    // authoritative timestamps are stamped daemon-side;
+                    // approximate with now for this optimistic local render.
+                    first_recorded_at: tagsy_core::clock::now_millis(),
+                    latest_change_at: tagsy_core::clock::now_millis(),
+                };
+
+                let tag_names =
+                    common::resolve_tag_names(backend, &mut name_cache, &resolved_tags).await?;
+                file_tags.insert(file_id, tag_names);
+                files.push(file);
+            }
+
+            emit_files(output_mode, &files, &file_tags);
         }
         Commands::CreateTag { name, color } => {
             let tag_id = backend

@@ -21,19 +21,35 @@ pub struct Arguments {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Upload a file's contents to the daemon, optionally tagging it.
+    /// Upload files' contents to the daemon, optionally tagging them.
+    ///
+    /// Each path may be a file or a directory; directories are walked
+    /// recursively, uploading every regular file within (symlinks are
+    /// skipped). Hidden entries (dotfiles, and anything inside a dotted
+    /// directory) are skipped unless `--hidden` is given.
     #[command(visible_alias = "u")]
     Upload {
-        /// File on disk to read and upload.
-        path: PathBuf,
-        /// Tags to apply to the uploaded file, each a full id or any
+        /// Files or directories on disk to read and upload. Directories are
+        /// walked recursively.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Tags to apply to every uploaded file, each a full id or any
         /// unambiguous short-id prefix of it.
         #[arg(long = "tag", value_name = "TAG_ID")]
         tags: Vec<String>,
-        /// Keep the local file after uploading (by default it is deleted
-        /// once the upload has succeeded).
+        /// Keep the local files after uploading (by default each is deleted
+        /// once its upload has succeeded).
         #[arg(long = "keep")]
         keep: bool,
+        /// Include hidden entries (dotfiles, and files inside dotted
+        /// directories) when walking directories.
+        #[arg(long = "hidden")]
+        hidden: bool,
+        /// Confirm uploading a large batch (more than 100 files). Without
+        /// this, such uploads are refused to prevent accidents; scripts can
+        /// pass it unconditionally.
+        #[arg(long = "many")]
+        many: bool,
     },
     /// Create a tag; prints the newly-minted tag id.
     CreateTag {

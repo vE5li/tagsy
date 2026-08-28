@@ -13,6 +13,7 @@ mod commands;
 mod common;
 mod output;
 mod run;
+mod upload;
 
 #[tokio::main]
 async fn main() -> ExitCode {
