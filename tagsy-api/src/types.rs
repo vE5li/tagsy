@@ -52,12 +52,11 @@ pub struct Tag {
     pub deleted: bool,
 }
 
-/// A rule mapping a tag id to an external editor command.
+/// A rule mapping a search query to an external editor command.
 ///
-/// Used by the desktop UI's "edit" action: when a file carries a tag whose id
-/// matches [`tag_id`], its bytes are handed to [`argv`] instead of the generic
-/// `$VISUAL`/`$EDITOR` fallback. Rules are consulted in declaration order; the
-/// first match wins.
+/// Used by the desktop UI's "edit" action: when a file matches [`query`], its
+/// bytes are handed to [`argv`] instead of the generic `$VISUAL`/`$EDITOR`
+/// fallback. Rules are consulted in declaration order; the first match wins.
 ///
 /// The daemon does not use these rules itself — it has no notion of external
 /// processes — but stores them so every frontend on this device (and any
@@ -80,12 +79,25 @@ pub struct Tag {
 /// therefore cannot introduce or alter a rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorRule {
-    /// Tag id to match against the file's applied tags. Ids (not names) are
-    /// the stable, unique identifier: a tag can be renamed at any time — a rule
-    /// keyed by name would silently stop matching after a rename. Pair a rule
-    /// with a config `TagDeclaration` to guarantee the id exists on every
-    /// device.
-    pub tag_id: TagId,
+    /// The search query, in the same syntax the search box accepts (`/t
+    /// favorite`, negation, regex, name/path substrings, …). A file matches
+    /// the rule when it is in the query's results, so the full filtering
+    /// grammar is available rather than a bare tag membership test.
+    ///
+    /// Keyed by query string rather than tag id on purpose — that is what
+    /// buys the full grammar. It also inherits the query path's id stability:
+    /// a `/t` term resolves a name to an id up front, so a rule survives a
+    /// `rename_tag`, exactly as a tag-id key would have. Mirrors
+    /// [`HomeSection::query`]; both run through the daemon's single query
+    /// parser.
+    ///
+    /// To test whether a *specific* file matches, the launcher composes
+    /// `/i <file-id> <query>` and asks whether the (at most one) result is
+    /// non-empty. The `/i` term goes **first** so it stays a complete,
+    /// well-formed token even if the operator's query ends in an unclosed
+    /// `"` or `%` — otherwise the trailing id could be swallowed into an
+    /// unterminated quote/regex.
+    pub query: String,
     /// The editor command as an explicit `argv` vector, e.g.
     /// `["/run/current-system/sw/bin/gimp"]` or
     /// `["/usr/bin/code", "--wait"]`. The file path is appended as the final

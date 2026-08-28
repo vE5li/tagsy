@@ -519,16 +519,16 @@ class _FileDetailScreenState extends State<FileDetailScreen> {
 
       // Rules are per-daemon config; fetching them per edit is a cheap
       // round-trip and keeps a live edit reactive to config changes without
-      // an app restart. `_appliedTagIds` is already populated by `_load` —
-      // ids (not names) match rules because a rule's `tagId` is stable, while
-      // a name changes with `renameTag`.
+      // an app restart. The launcher matches each rule's `query` against this
+      // file by id (via the daemon's query path), so it needs only the file
+      // id — no locally-gathered tag set.
       final rules = await _repository.editorRules();
 
       try {
         await launcher.launchAndWait(
           path: beginPath,
           logicalName: logicalName,
-          appliedTagIds: _appliedTagIds,
+          fileId: widget.fileId,
           rules: rules,
         );
       } catch (error) {

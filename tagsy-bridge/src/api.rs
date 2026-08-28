@@ -245,17 +245,17 @@ pub enum _ApiError {
 /// An external-editor rule flattened for the Dart UI.
 ///
 /// Mirrors [`EditorRule`] as a DTO with plain fields (rather than an opaque
-/// handle) so the Dart side can read `tag_id` / `argv` directly when choosing
+/// handle) so the Dart side can read `query` / `argv` directly when choosing
 /// which command to launch; see [`FileEntry`] for the same DTO-flattening
-/// pattern used elsewhere in this crate. The tag id is rendered as its UUID
-/// string (matching [`TagEntry::tag_id`]) so the UI can compare it directly
-/// against a file's applied tag ids without touching an opaque [`TagId`]
-/// handle.
+/// pattern used elsewhere in this crate. The `query` is passed straight back
+/// into `run_query` (composed with a `/i <file-id>` term), so the daemon
+/// remains the single query parser — the UI never interprets it itself.
 pub struct EditorRuleEntry {
-    /// Tag id (UUID string) to match against the file's applied tag ids. Ids
-    /// (not names) are the stable identifier: a rule keyed by name would
-    /// break silently after a `rename_tag`.
-    pub tag_id: String,
+    /// The search query to match the file against, in the same syntax the
+    /// search box accepts. See [`EditorRule::query`]. The launcher tests a
+    /// single file by composing `/i <file-id> <query>` and checking for a
+    /// non-empty result.
+    pub query: String,
     /// The editor command as an explicit `argv` vector; the file path is
     /// appended as the final argument. Crosses the bridge as a list, not a
     /// string, so no side has to agree on a tokenisation rule. See
@@ -266,7 +266,7 @@ pub struct EditorRuleEntry {
 impl From<EditorRule> for EditorRuleEntry {
     fn from(rule: EditorRule) -> Self {
         Self {
-            tag_id: rule.tag_id.to_string(),
+            query: rule.query,
             argv: rule.argv,
         }
     }

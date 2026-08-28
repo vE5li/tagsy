@@ -32,10 +32,29 @@ class LinuxBootstrap extends TagsyBootstrap {
     // fails if the daemon is not running. No config/paths: the daemon owns the
     // engine, DB, and identity.
     final app = await tagsy.Tagsy.attach();
+    final repository = TagsyRepository(app);
     return TagsySession(
-      repository: TagsyRepository(app),
+      repository: repository,
       publicKey: null,
-      editorLauncher: LinuxEditorLauncher(),
+      // The launcher decides which editor rule matches a file by running the
+      // rule's query through the daemon (composed with `/i <fileId>`), so it
+      // reuses the same query path the search box does.
+      //
+      // `DeletedRule.exclude` — NOT `include`. Despite its name, `include`
+      // returns *only* tombstoned rows (the "show deleted" toggle post-filters
+      // to `deleted == true`; see `ApiService::search`), so it would drop every
+      // live file and no rule would ever match a normal file. `exclude` is the
+      // live-file path and matches what home sections use.
+      editorLauncher: LinuxEditorLauncher(
+        runMatches: (query) async {
+          final results = await repository.runQuery(
+            query: query,
+            subtagRule: tagsy.SubtagRule.include,
+            deletedRule: tagsy.DeletedRule.exclude,
+          );
+          return results.files.isNotEmpty;
+        },
+      ),
     );
   }
 

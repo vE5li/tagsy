@@ -2,7 +2,12 @@
 // its exit.
 //
 // The editor to spawn is resolved by consulting the daemon-configured
-// tag-based rules (first rule whose `tag_id` is applied to the file wins).
+// query-based rules (first rule whose `query` matches the file wins). Each
+// rule's match is decided by the daemon, not here: we compose
+// `/i <file-id> <rule.query>` and run it through the normal query path, and
+// the rule matches when that yields a (single) result. The `/i` term goes
+// first so it stays a complete token even if the operator's query ends in an
+// unclosed `"` or `%`.
 // There is deliberately **no `$VISUAL`/`$EDITOR` fallback**: those env vars
 // name terminal editors (`vi`, `nvim`, `nano`), and running one from a GUI
 // process with no controlling TTY hangs forever — the child neither errors
@@ -67,14 +72,26 @@ import '../rust/api.dart' as tagsy;
 import 'editor_launcher.dart';
 
 class LinuxEditorLauncher implements EditorLauncher {
+  /// [runMatches] answers "does this composed query yield any file?" — it is
+  /// the seam to the daemon's query path (see [EditorLauncher.launchAndWait]),
+  /// kept as a callback so [resolveArgv] can be unit-tested without a live
+  /// bridge. Bootstrap wires it to the repository's `runQuery`.
+  LinuxEditorLauncher({required this.runMatches});
+
+  final Future<bool> Function(String query) runMatches;
+
   @override
   Future<void> launchAndWait({
     required String path,
     required String logicalName,
-    required List<String> appliedTagIds,
+    required String fileId,
     required List<tagsy.EditorRuleEntry> rules,
   }) async {
-    final argv = resolveArgv(appliedTagIds: appliedTagIds, rules: rules);
+    final argv = await resolveArgv(
+      fileId: fileId,
+      rules: rules,
+      runMatches: runMatches,
+    );
 
     // Convention matches the CLI's `open_in_editor` (tagsy/src/main.rs):
     // path is the last argument. Users writing rules can rely on it.
@@ -115,38 +132,44 @@ class LinuxEditorLauncher implements EditorLauncher {
     }
   }
 
-  /// Walk `rules` in declaration order; the first rule whose `tag_id` is in
-  /// `appliedTagIds` wins. Throws [EditorLaunchException] if no rule matches
-  /// — see the file-level doc for why there is no `$VISUAL`/`$EDITOR`
-  /// fallback.
+  /// Walk `rules` in declaration order; the first rule whose `query` matches
+  /// the file `fileId` wins. A rule matches when `runMatches` returns true for
+  /// the composed query `/i <fileId> <rule.query>` — the `/i` term is placed
+  /// first so it stays a well-formed token even if `rule.query` ends in an
+  /// unclosed `"` or `%`. Throws [EditorLaunchException] if no rule matches —
+  /// see the file-level doc for why there is no `$VISUAL`/`$EDITOR` fallback.
   ///
-  /// A rule whose `argv` is unusable (empty, or a non-absolute `argv[0]`) is
-  /// rejected loudly rather than skipped. Skipping would silently fall through
-  /// to a *different* editor than the operator configured, which is both
-  /// confusing and, for a rule that fails the absolute-path check, exactly the
-  /// case where staying quiet is least appropriate.
+  /// A *matching* rule whose `argv` is unusable (empty, or a non-absolute
+  /// `argv[0]`) is rejected loudly rather than skipped. Skipping would
+  /// silently fall through to a *different* editor than the operator
+  /// configured, which is both confusing and, for a rule that fails the
+  /// absolute-path check, exactly the case where staying quiet is least
+  /// appropriate. The `argv` is validated only once a rule has matched, so a
+  /// malformed rule that does not apply to this file stays inert.
   @visibleForTesting
-  static List<String> resolveArgv({
-    required List<String> appliedTagIds,
+  static Future<List<String>> resolveArgv({
+    required String fileId,
     required List<tagsy.EditorRuleEntry> rules,
-  }) {
-    final applied = appliedTagIds.toSet();
+    required Future<bool> Function(String query) runMatches,
+  }) async {
     for (final rule in rules) {
-      if (!applied.contains(rule.tagId)) continue;
+      // `/i <fileId>` first: a complete token that a trailing unclosed quote
+      // or regex in `rule.query` cannot swallow.
+      if (!await runMatches('/i $fileId ${rule.query}')) continue;
 
       final argv = rule.argv;
       if (argv.isEmpty || argv.first.isEmpty) {
         throw EditorLaunchException(
-          'editor rule for tag ${rule.tagId} has an empty argv: give it at '
-          'least the absolute path of the editor, e.g. '
+          'editor rule for query "${rule.query}" has an empty argv: give it '
+          'at least the absolute path of the editor, e.g. '
           '["/run/current-system/sw/bin/gimp"]',
         );
       }
       if (!argv.first.startsWith('/')) {
         throw EditorLaunchException(
-          'editor rule for tag ${rule.tagId} must use an absolute path for '
-          'argv[0], got "${argv.first}". A bare name would be resolved via '
-          'the inherited PATH, which is not a trustworthy lookup.',
+          'editor rule for query "${rule.query}" must use an absolute path '
+          'for argv[0], got "${argv.first}". A bare name would be resolved '
+          'via the inherited PATH, which is not a trustworthy lookup.',
         );
       }
       return argv;
@@ -154,7 +177,7 @@ class LinuxEditorLauncher implements EditorLauncher {
 
     throw const EditorLaunchException(
       'no editor rule matched: add an `editor_rules` entry in the daemon '
-      'config for one of this file\'s tags',
+      'config whose query matches this file',
     );
   }
 

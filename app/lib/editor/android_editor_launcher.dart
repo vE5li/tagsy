@@ -55,7 +55,7 @@ class AndroidEditorLauncher implements EditorLauncher {
   Future<void> launchAndWait({
     required String path,
     required String logicalName,
-    required List<String> appliedTagIds,
+    required String fileId,
     required List<tagsy.EditorRuleEntry> rules,
   }) async {
     // Rules exist for the Linux CLI-style "run this argv" model. Android's

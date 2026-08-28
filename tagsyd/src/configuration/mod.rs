@@ -143,7 +143,7 @@ pub struct Configuration {
     /// can serve them onward.
     #[serde(default)]
     pub preview_generation_policy: PreviewGenerationPolicy,
-    /// Tag-id → `argv` mapping consulted by the desktop UI's external-edit
+    /// Query → `argv` mapping consulted by the desktop UI's external-edit
     /// action. See [`EditorRule`]. Empty (the default) means no file has an
     /// external editor and the UI reports that rather than guessing. The
     /// daemon does not act on these rules; they are stored here so every

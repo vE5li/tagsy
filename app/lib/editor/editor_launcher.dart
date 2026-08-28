@@ -34,17 +34,18 @@ import '../rust/api.dart' as tagsy;
 abstract class EditorLauncher {
   /// Open [path] in an external editor and return once the user is done.
   ///
-  /// [rules] is the daemon-configured tag → `argv` mapping (see
-  /// [tagsy.EditorRuleEntry]); implementations that consult tags (Linux)
+  /// [rules] is the daemon-configured query → `argv` mapping (see
+  /// [tagsy.EditorRuleEntry]); implementations that consult rules (Linux)
   /// walk it in declaration order, first match wins. Implementations that
-  /// ignore tags (Android — the OS picks the editor by MIME) may leave it
+  /// ignore rules (Android — the OS picks the editor by MIME) may leave it
   /// unused.
   ///
-  /// [appliedTagIds] is the string ids of the tags currently applied to the
-  /// file, so [rules] can be resolved without the launcher needing a bridge
-  /// handle. Ids (not names) are the stable identifier: matching by name
-  /// would break silently on `rename_tag`. Order is not significant;
-  /// matching is by set membership.
+  /// [fileId] is the id of the file being edited, so a rule's `query` can be
+  /// evaluated against exactly this file (the Linux impl composes
+  /// `/i <fileId> <rule.query>` and runs it through the daemon's query path).
+  /// A query keys off the full filtering grammar rather than a bare tag
+  /// membership test, and — like matching by tag id — it survives a
+  /// `rename_tag` because a `/t` term resolves to an id up front.
   ///
   /// [logicalName] is the file's user-facing name (last component of the
   /// logical path). Used by the Android impl to sniff a MIME hint from the
@@ -56,7 +57,7 @@ abstract class EditorLauncher {
   Future<void> launchAndWait({
     required String path,
     required String logicalName,
-    required List<String> appliedTagIds,
+    required String fileId,
     required List<tagsy.EditorRuleEntry> rules,
   });
 }
