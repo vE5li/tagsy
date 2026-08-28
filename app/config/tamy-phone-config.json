@@ -12,5 +12,8 @@
       "name": "central",
       "public_key": "AYWQNMCy5y20bjB1oxU79x5fUYQI4CGPbsqk7N+Qrgs="
     }
+  ],
+  "home_sections": [
+    { "name": "💀 Tamy", "query": "/t Tamy" }
   ]
 }
