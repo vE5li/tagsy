@@ -358,11 +358,50 @@ pub async fn run_peer_session<S>(
         }
     }
 
+    // Session liveness. A WebSocket-over-TCP link that dies silently (flight
+    // mode, cable pull, router reboot) never delivers a close frame, so
+    // `incoming.next()` would block forever and the session — and thus the
+    // connection guard, and thus the UI's "connected" state — would hang
+    // indefinitely. This is the idle-session analogue of the transfer path's
+    // `HOP_TIMEOUT`: we ping periodically and, if the peer goes silent past
+    // `LIVENESS_TIMEOUT`, break the loop so the guard drops and a `Disconnected`
+    // is broadcast. An outbound peer's `dial.rs` loop then reconnects when the
+    // network returns; there is no in-session retry (see the transport notes in
+    // AGENTS.md).
+    const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+    const LIVENESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+    let mut ping_interval = tokio::time::interval(PING_INTERVAL);
+    // If the loop is busy past a tick (e.g. a long transfer), don't burst a
+    // backlog of pings afterward — just resume the cadence.
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The first tick fires immediately; skip it so we don't ping before the
+    // link has had a chance to carry traffic.
+    ping_interval.tick().await;
+
+    let mut last_activity = tokio::time::Instant::now();
+
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
                 log::info!("Shutdown requested; closing session with {peer_name}");
                 break;
+            }
+            _ = ping_interval.tick() => {
+                if last_activity.elapsed() >= LIVENESS_TIMEOUT {
+                    log::info!(
+                        "Peer {peer_name} silent for {:?}; closing dead session",
+                        last_activity.elapsed()
+                    );
+                    break;
+                }
+
+                // Keep the link warm and surface a dead peer on the write path
+                // even while idle. A failed ping send means the socket is gone.
+                if let Err(error) = outgoing.send(Message::Ping(Vec::new().into())).await {
+                    log::info!("Ping to {peer_name} failed ({error}); closing session");
+                    break;
+                }
             }
             outbound = peer_rx.recv() => {
                 let Some(frame) = outbound else {
@@ -451,12 +490,28 @@ pub async fn run_peer_session<S>(
                         break;
                     }
                 };
-                // Ignore WebSocket control frames (ping/pong/close); only
-                // data frames carry a `Frame`. Peer `Frame`s are MessagePack
-                // (see `send_frame`).
+                // Any inbound message — data, or a WebSocket ping/pong control
+                // frame — proves the peer is still there, so it resets the
+                // liveness clock. (tokio-tungstenite auto-answers our pings with
+                // pongs, which surface here.)
+                last_activity = tokio::time::Instant::now();
+                // WebSocket control frames don't carry a `Frame`. We split the
+                // stream, so tungstenite can't auto-answer a peer's Ping for us;
+                // reply with a Pong ourselves (proper keepalive behavior) and
+                // otherwise ignore control frames. Only Binary/Text data frames
+                // carry a MessagePack `Frame` (see `send_frame`).
                 let payload = match &message {
                     Message::Binary(bytes) => bytes.as_ref(),
                     Message::Text(text) => text.as_bytes(),
+                    Message::Ping(data) => {
+                        if let Err(error) =
+                            outgoing.send(Message::Pong(data.clone())).await
+                        {
+                            log::info!("Pong to {peer_name} failed ({error}); closing session");
+                            break;
+                        }
+                        continue;
+                    }
                     _ => continue,
                 };
                 let frame: Frame = match rmp_serde::from_slice(payload) {
