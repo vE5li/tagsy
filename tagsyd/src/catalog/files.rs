@@ -316,7 +316,7 @@ pub(crate) async fn apply_change(
                 {
                     // If the file is already modified in the origin, we don't need to take
                     // any action.
-                    return Some(false);
+                    continue;
                 };
 
                 if let SyncType::TagBased {
@@ -326,7 +326,7 @@ pub(crate) async fn apply_change(
                 {
                     // If the directory is tag based and the file *does not* have all the
                     // tags the sync directory does, skip this sync directory.
-                    return Some(false);
+                    continue;
                 }
 
                 // This means the event didn't originate from this sync directory itself and
@@ -437,7 +437,7 @@ pub(crate) async fn apply_change(
                 {
                     // If the file came from this directory, it is already removed. We
                     // can just skip this directory.
-                    return Some(false);
+                    continue;
                 };
 
                 if let SyncType::TagBased {
@@ -447,7 +447,7 @@ pub(crate) async fn apply_change(
                 {
                     // If the directory is tag based and the file *does not* have all the
                     // tags the sync directory does, skip this sync directory.
-                    return Some(false);
+                    continue;
                 }
 
                 // This means the event didn't originate from this sync directory itself,
@@ -717,7 +717,9 @@ pub(crate) async fn materialize(
                 } = &sync_directory.sync_type
                     && !placement::contains_all_tags(sync_directory_tags, &effective_tags)
                 {
-                    return;
+                    // Tag based directory the file does not match: skip only
+                    // this directory, still place into the others.
+                    continue;
                 }
                 let physical_path = sync_directory
                     .sync_type
