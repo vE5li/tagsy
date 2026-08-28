@@ -18,6 +18,7 @@ import '../format/format.dart';
 import '../rust/api.dart' as tagsy;
 import '../session/session.dart';
 import '../widgets/file_preview.dart';
+import '../widgets/section_header.dart';
 import '../widgets/tag_picker_sheet.dart';
 import '../widgets/tags_section.dart';
 
@@ -145,17 +146,9 @@ class _ShareReviewScreenState extends State<ShareReviewScreen> {
   /// detail screen's top preview. When more than one file is shared, each is
   /// labelled with its name so the user can tell them apart.
   Widget _buildPreview(BuildContext context, String path) {
-    final theme = Theme.of(context);
-    final header = Padding(
+    final header = SectionHeader(
+      widget.paths.length > 1 ? nameFor(path) : 'Preview',
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      child: Text(
-        widget.paths.length > 1 ? nameFor(path) : 'Preview',
-        style: theme.textTheme.labelMedium?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant,
-          fontWeight: FontWeight.bold,
-        ),
-        overflow: TextOverflow.ellipsis,
-      ),
     );
     final body = File(path).existsSync()
         ? ConstrainedBox(

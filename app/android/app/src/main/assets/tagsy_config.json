@@ -18,7 +18,7 @@
     }
   ],
   "home_sections": [
-    { "name": "Favorites", "query": "/t favorite" },
-    { "name": "TODOs", "query": "/t todo" }
+    { "name": "⭐ Favorites", "query": "/t favorite" },
+    { "name": "📋 TODOs", "query": "/t todo" }
   ]
 }

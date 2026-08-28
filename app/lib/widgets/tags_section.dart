@@ -10,6 +10,7 @@
 import 'package:flutter/material.dart';
 
 import '../rust/api.dart' as tagsy;
+import 'section_header.dart';
 import 'tag_chip.dart';
 
 /// Renders a titled section of [TagChip]s.
@@ -46,28 +47,19 @@ class TagsSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Text(
-                title,
-                style: theme.textTheme.labelMedium?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const Spacer(),
-              TextButton.icon(
-                icon: const Icon(Icons.add, size: 18),
-                label: const Text('Add'),
-                onPressed: onAdd,
-              ),
-            ],
+          SectionHeader(
+            title,
+            padding: EdgeInsets.zero,
+            trailing: TextButton.icon(
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('Add'),
+              onPressed: onAdd,
+            ),
           ),
           if (tagIds.isEmpty)
             Text(emptyLabel)

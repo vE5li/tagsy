@@ -11,27 +11,9 @@ import 'package:flutter/material.dart';
 
 import '../../rust/api.dart' as tagsy;
 import '../../widgets/tag_chip.dart';
-
-/// A non-interactive group label ("Tags" / "Files") between result rows.
-class SectionHeader extends StatelessWidget {
-  const SectionHeader(this.label, {super.key});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-      child: Text(
-        label,
-        style: theme.textTheme.labelMedium?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant,
-        ),
-      ),
-    );
-  }
-}
+// SectionHeader moved to a shared widget (it's used well beyond search now);
+// re-exported so existing `result_rows.dart` importers keep resolving it.
+export '../../widgets/section_header.dart';
 
 /// A single tag result row (color swatch + name), opening the tag detail on
 /// activate.
@@ -63,6 +45,8 @@ class TagRow extends StatelessWidget {
         : null;
     return ListTile(
       dense: true,
+      visualDensity: VisualDensity.compact,
+      minVerticalPadding: 0,
       focusNode: focusNode,
       leading: TagColorSwatch(color: tag.color),
       title: Text(tag.name, style: titleStyle),
@@ -94,6 +78,8 @@ class CreateTagRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListTile(
       dense: true,
+      visualDensity: VisualDensity.compact,
+      minVerticalPadding: 0,
       focusNode: focusNode,
       leading: const Icon(Icons.add),
       title: Text('Create tag "$name"'),
@@ -128,6 +114,8 @@ class FileRow extends StatelessWidget {
         : null;
     return ListTile(
       dense: true,
+      visualDensity: VisualDensity.compact,
+      minVerticalPadding: 0,
       focusNode: focusNode,
       title: Text(file.path, style: titleStyle),
       trailing: const Icon(Icons.chevron_right),

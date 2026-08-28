@@ -55,7 +55,10 @@ class PropertyTile extends StatelessWidget {
     final labelStyle =
         (dense ? theme.textTheme.labelSmall : theme.textTheme.labelMedium)
             ?.copyWith(
-              color: dense ? mutedColor : theme.colorScheme.onSurfaceVariant,
+              // Non-dense (primary) labels get the accent color so they stand
+              // out, matching the section headers; dense secondary-metadata
+              // labels stay muted.
+              color: dense ? mutedColor : theme.colorScheme.primary,
               fontWeight: FontWeight.bold,
             );
     return InkWell(

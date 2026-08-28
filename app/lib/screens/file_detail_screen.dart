@@ -22,6 +22,7 @@ import '../widgets/busy_icon_button.dart';
 import '../widgets/file_preview.dart';
 import '../widgets/property_tile.dart';
 import '../widgets/remote_preview.dart';
+import '../widgets/section_header.dart';
 import '../widgets/tag_picker_sheet.dart';
 import '../widgets/tags_section.dart';
 import '../widgets/text_prompt_dialog.dart';
@@ -740,17 +741,10 @@ class _FileDetailScreenState extends State<FileDetailScreen> {
   ///
   /// Preview height is bounded so it never crowds out the tags/properties.
   Widget _buildPreview(BuildContext context, tagsy.FileEntry file) {
-    final theme = Theme.of(context);
     final path = _localPath;
-    final header = Padding(
+    final header = SectionHeader(
+      path == null ? 'Remote preview' : 'Preview',
       padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Text(
-        path == null ? 'Remote preview' : 'Preview',
-        style: theme.textTheme.labelMedium?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
     );
     final body = ConstrainedBox(
       constraints: const BoxConstraints(maxHeight: 360),
