@@ -81,6 +81,7 @@ impl Harness {
             preview_generation_policy: PreviewGenerationPolicy::Never,
             editor_rules: Vec::new(),
             tag_rules,
+            home_sections: Vec::new(),
         };
         let compiled = Arc::new(CompiledTagRules::compile(&configuration.tag_rules));
         let runtime_configuration =
@@ -102,6 +103,7 @@ impl Harness {
             pending_fetches.clone(),
             data_dir.join("fetch-temp"),
             operations.clone(),
+            Vec::new(),
             Vec::new(),
             compiled.clone(),
             tagsyd::paths::Paths::new(

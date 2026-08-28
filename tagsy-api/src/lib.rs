@@ -22,6 +22,6 @@ pub use operations::{
     Direction, Operation, OperationEvent, OperationId, OperationKind, OperationStatus, Progress,
 };
 pub use types::{
-    ApiEvent, BackupOutcome, DeletedRule, EditOutcome, EditorRule, RetagSummary, SearchResults,
-    StorageStats, SubtagRule, Tag, TagRuleReport,
+    ApiEvent, BackupOutcome, DeletedRule, EditOutcome, EditorRule, HomeSection, RetagSummary,
+    SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,
 };

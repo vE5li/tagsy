@@ -61,7 +61,7 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::catalog::messages::CatalogCommand;
-use crate::configuration::{CompiledTagRules, EditorRule};
+use crate::configuration::{CompiledTagRules, EditorRule, HomeSection};
 use crate::peer::relay::ChunkRelay;
 use crate::store::CatalogStore;
 use crate::sync_directories::SyncDirectoryCommand;
@@ -98,6 +98,11 @@ pub struct ApiService {
     /// configuration; the daemon does not act on these but stores them so
     /// every frontend attached to this device sees the same set.
     editor_rules: Vec<EditorRule>,
+    /// Home-screen sections the desktop UI renders when the search box is empty
+    /// (see [`crate::configuration::HomeSection`]). Snapshot of the startup
+    /// configuration; the daemon does not act on these but stores them so every
+    /// frontend attached to this device sees the same set.
+    home_sections: Vec<HomeSection>,
     /// Compiled creation-time tag rules (see
     /// [`crate::configuration::TagRule`]). Shared with `handle_changes`, which
     /// applies them to newly-created files; this handle needs the same set to
@@ -138,6 +143,7 @@ impl ApiService {
         fetch_temp_dir: PathBuf,
         operations: crate::operations::Operations,
         editor_rules: Vec<EditorRule>,
+        home_sections: Vec<HomeSection>,
         tag_rules: Arc<CompiledTagRules>,
         paths: crate::paths::Paths,
     ) -> Self {
@@ -150,6 +156,7 @@ impl ApiService {
             fetch_temp_dir,
             operations,
             editor_rules,
+            home_sections,
             tag_rules,
             paths,
         }
@@ -160,6 +167,13 @@ impl ApiService {
     /// configuration at startup.
     pub fn editor_rules(&self) -> Vec<EditorRule> {
         self.editor_rules.clone()
+    }
+
+    /// Snapshot of the desktop UI's home-screen sections (see
+    /// [`crate::configuration::HomeSection`]). Read-only; taken from
+    /// configuration at startup.
+    pub fn home_sections(&self) -> Vec<HomeSection> {
+        self.home_sections.clone()
     }
 
     /// Open a fresh read-only DB handle for a single read call.

@@ -110,6 +110,28 @@ pub struct EditorRule {
     pub argv: Vec<String>,
 }
 
+/// A named saved search shown on the desktop UI's home screen.
+///
+/// Each section pairs a display `name` with a `query` in the same syntax the
+/// search box accepts (`/t favorite`, negation, regex, name substrings, …), so
+/// a section is just a saved search: the daemon remains the single query parser
+/// and every existing filter works unchanged. Keyed by query string rather than
+/// tag id on purpose — that is what buys the full filtering grammar instead of
+/// a bare tag membership test.
+///
+/// Like [`EditorRule`], this is config-shaped but crosses the port (the UI
+/// reads it over the backend), so it lives here in `tagsy-api`. It is read once
+/// at startup, never mutated, and never synced from peers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HomeSection {
+    /// Human-readable heading rendered above this section's results.
+    pub name: String,
+    /// The search query, in the same syntax the search box accepts. Run through
+    /// the daemon's normal query path, so all filtering (tag terms, negation,
+    /// regex, name substrings) applies.
+    pub query: String,
+}
+
 /// The result of a search: the files and tags matching a query.
 ///
 /// Both lists are matched by the same conjunction of query terms; files by

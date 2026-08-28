@@ -28,6 +28,10 @@ pub use tag_rules::{CompiledTagRules, TagRule, TagRuleError};
 // it lives in `tagsy-api`; re-exported here since it is still config-shaped and
 // callers reference `configuration::EditorRule`.
 pub use tagsy_api::EditorRule;
+// `HomeSection` likewise crosses the port (the desktop UI reads it to build the
+// home screen), so it lives in `tagsy-api`; re-exported here since it is still
+// config-shaped and callers reference `configuration::HomeSection`.
+pub use tagsy_api::HomeSection;
 use tagsy_core::{FileId, LogicalPath, PhysicalPath, TagId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +156,13 @@ pub struct Configuration {
     /// compile.
     #[serde(default)]
     pub tag_rules: Vec<TagRule>,
+    /// Named saved searches the desktop UI renders on its home screen when the
+    /// search box is empty. See [`HomeSection`]. Empty (the default) means the
+    /// home screen shows nothing until the user searches. The daemon does not
+    /// act on these; they are stored here so every frontend attached to this
+    /// device sees the same set.
+    #[serde(default)]
+    pub home_sections: Vec<HomeSection>,
 }
 
 /// How a device generates file previews.
@@ -392,6 +403,34 @@ mod tests {
         }"#;
         let configuration = Configuration::from_str(json).unwrap();
         assert!(configuration.tag_rules.is_empty());
+    }
+
+    /// A config file predating `home_sections` still parses.
+    #[test]
+    fn config_without_home_sections_field_parses() {
+        let json = r#"{
+            "sync_directories": [],
+            "listen_port": null,
+            "peers": []
+        }"#;
+        let configuration = Configuration::from_str(json).unwrap();
+        assert!(configuration.home_sections.is_empty());
+    }
+
+    #[test]
+    fn config_with_home_sections_parses() {
+        let json = r#"{
+            "sync_directories": [],
+            "listen_port": null,
+            "peers": [],
+            "home_sections": [
+                { "name": "Favorites", "query": "/t favorite" }
+            ]
+        }"#;
+        let configuration = Configuration::from_str(json).unwrap();
+        assert_eq!(configuration.home_sections.len(), 1);
+        assert_eq!(configuration.home_sections[0].name, "Favorites");
+        assert_eq!(configuration.home_sections[0].query, "/t favorite");
     }
 
     #[test]

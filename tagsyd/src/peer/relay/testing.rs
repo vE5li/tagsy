@@ -23,6 +23,7 @@ pub(crate) fn runtime_for_test() -> Arc<RwLock<RuntimeConfiguration>> {
         preview_generation_policy: PreviewGenerationPolicy::Lazy,
         editor_rules: Vec::new(),
         tag_rules: Vec::new(),
+        home_sections: Vec::new(),
     };
     Arc::new(RwLock::new(RuntimeConfiguration::new(&configuration)))
 }

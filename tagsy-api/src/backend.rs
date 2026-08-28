@@ -15,8 +15,8 @@ use tokio::sync::broadcast;
 
 use crate::operations::{Operation, OperationEvent};
 use crate::{
-    ApiError, ApiEvent, BackupOutcome, DeletedRule, EditOutcome, EditorRule, RetagSummary,
-    SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,
+    ApiError, ApiEvent, BackupOutcome, DeletedRule, EditOutcome, EditorRule, HomeSection,
+    RetagSummary, SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,
 };
 
 /// The transport-agnostic UI-facing API.
@@ -286,6 +286,11 @@ pub trait Backend {
     /// snapshot read; the desktop UI calls this once when preparing to launch
     /// an editor.
     fn editor_rules(&self) -> impl Future<Output = Result<Vec<EditorRule>, ApiError>> + Send;
+
+    /// The daemon's configured home-screen sections (see [`HomeSection`]). A
+    /// snapshot read; the desktop UI calls this once to build the home screen
+    /// shown when the search box is empty.
+    fn home_sections(&self) -> impl Future<Output = Result<Vec<HomeSection>, ApiError>> + Send;
 
     /// Re-apply the configured tag rules to files already in the catalog,
     /// additively. With `dry_run` the work is planned and reported but nothing

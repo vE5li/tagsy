@@ -46,7 +46,7 @@ use std::path::PathBuf;
 pub use tagsy_api::{Backend, EventStream, OperationStream, OperationUpdate};
 use tagsy_core::{FileId, FileInfo, Preview, TagId};
 
-use crate::configuration::EditorRule;
+use crate::configuration::{EditorRule, HomeSection};
 use crate::frontend::api::{
     ApiError, ApiService, BackupOutcome, EditOutcome, RetagSummary, SearchResults, StorageStats,
     TagRuleReport,
@@ -259,6 +259,10 @@ impl Backend for InProcessBackend {
 
     async fn editor_rules(&self) -> Result<Vec<EditorRule>, ApiError> {
         Ok(self.api.editor_rules())
+    }
+
+    async fn home_sections(&self) -> Result<Vec<HomeSection>, ApiError> {
+        Ok(self.api.home_sections())
     }
 
     async fn retag(&self, dry_run: bool) -> Result<RetagSummary, ApiError> {
@@ -580,6 +584,13 @@ impl Backend for AnyBackend {
         match self {
             AnyBackend::InProcess(backend) => backend.editor_rules().await,
             AnyBackend::Ipc(backend) => backend.editor_rules().await,
+        }
+    }
+
+    async fn home_sections(&self) -> Result<Vec<HomeSection>, ApiError> {
+        match self {
+            AnyBackend::InProcess(backend) => backend.home_sections().await,
+            AnyBackend::Ipc(backend) => backend.home_sections().await,
         }
     }
 

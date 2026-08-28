@@ -71,6 +71,7 @@ async fn backup_bundles_databases_sync_files_and_manifest() {
         preview_generation_policy: PreviewGenerationPolicy::Never,
         editor_rules: Vec::new(),
         tag_rules: Vec::new(),
+        home_sections: Vec::new(),
     };
     let runtime_configuration = Arc::new(RwLock::new(RuntimeConfiguration::new(&configuration)));
     let compiled = Arc::new(CompiledTagRules::compile(&configuration.tag_rules));
@@ -88,6 +89,7 @@ async fn backup_bundles_databases_sync_files_and_manifest() {
         pending_fetches,
         data_dir.join("fetch-temp"),
         Operations::new(),
+        Vec::new(),
         Vec::new(),
         compiled,
         Paths::new(
@@ -200,6 +202,7 @@ async fn backup_without_backup_dir_errors() {
         preview_generation_policy: PreviewGenerationPolicy::Never,
         editor_rules: Vec::new(),
         tag_rules: Vec::new(),
+        home_sections: Vec::new(),
     };
     let runtime_configuration = Arc::new(RwLock::new(RuntimeConfiguration::new(&configuration)));
     let compiled = Arc::new(CompiledTagRules::compile(&configuration.tag_rules));
@@ -217,6 +220,7 @@ async fn backup_without_backup_dir_errors() {
         pending_fetches,
         data_dir.join("fetch-temp"),
         Operations::new(),
+        Vec::new(),
         Vec::new(),
         compiled,
         // No backup dir configured.

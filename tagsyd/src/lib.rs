@@ -305,6 +305,7 @@ pub async fn run(
         fetch_temp_dir,
         operations.clone(),
         configuration.editor_rules.clone(),
+        configuration.home_sections.clone(),
         tag_rules.clone(),
         paths.clone(),
     );

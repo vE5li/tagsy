@@ -23,6 +23,7 @@ import '../features/search/operations_button.dart';
 import '../features/search/purge_previews_button.dart';
 import '../features/search/result_rows.dart';
 import '../features/search/search_field.dart';
+import '../features/search/sections_view.dart';
 import '../features/search/storage_stats_indicator.dart';
 import '../rust/api.dart' as tagsy;
 import '../session/session.dart';
@@ -178,6 +179,17 @@ class _HomeScreenState extends State<HomeScreen> {
     final session = widget.session;
     if (session == null) return;
     final epoch = ++_queryEpoch;
+    // An empty (or whitespace-only) query means "no search" — reset back to the
+    // null state so the home sections reappear, and skip the round-trip. Never
+    // run an empty `runQuery`: it would scan the entire store (see class doc).
+    if (_query.text.trim().isEmpty) {
+      setState(() {
+        _results = null;
+        _error = null;
+        _loading = false;
+      });
+      return;
+    }
     setState(() => _loading = true);
     try {
       final result = await session.repository.runQuery(
@@ -424,16 +436,16 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     final results = _results;
     if (results == null) {
-      // No query has run yet; leave the surface empty rather than
-      // pre-populating it (which would require an eager listing).
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.symmetric(horizontal: 32),
-          child: Text(
-            'Start typing to search files and tags.',
-            textAlign: TextAlign.center,
-          ),
-        ),
+      // No query has run yet. Instead of an eager full-store listing, render
+      // the config-defined home sections (named saved searches). Each runs its
+      // own bounded query; [SectionsView] owns that fetching. When no sections
+      // are configured it renders nothing, leaving the surface blank.
+      return SectionsView(
+        session: session,
+        controller: _rows,
+        onOpenTag: (tag, index) => _openTag(tag, restoreIndex: index),
+        onOpenFile: (file, index) => _openFile(file, restoreIndex: index),
+        onExitTop: _queryFocus.requestFocus,
       );
     }
     final createCandidate = _createCandidate;

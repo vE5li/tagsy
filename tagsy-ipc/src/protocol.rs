@@ -11,8 +11,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tagsy_api::{
-    ApiError, ApiEvent, BackupOutcome, DeletedRule, EditorRule, RetagSummary, SearchResults,
-    StorageStats, SubtagRule, Tag, TagRuleReport,
+    ApiError, ApiEvent, BackupOutcome, DeletedRule, EditorRule, HomeSection, RetagSummary,
+    SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,
 };
 use tagsy_core::{FileId, FileInfo, Preview, TagId};
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -192,6 +192,9 @@ pub enum ControlRequest {
     /// Read the daemon's external-editor rules. Answered with
     /// [`ControlResponse::EditorRules`].
     EditorRules,
+    /// Read the daemon's home-screen sections. Answered with
+    /// [`ControlResponse::HomeSections`].
+    HomeSections,
     /// Re-apply the configured tag rules to the existing catalog. Answered
     /// with [`ControlResponse::Retagged`]. With `dry_run` the daemon plans and
     /// reports the work without enqueuing it.
@@ -260,6 +263,9 @@ pub enum ControlResponse {
     /// The daemon's external-editor rules (answer to
     /// [`ControlRequest::EditorRules`]).
     EditorRules(Vec<EditorRule>),
+    /// The daemon's home-screen sections (answer to
+    /// [`ControlRequest::HomeSections`]).
+    HomeSections(Vec<HomeSection>),
     /// What a retag did, or would do under `dry_run` (answer to
     /// [`ControlRequest::Retag`]).
     Retagged(RetagSummary),

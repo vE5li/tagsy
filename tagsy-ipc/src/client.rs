@@ -14,8 +14,8 @@ use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use tagsy_api::{
     ApiError, ApiEvent, Backend, BackupOutcome, DeletedRule, EditOutcome, EditorRule, EventStream,
-    Operation, OperationEvent, OperationStream, RetagSummary, SearchResults, StorageStats,
-    SubtagRule, Tag, TagRuleReport,
+    HomeSection, Operation, OperationEvent, OperationStream, RetagSummary, SearchResults,
+    StorageStats, SubtagRule, Tag, TagRuleReport,
 };
 use tagsy_core::content::hash_and_len;
 use tagsy_core::{FileId, FileInfo, Preview, TagId};
@@ -686,6 +686,13 @@ impl Backend for IpcBackend {
     async fn editor_rules(&self) -> Result<Vec<EditorRule>, ApiError> {
         match self.call(ControlRequest::EditorRules).await? {
             ControlResponse::EditorRules(rules) => Ok(rules),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    async fn home_sections(&self) -> Result<Vec<HomeSection>, ApiError> {
+        match self.call(ControlRequest::HomeSections).await? {
+            ControlResponse::HomeSections(sections) => Ok(sections),
             other => Err(unexpected(other)),
         }
     }

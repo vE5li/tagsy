@@ -497,6 +497,7 @@ async fn dispatch(
             Err(error) => ControlResponse::Error(error),
         },
         ControlRequest::EditorRules => ControlResponse::EditorRules(api.editor_rules()),
+        ControlRequest::HomeSections => ControlResponse::HomeSections(api.home_sections()),
         ControlRequest::Retag { dry_run } => match api.retag(dry_run) {
             Ok(summary) => ControlResponse::Retagged(summary),
             Err(error) => ControlResponse::Error(error),

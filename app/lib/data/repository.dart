@@ -158,6 +158,11 @@ class TagsyRepository {
   /// The daemon's configured external-editor rules.
   Future<List<tagsy.EditorRuleEntry>> editorRules() => _client.editorRules();
 
+  /// The daemon's configured home-screen sections (named saved searches shown
+  /// on the empty home screen).
+  Future<List<tagsy.HomeSectionEntry>> homeSections() =>
+      _client.homeSections();
+
   // --- Previews -------------------------------------------------------------
 
   /// The preview for a file's current content.

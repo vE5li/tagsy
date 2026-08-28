@@ -598,6 +598,7 @@ mod tests {
             preview_generation_policy: crate::configuration::PreviewGenerationPolicy::Lazy,
             editor_rules: Vec::new(),
             tag_rules: Vec::new(),
+            home_sections: Vec::new(),
         };
         let paths = Paths::new(data_dir, None::<PathBuf>, data_dir.join("identity"));
         let (change_sender, _change_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -808,6 +809,7 @@ mod tests {
             preview_generation_policy: crate::configuration::PreviewGenerationPolicy::Lazy,
             editor_rules: Vec::new(),
             tag_rules: Vec::new(),
+            home_sections: Vec::new(),
         };
         let paths = Paths::new(&data_dir, None::<PathBuf>, data_dir.join("identity"));
         let (change_sender, mut change_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -878,6 +880,7 @@ mod tests {
             preview_generation_policy: crate::configuration::PreviewGenerationPolicy::Lazy,
             editor_rules: Vec::new(),
             tag_rules: Vec::new(),
+            home_sections: Vec::new(),
         };
         let paths = Paths::new(data_dir, None::<PathBuf>, data_dir.join("identity"));
         let (change_sender, change_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -1047,6 +1050,7 @@ mod tests {
             preview_generation_policy: crate::configuration::PreviewGenerationPolicy::Lazy,
             editor_rules: Vec::new(),
             tag_rules: Vec::new(),
+            home_sections: Vec::new(),
         };
         let paths = Paths::new(&data_dir, None::<PathBuf>, data_dir.join("identity"));
         let (change_sender, _change_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -1421,6 +1425,7 @@ mod tests {
             preview_generation_policy: crate::configuration::PreviewGenerationPolicy::Lazy,
             editor_rules: Vec::new(),
             tag_rules: Vec::new(),
+            home_sections: Vec::new(),
         };
         let paths = Paths::new(data_dir, None::<PathBuf>, data_dir.join("identity"));
         let (change_sender, change_receiver) = tokio::sync::mpsc::unbounded_channel();

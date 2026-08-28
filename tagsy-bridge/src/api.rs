@@ -25,6 +25,7 @@
 // glob and the generated code fails to compile.
 pub use tagsy_core::{FileInfo, Preview};
 pub use tagsyd::configuration::EditorRule;
+pub use tagsyd::configuration::HomeSection;
 pub use tagsyd::frontend::api::{ApiError, ApiEvent, StorageStats};
 pub use tagsyd::operations::{
     Direction, Operation, OperationEvent, OperationKind, OperationStatus,
@@ -264,6 +265,29 @@ impl From<EditorRule> for EditorRuleEntry {
         Self {
             tag_id: rule.tag_id.to_string(),
             argv: rule.argv,
+        }
+    }
+}
+
+/// A home-screen section flattened for the Dart UI.
+///
+/// Mirrors [`HomeSection`] as a DTO with plain fields (rather than an opaque
+/// handle) so the Dart side can read `name` / `query` directly; see
+/// [`FileEntry`] for the same DTO-flattening pattern used elsewhere in this
+/// crate. The `query` is passed straight back into `run_query`, so the daemon
+/// remains the single query parser.
+pub struct HomeSectionEntry {
+    /// Human-readable heading rendered above this section's results.
+    pub name: String,
+    /// The search query, in the same syntax the search box accepts.
+    pub query: String,
+}
+
+impl From<HomeSection> for HomeSectionEntry {
+    fn from(section: HomeSection) -> Self {
+        Self {
+            name: section.name,
+            query: section.query,
         }
     }
 }
@@ -768,6 +792,23 @@ impl Tagsy {
             .await?
             .into_iter()
             .map(EditorRuleEntry::from)
+            .collect())
+    }
+
+    /// The daemon's configured home-screen sections (see [`HomeSection`]) as
+    /// flattened [`HomeSectionEntry`] rows the Dart UI reads directly.
+    ///
+    /// The desktop UI renders these when the search box is empty: each
+    /// section's `query` is run through the normal query path (so all filtering
+    /// applies) and its results are shown under the section `name`. An empty
+    /// list means the home screen shows nothing until the user searches.
+    pub async fn home_sections(&self) -> Result<Vec<HomeSectionEntry>, ApiError> {
+        Ok(self
+            .try_backend()?
+            .home_sections()
+            .await?
+            .into_iter()
+            .map(HomeSectionEntry::from)
             .collect())
     }
 
