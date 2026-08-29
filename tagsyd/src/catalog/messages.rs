@@ -140,6 +140,22 @@ pub enum CatalogCommand {
     /// session's frame loop (the fetch needs that loop to relay
     /// `ChunkRequest`/`ChunkData`). Fire-and-forget.
     ReconcilePlacement { file_id: FileId },
+    /// Sweep the whole catalog for files that *should* be held locally but
+    /// whose bytes are absent on disk, and fetch each one once. Enqueued by a
+    /// peer session right after it queues its outbound manifests, so the sweep
+    /// runs inside `handle_changes` (the sole DB reader/writer for the main
+    /// catalog) rather than blocking the session's frame loop.
+    ///
+    /// This is the connect-time recovery for the transfer stack's deliberate
+    /// no-retry policy: a failed pull leaves a file cataloged at its correct
+    /// version with no local bytes, and nothing else re-drives it (the existing
+    /// `ReconcilePlacement` sweep only covers files the peer re-announces, and
+    /// only their TagBased placement — Universal gaps are never revisited).
+    /// `handle_changes` enumerates the catalog, asks the sync-directory actor
+    /// which files are missing on disk, and spawns a flood fetch per gap. No
+    /// "missing" state is stored; the set is recomputed each connect.
+    /// Fire-and-forget.
+    SweepMissingContent,
     /// Record a file + version into the catalog (`files` + `file_versions`) on
     /// behalf of a peer session's `Manifest` reconciliation. The session
     /// decides *what* to catalog (its divergence/LWW logic stays there) but

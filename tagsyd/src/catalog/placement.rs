@@ -229,14 +229,45 @@ pub(crate) async fn fetch_and_place_deferred(
     }
 
     // A TagBased directory wants this file but we hold no local copy. Fetch the
-    // bytes on demand using the file's latest catalog version hash. Because the
-    // catalog is byte-independent, this hash is present for any file we know
-    // about even though its bytes are not (yet) local.
+    // bytes on demand using the file's latest catalog version hash.
+    fetch_and_materialize(
+        pending_fetches,
+        change_sender,
+        operations,
+        file_id,
+        logical_path,
+        file_tags,
+        latest_version,
+    )
+    .await;
+}
+
+/// Fetch a file's bytes on demand — keyed by its latest catalog version hash —
+/// and enqueue a [`CatalogCommand::Materialize`] to place them into every
+/// matching sync directory.
+///
+/// Shared by the deferred tag-placement path ([`fetch_and_place_deferred`]) and
+/// the connect-time missing-content sweep. Both know a file *should* be local
+/// but hold no bytes, and both recover it the same way: one flood fetch, then
+/// materialize. Takes only owned, `Send` data so the caller can spawn it off
+/// the single-threaded `handle_changes` consumer (awaiting a `fetch_via_relay`
+/// there would block the loop the resulting `Materialize` must be dequeued on).
+pub(crate) async fn fetch_and_materialize(
+    pending_fetches: &ChunkRelay,
+    change_sender: &UnboundedSender<CatalogCommand>,
+    operations: &Operations,
+    file_id: FileId,
+    logical_path: LogicalPath,
+    file_tags: Vec<TagId>,
+    latest_version: Option<(String, u64)>,
+) {
+    // Because the catalog is byte-independent, this hash is present for any file
+    // we know about even though its bytes are not (yet) local.
     let Some((expected_hash, expected_size)) = latest_version else {
         // No version has ever been recorded. Nothing to fetch by; a future
         // announcement / materialize will place it. Soft deferral.
         log::debug!(
-            "plan_placement: no recorded version for {}; leaving placement for a future \
+            "fetch_and_materialize: no recorded version for {}; leaving placement for a future \
              announcement",
             file_id.to_string()
         );
@@ -249,7 +280,7 @@ pub(crate) async fn fetch_and_place_deferred(
     // reply to a message we enqueue onto our own channel would deadlock. The
     // relay floods the live peer tree and resolves when the bytes arrive.
     log::debug!(
-        "plan_placement: fetching {} at catalog hash {} to place it locally",
+        "fetch_and_materialize: fetching {} at catalog hash {} to place it locally",
         file_id.to_string(),
         expected_hash,
     );
@@ -267,7 +298,7 @@ pub(crate) async fn fetch_and_place_deferred(
     {
         Ok(content) => {
             log::debug!(
-                "plan_placement: fetch of {} succeeded; materializing",
+                "fetch_and_materialize: fetch of {} succeeded; materializing",
                 file_id.to_string()
             );
             placing.complete();
@@ -277,8 +308,8 @@ pub(crate) async fn fetch_and_place_deferred(
             // No peer had the bytes. Soft deferral: a later reconnect /
             // announcement retries placement.
             log::debug!(
-                "plan_placement: fetch of {} failed ({error:?}); placement deferred until a peer \
-                 can serve it",
+                "fetch_and_materialize: fetch of {} failed ({error:?}); placement deferred until \
+                 a peer can serve it",
                 file_id.to_string()
             );
             placing.fail(format!("{error:?}"));
@@ -306,8 +337,8 @@ pub(crate) async fn fetch_and_place_deferred(
         },
     }) {
         log::error!(
-            "plan_placement: change channel closed; cannot materialize fetched bytes for {}: \
-             {error}",
+            "fetch_and_materialize: change channel closed; cannot materialize fetched bytes for \
+             {}: {error}",
             file_id.to_string()
         );
     }

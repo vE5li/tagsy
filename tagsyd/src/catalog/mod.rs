@@ -60,7 +60,7 @@ use crate::catalog::previews::preview_extension_for;
 use crate::catalog::previews::{PREVIEW_GENERATION_COMPILED, resolve_preview};
 use crate::configuration::{CompiledTagRules, Configuration, RuntimeConfiguration};
 use crate::peer::relay::{ChunkRelay, PreviewRelay};
-use crate::store::CatalogStore;
+use crate::store::{self, CatalogStore};
 use crate::sync_directories::SyncDirectoryCommand;
 use crate::{clock, operations};
 
@@ -595,6 +595,111 @@ impl CatalogWriter {
                                 &change_sender,
                                 &operations,
                                 deferred,
+                            )
+                            .await;
+                        });
+                    }
+                    continue;
+                }
+                CatalogCommand::SweepMissingContent => {
+                    // Connect-time recovery for the transfer stack's no-retry
+                    // policy: enumerate every live file, ask the sync-directory
+                    // actor which should be local but have no bytes on disk, and
+                    // fetch each once. Universal directories (never revisited by
+                    // `ReconcilePlacement`) are covered here.
+                    //
+                    // The synchronous DB reads run on this loop; the fetch must
+                    // NOT be awaited here (same reasoning as `ReconcilePlacement`
+                    // above: it blocks on the network and finishes by enqueueing
+                    // a `Materialize` onto this loop's own channel, which could
+                    // then never be dequeued). We DO await the sync-directory
+                    // actor's reply — that is a different actor's channel, not
+                    // our own, so it cannot self-deadlock — then spawn one
+                    // `fetch_and_materialize` per gap.
+                    let files = match database.get_all_files(store::DeletedRule::Exclude) {
+                        Ok(files) => files,
+                        Err(error) => {
+                            log::error!(
+                                "SweepMissingContent: failed to list catalog files: {error:?}"
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Project each file into (id, logical_path, tags) for the
+                    // membership test, keeping its latest (content_hash, size)
+                    // aside to fetch by. `FileInfo` already carries the latest
+                    // version, so no extra per-file version read is needed.
+                    let mut catalog_files = Vec::with_capacity(files.len());
+                    let mut versions = std::collections::HashMap::with_capacity(files.len());
+                    for file in files {
+                        let tags = match database
+                            .tag_ids_for_file(file.file_id, store::SubtagRule::Exclude)
+                        {
+                            Ok(tags) => tags.into_iter().collect::<Vec<_>>(),
+                            Err(error) => {
+                                log::error!(
+                                    "SweepMissingContent: failed to read tags for {}: {error:?}",
+                                    file.file_id.to_string()
+                                );
+                                continue;
+                            }
+                        };
+                        versions.insert(
+                            file.file_id,
+                            (
+                                file.logical_path.clone(),
+                                tags.clone(),
+                                file.content_hash.clone(),
+                                file.size,
+                            ),
+                        );
+                        catalog_files.push((file.file_id, file.logical_path, tags));
+                    }
+
+                    let (respond_to, missing_rx) = tokio::sync::oneshot::channel();
+                    if let Err(error) = command_sender.send(SyncDirectoryCommand::MissingContent {
+                        catalog_files,
+                        respond_to,
+                    }) {
+                        log::error!("SweepMissingContent: sync-directory channel closed: {error}");
+                        continue;
+                    }
+                    let missing = match missing_rx.await {
+                        Ok(missing) => missing,
+                        Err(_) => {
+                            log::warn!(
+                                "SweepMissingContent: sync-directory actor dropped responder; \
+                                 skipping sweep"
+                            );
+                            continue;
+                        }
+                    };
+
+                    if !missing.is_empty() {
+                        log::info!(
+                            "SweepMissingContent: {} file(s) cataloged but missing bytes; fetching",
+                            missing.len()
+                        );
+                    }
+                    for file_id in missing {
+                        let Some((logical_path, file_tags, content_hash, size)) =
+                            versions.remove(&file_id)
+                        else {
+                            continue;
+                        };
+                        let pending_fetches = pending_fetches.clone();
+                        let change_sender = change_sender.clone();
+                        let operations = operations.clone();
+                        tokio::spawn(async move {
+                            placement::fetch_and_materialize(
+                                &pending_fetches,
+                                &change_sender,
+                                &operations,
+                                file_id,
+                                logical_path,
+                                file_tags,
+                                Some((content_hash, size)),
                             )
                             .await;
                         });

@@ -446,6 +446,24 @@ pub async fn run_peer_session<S>(
         }
     }
 
+    // Now that a peer is reachable, recover any files this device should hold
+    // but is missing the bytes for (a failed pull leaves such a gap, and the
+    // transfer stack has no retry by design). Handed to `handle_changes` — the
+    // sole catalog reader/writer, which also has the sync-directory channel to
+    // learn what is missing on disk — so the sweep and its flood fetches run
+    // there rather than blocking this session's frame loop. Fired once per
+    // connect: reconnection is the sanctioned external recovery trigger. The
+    // fetch floods the live peer tree, so any connected holder can serve it,
+    // not only this peer.
+    if change_sender
+        .send(CatalogCommand::SweepMissingContent)
+        .is_err()
+    {
+        log::warn!(
+            "Failed to queue missing-content sweep on connect to {peer_name}: catalog writer gone"
+        );
+    }
+
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {

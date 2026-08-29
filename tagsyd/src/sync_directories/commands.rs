@@ -110,6 +110,22 @@ pub enum SyncDirectoryCommand {
     LocalFileIds {
         respond_to: tokio::sync::oneshot::Sender<HashSet<FileId>>,
     },
+    /// Given the catalog's live files (each with its logical path and current
+    /// tag set), report which of them *should* be held locally but whose bytes
+    /// are absent on disk. A file is missing when no sync directory that should
+    /// hold it — Universal directories always, TagBased directories whose tags
+    /// the file satisfies (`contains_all_tags`) — actually has the bytes on
+    /// disk (`first_holding_path`).
+    ///
+    /// This is the connect-time recovery enumeration: because the receive path
+    /// has no retries, a failed pull leaves a file cataloged at its correct
+    /// version with no local bytes. The caller fetches each returned file once
+    /// per peer connect (by its latest catalog version hash). Computed on
+    /// demand — no "missing" state is stored.
+    MissingContent {
+        catalog_files: Vec<(FileId, LogicalPath, Vec<TagId>)>,
+        respond_to: tokio::sync::oneshot::Sender<Vec<FileId>>,
+    },
     /// Snapshot the sync directories this device is *currently* serving —
     /// each as a [`SyncDirectory`] carrying its absolute `path` and
     /// `sync_type`. This reflects live actor state (directories whose setup
@@ -512,6 +528,39 @@ impl SyncDirectories {
                     }
                 }
                 let _ = respond_to.send(ids);
+            }
+            SyncDirectoryCommand::MissingContent {
+                catalog_files,
+                respond_to,
+            } => {
+                // For each live catalog file, decide whether *some* sync
+                // directory that should hold it actually has the bytes on disk.
+                // Universal directories should hold every file; TagBased ones
+                // only files whose tags they match. `first_holding_path` does
+                // the authoritative on-disk (`.exists()`) check across all
+                // directories, so a file whose index row survived but whose
+                // bytes are gone still counts as missing.
+                let mut missing: Vec<FileId> = Vec::new();
+                for (file_id, _logical_path, file_tags) in catalog_files {
+                    let should_be_local = self.sync_directories.iter().any(|sync_directory| {
+                        match &sync_directory.sync_type {
+                            SyncType::Universal { .. } => true,
+                            SyncType::TagBased {
+                                tags: sync_directory_tags,
+                            } => crate::catalog::placement::contains_all_tags(
+                                sync_directory_tags,
+                                &file_tags,
+                            ),
+                        }
+                    });
+                    if !should_be_local {
+                        continue;
+                    }
+                    if self.first_holding_path(file_id).is_none() {
+                        missing.push(file_id);
+                    }
+                }
+                let _ = respond_to.send(missing);
             }
             SyncDirectoryCommand::ListDirectories { respond_to } => {
                 // Reconstruct a `SyncDirectory` per open directory. `OpenDirectory`
