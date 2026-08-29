@@ -383,6 +383,9 @@ pub async fn run(
         verified_hashes: VerifiedHashCache::new(),
         operations: operations.clone(),
         connections: connections.clone(),
+        pull_scheduler: crate::peer::pull_scheduler::PullScheduler::new(
+            configuration.max_concurrent_pulls,
+        ),
     };
 
     let mut peer_handles = Vec::new();

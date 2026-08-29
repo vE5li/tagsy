@@ -118,6 +118,13 @@ pub struct TagDeclaration {
     pub color: String,
 }
 
+/// Default for [`Configuration::max_concurrent_pulls`]: a modest cap that keeps
+/// a bulk import from saturating the link or the file-descriptor table while
+/// still letting several transfers overlap for throughput.
+pub fn default_max_concurrent_pulls() -> usize {
+    8
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Configuration {
     /// Synchronized directories on the device itself.
@@ -143,6 +150,17 @@ pub struct Configuration {
     /// can serve them onward.
     #[serde(default)]
     pub preview_generation_policy: PreviewGenerationPolicy,
+    /// Maximum number of file byte-transfers (receives/pulls) this device runs
+    /// concurrently across *all* peers. A bulk change — e.g. dropping a
+    /// thousand files into a sync directory — announces every file in quick
+    /// succession; without a cap each announcement would immediately start its
+    /// own receive, flooding the network with chunk requests and opening a
+    /// temp file per transfer. Pulls beyond this limit queue and start as
+    /// running ones finish (see
+    /// [`crate::peer::pull_scheduler::PullScheduler`]). Defaults to
+    /// [`default_max_concurrent_pulls`].
+    #[serde(default = "default_max_concurrent_pulls")]
+    pub max_concurrent_pulls: usize,
     /// Query → `argv` mapping consulted by the desktop UI's external-edit
     /// action. See [`EditorRule`]. Empty (the default) means no file has an
     /// external editor and the UI reports that rather than guessing. The

@@ -86,6 +86,10 @@ pub struct PeerContext {
     /// whole lifetime so the UI can show which peers are connected right now —
     /// connection *state*, distinct from the operations above.
     pub connections: crate::connections::Connections,
+    /// Process-wide gate bounding how many file byte-transfers run at once.
+    /// Every session shares one clone so a bulk import announced across peers
+    /// can't start an unbounded number of concurrent receives.
+    pub pull_scheduler: crate::peer::pull_scheduler::PullScheduler,
 }
 
 /// Drive a fully-handshaken WebSocket connection until it closes.
@@ -103,13 +107,14 @@ pub async fn run_peer_session<S>(
     peer_public_key: &str,
     peer_name: &str,
     main_db_path: &std::path::Path,
-    mut outgoing: SplitSink<WebSocketStream<S>, Message>,
+    outgoing: SplitSink<WebSocketStream<S>, Message>,
     mut incoming: SplitStream<WebSocketStream<S>>,
     direction: operations::Direction,
     context: PeerContext,
     shutdown: &CancellationToken,
 ) where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    // `Send + 'static`: the write half is moved onto a spawned writer task.
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let PeerContext {
         runtime_configuration,
@@ -121,6 +126,7 @@ pub async fn run_peer_session<S>(
         verified_hashes,
         operations,
         connections,
+        pull_scheduler,
     } = context;
 
     // Register this peer as connected for the life of the session. A connection
@@ -148,7 +154,7 @@ pub async fn run_peer_session<S>(
         }
     };
 
-    let (peer_tx, mut peer_rx) = tokio::sync::mpsc::unbounded_channel::<Frame>();
+    let (peer_tx, peer_rx) = tokio::sync::mpsc::unbounded_channel::<Frame>();
     // Sentinel clone retained for the lifetime of the session: we use
     // `same_channel` against the slot in `RuntimePeer.outbound` to know whether
     // the sender currently parked there is still ours (vs. one a sibling
@@ -178,11 +184,19 @@ pub async fn run_peer_session<S>(
     // request toward this peer; a later chunk central has caught up on is served
     // by it like any other holder — no session to renegotiate. The outcome is
     // forwarded onto `receiver_done_rx`.
+    //
+    // Every pull is admitted through the process-wide `pull_scheduler`: it runs
+    // only once a concurrency slot is free (queueing behind other transfers
+    // across all peers), and a duplicate submission for content already in
+    // flight is coalesced away. The "receiving file" operation is begun inside
+    // the job — i.e. when the pull actually starts, not while it waits in the
+    // queue — so the UI's active-transfer count reflects real in-flight work.
     let start_pull = {
         let pending_fetches = pending_fetches.clone();
         let receiver_done_tx = receiver_done_tx.clone();
         let transfer_temp_dir = transfer_temp_dir.clone();
         let operations = operations.clone();
+        let pull_scheduler = pull_scheduler.clone();
         let peer_name = peer_name.to_owned();
         let peer_public_key = peer_public_key.to_owned();
 
@@ -190,44 +204,57 @@ pub async fn run_peer_session<S>(
               content_hash: String,
               expected_size: u64,
               purpose: ReceiverPurpose| {
-            let temp_path = transfer_temp_dir.join(uuid::Uuid::new_v4().to_string());
-
-            // Surface this pull as a live "receiving file" operation with byte
-            // progress. The handle lives on the bridge task below and reaches a
-            // terminal state from the receive outcome.
-            let receiving = operations.begin(operations::OperationKind::receiving_file(
-                file_id, &peer_name,
-            ));
-            let progress = {
-                let operations = operations.clone();
-                let id = receiving.id();
-                Box::new(move |done: u64, total: Option<u64>| {
-                    operations.report_progress(id, done, total);
-                }) as transfer::ProgressSink
-            };
-
-            let outcome_rx = spawn_content_receive(
-                &pending_fetches,
-                file_id,
-                content_hash,
-                expected_size,
-                temp_path,
-                Some(peer_public_key.clone()),
-                Some(progress),
-            );
-
+            // Clone per submission so the spawned job owns its captures.
+            let pending_fetches = pending_fetches.clone();
             let done_tx = receiver_done_tx.clone();
-            tokio::spawn(async move {
-                if let Ok(outcome) = outcome_rx.await {
-                    match &outcome {
-                        ReceiveOutcome::Complete(_) => receiving.complete(),
-                        ReceiveOutcome::Failed(error) => receiving.fail(error.to_string()),
-                    }
-                    let _ = done_tx.send((purpose, outcome));
-                }
-                // If `outcome_rx` closed without a value, `receiving` drops
-                // here and the operation is marked aborted.
-            });
+            let transfer_temp_dir = transfer_temp_dir.clone();
+            let operations = operations.clone();
+            let pull_scheduler = pull_scheduler.clone();
+            let peer_name = peer_name.clone();
+            let peer_public_key = peer_public_key.clone();
+            let job_content_hash = content_hash.clone();
+
+            async move {
+                pull_scheduler
+                    .submit(file_id, content_hash, move || async move {
+                        let temp_path = transfer_temp_dir.join(uuid::Uuid::new_v4().to_string());
+
+                        // Surface this pull as a live "receiving file" operation
+                        // with byte progress. Begun here (post-admission) so a
+                        // queued pull doesn't show as active before it runs.
+                        let receiving = operations.begin(
+                            operations::OperationKind::receiving_file(file_id, &peer_name),
+                        );
+                        let progress = {
+                            let operations = operations.clone();
+                            let id = receiving.id();
+                            Box::new(move |done: u64, total: Option<u64>| {
+                                operations.report_progress(id, done, total);
+                            }) as transfer::ProgressSink
+                        };
+
+                        let outcome_rx = spawn_content_receive(
+                            &pending_fetches,
+                            file_id,
+                            job_content_hash,
+                            expected_size,
+                            temp_path,
+                            Some(peer_public_key.clone()),
+                            Some(progress),
+                        );
+
+                        if let Ok(outcome) = outcome_rx.await {
+                            match &outcome {
+                                ReceiveOutcome::Complete(_) => receiving.complete(),
+                                ReceiveOutcome::Failed(error) => receiving.fail(error.to_string()),
+                            }
+                            let _ = done_tx.send((purpose, outcome));
+                        }
+                        // If `outcome_rx` closed without a value, `receiving`
+                        // drops here and the operation is marked aborted.
+                    })
+                    .await;
+            }
         }
     };
 
@@ -308,48 +335,82 @@ pub async fn run_peer_session<S>(
     // Relationship rows carry no FK on the tag definition (`entries` table), so
     // applying `FileTagged` before the corresponding `TagAdded` definition
     // (which may still be in flight via `TagRequest`) is safe.
+    // The socket's write half (`outgoing`) is owned exclusively by a dedicated
+    // *writer task* spawned below; this session task never writes to the socket
+    // again. That decoupling is what makes the initial manifests safe to send
+    // even when they are large: they are queued on `our_sender` (drained by the
+    // writer as TCP allows) instead of being awaited inline here, so this task
+    // is free to keep reading inbound frames. Sending a big manifest while the
+    // peer is simultaneously sending us one (its `TagRequest`/manifest burst)
+    // used to deadlock — both sides blocked writing, neither reading — because
+    // the send was awaited on the same task that had to read. See the writer
+    // task for how liveness (ping) and pongs are handled off this task too.
+    //
+    // Shared with the writer task, both lock-free:
+    // - `last_activity`: milliseconds (since `session_start`) of the most recent
+    //   inbound frame; the reader stores, the writer loads to decide when the peer
+    //   has gone silent past `LIVENESS_TIMEOUT`.
+    // - `pong_requested`: set by the reader when a WebSocket Ping arrives (we split
+    //   the stream, so tungstenite can't auto-pong); the writer clears it and sends
+    //   an empty Pong. A boolean suffices — the RFC lets a pong carry any payload
+    //   (including none) and lets pongs be coalesced/dropped, so we don't echo the
+    //   ping's bytes.
+    // - `link_dead`: cancelled by the writer if a socket write fails, so this
+    //   reader loop breaks promptly and teardown runs.
+    let session_start = tokio::time::Instant::now();
+    let last_activity = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let pong_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let link_dead = CancellationToken::new();
+
+    let writer_handle = {
+        let last_activity = last_activity.clone();
+        let pong_requested = pong_requested.clone();
+        let link_dead = link_dead.clone();
+        let peer_name = peer_name.to_owned();
+        tokio::spawn(async move {
+            run_writer(
+                outgoing,
+                peer_rx,
+                session_start,
+                last_activity,
+                pong_requested,
+                link_dead,
+                &peer_name,
+            )
+            .await;
+        })
+    };
+
+    // Announce our manifests by queueing them on the outbound channel (drained
+    // by the writer), not by writing them inline — see the block comment above.
     match build_local_tag_manifest(&database) {
         Ok((definitions, relationships)) => {
             let frame = Frame::Sync(SyncMessage::TagManifest {
                 definitions,
                 relationships,
             });
-            if let Err(error) = send_frame(&mut outgoing, &frame).await {
-                log::warn!("Failed to send initial tag manifest to {peer_name}: {error}");
-                clear_outbound_if_owned(
-                    &runtime_configuration,
-                    peer_public_key,
-                    owns_outbound,
-                    &our_sender,
-                )
-                .await;
-                return;
+            if our_sender.send(frame).is_err() {
+                log::warn!("Failed to queue initial tag manifest to {peer_name}: writer gone");
+            } else {
+                log::debug!("Queued initial tag manifest to {peer_name}");
             }
-            log::debug!("Sent initial tag manifest to {peer_name}");
         }
         Err(error) => {
             log::error!("Peer {peer_name}: failed to build initial tag manifest: {error:?}");
         }
     }
 
-    // Send our file manifest right after the tag manifest (see the ordering
-    // rationale above). The peer compares it against their own history and
-    // requests anything they need.
+    // Queue our file manifest right after the tag manifest (see the ordering
+    // rationale above; the outbound channel preserves order). The peer compares
+    // it against their own history and requests anything they need.
     match build_local_manifest(&database) {
         Ok(manifest) => {
             let frame = Frame::Sync(SyncMessage::Manifest { entries: manifest });
-            if let Err(error) = send_frame(&mut outgoing, &frame).await {
-                log::warn!("Failed to send initial manifest to {peer_name}: {error}");
-                clear_outbound_if_owned(
-                    &runtime_configuration,
-                    peer_public_key,
-                    owns_outbound,
-                    &our_sender,
-                )
-                .await;
-                return;
+            if our_sender.send(frame).is_err() {
+                log::warn!("Failed to queue initial manifest to {peer_name}: writer gone");
+            } else {
+                log::debug!("Queued initial manifest to {peer_name}");
             }
-            log::debug!("Sent initial manifest to {peer_name}");
         }
         Err(error) => {
             log::error!("Peer {peer_name}: failed to build initial manifest: {error:?}");
@@ -358,60 +419,17 @@ pub async fn run_peer_session<S>(
         }
     }
 
-    // Session liveness. A WebSocket-over-TCP link that dies silently (flight
-    // mode, cable pull, router reboot) never delivers a close frame, so
-    // `incoming.next()` would block forever and the session — and thus the
-    // connection guard, and thus the UI's "connected" state — would hang
-    // indefinitely. This is the idle-session analogue of the transfer path's
-    // `HOP_TIMEOUT`: we ping periodically and, if the peer goes silent past
-    // `LIVENESS_TIMEOUT`, break the loop so the guard drops and a `Disconnected`
-    // is broadcast. An outbound peer's `dial.rs` loop then reconnects when the
-    // network returns; there is no in-session retry (see the transport notes in
-    // AGENTS.md).
-    const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
-    const LIVENESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
-
-    let mut ping_interval = tokio::time::interval(PING_INTERVAL);
-    // If the loop is busy past a tick (e.g. a long transfer), don't burst a
-    // backlog of pings afterward — just resume the cadence.
-    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // The first tick fires immediately; skip it so we don't ping before the
-    // link has had a chance to carry traffic.
-    ping_interval.tick().await;
-
-    let mut last_activity = tokio::time::Instant::now();
-
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
                 log::info!("Shutdown requested; closing session with {peer_name}");
                 break;
             }
-            _ = ping_interval.tick() => {
-                if last_activity.elapsed() >= LIVENESS_TIMEOUT {
-                    log::info!(
-                        "Peer {peer_name} silent for {:?}; closing dead session",
-                        last_activity.elapsed()
-                    );
-                    break;
-                }
-
-                // Keep the link warm and surface a dead peer on the write path
-                // even while idle. A failed ping send means the socket is gone.
-                if let Err(error) = outgoing.send(Message::Ping(Vec::new().into())).await {
-                    log::info!("Ping to {peer_name} failed ({error}); closing session");
-                    break;
-                }
-            }
-            outbound = peer_rx.recv() => {
-                let Some(frame) = outbound else {
-                    // Sender dropped (cleared during teardown or replaced).
-                    break;
-                };
-                if let Err(error) = send_frame(&mut outgoing, &frame).await {
-                    log::warn!("Outbound send to {peer_name} failed: {error}");
-                    break;
-                }
+            _ = link_dead.cancelled() => {
+                // The writer task hit a socket error (failed send / dead ping)
+                // and cancelled the link. Stop reading and tear down.
+                log::info!("Link to {peer_name} closed by writer; ending session");
+                break;
             }
             command = command_rx.recv() => {
                 let Some(command) = command else {
@@ -437,7 +455,7 @@ pub async fn run_peer_session<S>(
                             },
                             placement,
                         };
-                        start_pull(file_id, content_hash, expected_size, purpose);
+                        start_pull(file_id, content_hash, expected_size, purpose).await;
                     }
                 }
             }
@@ -492,24 +510,21 @@ pub async fn run_peer_session<S>(
                 };
                 // Any inbound message — data, or a WebSocket ping/pong control
                 // frame — proves the peer is still there, so it resets the
-                // liveness clock. (tokio-tungstenite auto-answers our pings with
-                // pongs, which surface here.)
-                last_activity = tokio::time::Instant::now();
+                // liveness clock the writer task reads.
+                last_activity.store(
+                    session_start.elapsed().as_millis() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 // WebSocket control frames don't carry a `Frame`. We split the
                 // stream, so tungstenite can't auto-answer a peer's Ping for us;
-                // reply with a Pong ourselves (proper keepalive behavior) and
-                // otherwise ignore control frames. Only Binary/Text data frames
-                // carry a MessagePack `Frame` (see `send_frame`).
+                // flag it for the writer task to Pong (the writer owns the socket
+                // now). Only Binary/Text data frames carry a MessagePack `Frame`
+                // (see `send_frame`).
                 let payload = match &message {
                     Message::Binary(bytes) => bytes.as_ref(),
                     Message::Text(text) => text.as_bytes(),
-                    Message::Ping(data) => {
-                        if let Err(error) =
-                            outgoing.send(Message::Pong(data.clone())).await
-                        {
-                            log::info!("Pong to {peer_name} failed ({error}); closing session");
-                            break;
-                        }
+                    Message::Ping(_) => {
+                        pong_requested.store(true, std::sync::atomic::Ordering::Relaxed);
                         continue;
                     }
                     _ => continue,
@@ -741,7 +756,7 @@ pub async fn run_peer_session<S>(
                                 },
                                 placement,
                             };
-                            start_pull(file_id, content_hash, size as u64, purpose);
+                            start_pull(file_id, content_hash, size as u64, purpose).await;
                         }
 
                         // Placement sweep: for every announced file whose catalog
@@ -1044,6 +1059,15 @@ pub async fn run_peer_session<S>(
         }
     }
 
+    // Tell the writer task to stop (it owns the socket) and wait for it to
+    // finish so the connection is fully closed before we return. Cancelling
+    // `link_dead` is idempotent — if the writer already cancelled it (its own
+    // write failure is what ended our loop), this is a no-op.
+    link_dead.cancel();
+    if let Err(error) = writer_handle.await {
+        log::debug!("Writer task for {peer_name} ended abnormally: {error}");
+    }
+
     clear_outbound_if_owned(
         &runtime_configuration,
         peer_public_key,
@@ -1061,6 +1085,109 @@ pub async fn run_peer_session<S>(
     // link fails its downstream waiters (resolving them to `None`) rather than
     // hanging until the TTL.
     pending_previews.prune_link(peer_public_key).await;
+}
+
+/// The sole owner of a connection's socket write half.
+///
+/// Every byte sent to the peer goes through here: queued outbound `Frame`s
+/// (drained from `peer_rx`), keepalive pings, and pongs answering the peer's
+/// pings. Keeping all writes on this one task is what prevents the read side
+/// (the session loop) from ever blocking on a write — the bug that deadlocked
+/// large initial manifests.
+///
+/// Liveness lives here too: on each tick it emits a ping *only if the link has
+/// been otherwise idle* (so a busy transfer doesn't add ping noise), answers
+/// any parked pong, and — if the peer has been silent past `LIVENESS_TIMEOUT` —
+/// cancels `link_dead` to end the session. Any socket write failure likewise
+/// cancels `link_dead`, which breaks the reader loop and triggers teardown.
+async fn run_writer<S>(
+    mut outgoing: SplitSink<WebSocketStream<S>, Message>,
+    mut peer_rx: tokio::sync::mpsc::UnboundedReceiver<Frame>,
+    session_start: tokio::time::Instant,
+    last_activity: Arc<std::sync::atomic::AtomicU64>,
+    pong_requested: Arc<std::sync::atomic::AtomicBool>,
+    link_dead: CancellationToken,
+    peer_name: &str,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use std::sync::atomic::Ordering;
+    // A WebSocket-over-TCP link that dies silently (flight mode, cable pull,
+    // router reboot) never delivers a close frame. We ping periodically and, if
+    // the peer goes silent past `LIVENESS_TIMEOUT`, end the session so the
+    // connection guard drops and a `Disconnected` is broadcast. An outbound
+    // peer's `dial.rs` loop then reconnects; there is no in-session retry.
+    const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+    const LIVENESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+    // Tick faster than PING_INTERVAL so a parked pong is answered promptly
+    // rather than waiting up to a full ping period.
+    const TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+    let mut tick = tokio::time::interval(TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await; // skip the immediate first tick
+
+    // When we last wrote anything real (a frame or a ping): drives the
+    // "ping only when idle" decision.
+    let mut last_write = tokio::time::Instant::now();
+
+    loop {
+        tokio::select! {
+            _ = link_dead.cancelled() => {
+                // Reader ended the session (peer closed / shutdown / read
+                // error); nothing more to write.
+                break;
+            }
+            outbound = peer_rx.recv() => {
+                let Some(frame) = outbound else {
+                    // All senders dropped (teardown / replaced); done.
+                    break;
+                };
+                if let Err(error) = send_frame(&mut outgoing, &frame).await {
+                    log::warn!("Outbound send to {peer_name} failed: {error}");
+                    link_dead.cancel();
+                    break;
+                }
+                last_write = tokio::time::Instant::now();
+            }
+            _ = tick.tick() => {
+                // Answer a requested ping first — cheap and keeps the peer's
+                // liveness clock fresh. An empty pong payload is RFC-legal; we
+                // don't echo the ping's bytes.
+                if pong_requested.swap(false, Ordering::Relaxed) {
+                    if let Err(error) = outgoing.send(Message::Pong(Vec::new().into())).await {
+                        log::info!("Pong to {peer_name} failed ({error}); closing session");
+                        link_dead.cancel();
+                        break;
+                    }
+                    last_write = tokio::time::Instant::now();
+                }
+
+                // Dead-peer check: has the peer been silent too long? Compare the
+                // reader's last-activity stamp (ms since `session_start`) against
+                // now.
+                let now_ms = session_start.elapsed().as_millis() as u64;
+                let idle_ms = now_ms.saturating_sub(last_activity.load(Ordering::Relaxed));
+                if idle_ms >= LIVENESS_TIMEOUT.as_millis() as u64 {
+                    log::info!("Peer {peer_name} silent past liveness timeout; closing session");
+                    link_dead.cancel();
+                    break;
+                }
+
+                // Ping only when the link is otherwise idle: if we've written
+                // something (a frame or pong) within PING_INTERVAL, that traffic
+                // already proves liveness and doubles as the peer's keepalive.
+                if last_write.elapsed() >= PING_INTERVAL {
+                    if let Err(error) = outgoing.send(Message::Ping(Vec::new().into())).await {
+                        log::info!("Ping to {peer_name} failed ({error}); closing session");
+                        link_dead.cancel();
+                        break;
+                    }
+                    last_write = tokio::time::Instant::now();
+                }
+            }
+        }
+    }
 }
 
 pub(crate) async fn send_frame<S>(

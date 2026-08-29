@@ -80,6 +80,7 @@ impl Harness {
             peers: Vec::new(),
             tags: Vec::new(),
             preview_generation_policy: PreviewGenerationPolicy::Never,
+            max_concurrent_pulls: tagsyd::configuration::default_max_concurrent_pulls(),
             editor_rules: Vec::new(),
             tag_rules,
             home_sections: Vec::new(),

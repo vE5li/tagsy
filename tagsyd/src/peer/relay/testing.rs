@@ -21,6 +21,7 @@ pub(crate) fn runtime_for_test() -> Arc<RwLock<RuntimeConfiguration>> {
         peers: Vec::new(),
         tags: Vec::new(),
         preview_generation_policy: PreviewGenerationPolicy::Lazy,
+        max_concurrent_pulls: crate::configuration::default_max_concurrent_pulls(),
         editor_rules: Vec::new(),
         tag_rules: Vec::new(),
         home_sections: Vec::new(),
