@@ -142,6 +142,28 @@ final verification, not an attack to attribute. Don't add per-chunk hashing or
 blame machinery; if the trust model ever changes, that's the design decision to
 revisit, not a local patch.
 
+## Reconciliation is additive, per-entry, and idempotent
+
+Manifest reconciliation (`peer/plan.rs`, `peer/plan_tags.rs`) decides each entry
+against the local DB alone — no cross-entry state, and **absence never implies
+anything** (deletes/restores are explicit LWW-stamped flags carried *on* the
+entry, never inferred from a file being missing). Every applied change is
+last-writer-wins, so re-applying it is a no-op. Three properties follow, and
+must be preserved:
+
+- **Splittable**: a manifest can be sent in any number of frames grouped any
+  way — the connection path batches it (`manifest_batch_size` /
+  `tag_manifest_batch_size`) to stay under the WebSocket size ceiling. Never add
+  a "complete set" assumption to a manifest handler.
+- **Additive**: a frame only ever *adds* knowledge; a peer that never mentions a
+  file simply says nothing about it.
+- **Idempotent**: a partial/duplicated exchange (dropped link, reconnect) just
+  converges on the next full exchange; there is no in-session retry or "did I
+  get everything?" bookkeeping.
+
+The same discipline as the transfer stack: when tempted to add sequencing, a
+completeness check, or a retry, find the version of the change that doesn't.
+
 ## Backup
 
 `tagsy backup` produces a single `*.tar.zst` archive of the entire restorable
