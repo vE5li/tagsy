@@ -422,7 +422,8 @@ pub mod state {
     ///
     /// Flow at connection time:
     /// 1. After the public-key handshake, both sides send their `Manifest`
-    ///    unprompted.
+    ///    unprompted (split into one or more frames for a large catalog; see
+    ///    [`Sync::Manifest`]).
     /// 2. The receiver compares each entry against its local `file_versions`
     ///    table. For entries where it determines the peer has bytes it doesn't,
     ///    it opens a **content-addressed receive** for `(file_id,
@@ -461,6 +462,14 @@ pub mod state {
     /// arrived. Relays verify nothing (they hold none of the bytes).
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum Sync {
+        /// A batch of file entries for connection-time reconciliation. A large
+        /// catalog's manifest is split across **multiple** `Manifest` frames
+        /// (each carrying a bounded slice of the entries) so no single message
+        /// approaches the WebSocket size ceiling. The receiver reconciles each
+        /// frame independently — reconciliation is per-entry and additive, so
+        /// the split is behavior-preserving and a frame is never treated as the
+        /// complete file set (deletions are explicit `deleted` flags on the
+        /// entries themselves, not inferred from absence).
         Manifest {
             entries: Vec<ManifestEntry>,
         },
@@ -517,6 +526,11 @@ pub mod state {
         ///    carrying the full current definition (name/color/metadata +
         ///    `modified_at`), re-using the live wire format. If the tag no
         ///    longer exists locally it answers `TagNotFound`.
+        ///
+        /// Like [`Sync::Manifest`], a large tag set is split across multiple
+        /// `TagManifest` frames (definitions and relationships batched
+        /// independently, so a given frame typically carries only one kind).
+        /// Both are per-entry additive, so the split is behavior-preserving.
         TagManifest {
             definitions: Vec<TagManifestEntry>,
             relationships: Vec<RelationshipManifestEntry>,

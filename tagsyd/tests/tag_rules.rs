@@ -81,6 +81,8 @@ impl Harness {
             tags: Vec::new(),
             preview_generation_policy: PreviewGenerationPolicy::Never,
             max_concurrent_pulls: tagsyd::configuration::default_max_concurrent_pulls(),
+            manifest_batch_size: tagsyd::configuration::default_manifest_batch_size(),
+            tag_manifest_batch_size: tagsyd::configuration::default_tag_manifest_batch_size(),
             editor_rules: Vec::new(),
             tag_rules,
             home_sections: Vec::new(),

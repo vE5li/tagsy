@@ -386,6 +386,8 @@ pub async fn run(
         pull_scheduler: crate::peer::pull_scheduler::PullScheduler::new(
             configuration.max_concurrent_pulls,
         ),
+        manifest_batch_size: configuration.manifest_batch_size,
+        tag_manifest_batch_size: configuration.tag_manifest_batch_size,
     };
 
     let mut peer_handles = Vec::new();

@@ -49,6 +49,27 @@ pub fn build_local_manifest(database: &CatalogStore) -> Result<Vec<ManifestEntry
         .collect())
 }
 
+/// Split a full file manifest into batches of at most `batch_size` entries,
+/// each destined for its own `Sync::Manifest` frame.
+///
+/// A file entry carries its whole version history, so a large catalog's
+/// manifest can exceed a single WebSocket message's size limit; batching keeps
+/// every frame small. Reconciliation is per-entry and additive (the receiver
+/// decides pull-or-nothing per entry and never treats a frame as the complete
+/// set), so splitting is behavior-preserving regardless of how entries are
+/// grouped.
+///
+/// An empty input yields no batches (a peer with nothing to announce sends no
+/// manifest frame — the receiver never waits for one). `batch_size` is clamped
+/// to at least 1 so a misconfigured zero can't produce empty batches forever.
+pub fn batch_manifest(entries: Vec<ManifestEntry>, batch_size: usize) -> Vec<Vec<ManifestEntry>> {
+    let batch_size = batch_size.max(1);
+    entries
+        .chunks(batch_size)
+        .map(<[ManifestEntry]>::to_vec)
+        .collect()
+}
+
 /// One reconciliation outcome: pull `content_hash` for `file_id` from the peer
 /// and materialize it with `placement`.
 ///
@@ -743,5 +764,100 @@ mod tests {
             assert!(plan.moves.is_empty());
             assert!(plan.restores.is_empty());
         }
+    }
+
+    fn live_entry(file_id: FileId, hash: &str, name: &str) -> ManifestEntry {
+        ManifestEntry {
+            file_id,
+            history: vec![(1, hash.to_owned(), 1)],
+            latest_observed_at: 100,
+            logical_path: LogicalPath::new(name),
+            logical_path_modified_at: 0,
+            deleted: false,
+            deleted_at: 0,
+            restored_at: 0,
+        }
+    }
+
+    /// An empty manifest produces no frames at all (nothing to announce).
+    #[test]
+    fn batch_manifest_empty_yields_no_batches() {
+        assert!(batch_manifest(Vec::new(), 2000).is_empty());
+    }
+
+    /// A manifest at or below the batch size is a single frame.
+    #[test]
+    fn batch_manifest_single_batch() {
+        let entries = vec![
+            live_entry(FileId::new(), "a", "a.txt"),
+            live_entry(FileId::new(), "b", "b.txt"),
+        ];
+        let batches = batch_manifest(entries.clone(), 2000);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 2);
+    }
+
+    /// A larger manifest splits into ceil(n / size) batches, preserving order
+    /// and losing/duplicating nothing.
+    #[test]
+    fn batch_manifest_splits_and_preserves_order() {
+        let entries: Vec<ManifestEntry> = (0..5u8)
+            .map(|i| live_entry(FileId::new(), &format!("h{i}"), &format!("{i}.txt")))
+            .collect();
+        let ids: Vec<FileId> = entries.iter().map(|e| e.file_id).collect();
+
+        let batches = batch_manifest(entries, 2);
+        assert_eq!(batches.len(), 3, "ceil(5 / 2) == 3");
+        assert_eq!(batches[0].len(), 2);
+        assert_eq!(batches[1].len(), 2);
+        assert_eq!(batches[2].len(), 1);
+
+        let flattened: Vec<FileId> = batches
+            .into_iter()
+            .flatten()
+            .map(|entry| entry.file_id)
+            .collect();
+        assert_eq!(flattened, ids, "no entry lost/duplicated; order preserved");
+    }
+
+    /// A zero batch size is clamped to 1 rather than producing empty batches
+    /// forever.
+    #[test]
+    fn batch_manifest_zero_size_is_clamped() {
+        let entries = vec![live_entry(FileId::new(), "a", "a.txt")];
+        let batches = batch_manifest(entries, 0);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+    }
+
+    /// The behavioral guarantee that splitting is a no-op: reconciling a whole
+    /// manifest yields the same pulls as reconciling it in batches against the
+    /// same DB. Locks in that `plan_file_sync` stays per-entry (no cross-entry
+    /// state that batching could break).
+    #[test]
+    fn split_reconcile_matches_whole() {
+        let whole_db = memory_db();
+        let batched_db = memory_db();
+
+        // Five files the receiver has never seen: each independently wanted.
+        let entries: Vec<ManifestEntry> = (0..5u8)
+            .map(|i| live_entry(FileId::new(), &format!("h{i}"), &format!("{i}.txt")))
+            .collect();
+
+        let whole_plan = plan_file_sync("peer", entries.clone(), &whole_db);
+
+        let mut batched_pulls = Vec::new();
+        for batch in batch_manifest(entries, 2) {
+            let plan = plan_file_sync("peer", batch, &batched_db);
+            batched_pulls.extend(plan.pulls);
+        }
+
+        let whole_ids: HashSet<FileId> = whole_plan.pulls.iter().map(|p| p.file_id).collect();
+        let batched_ids: HashSet<FileId> = batched_pulls.iter().map(|p| p.file_id).collect();
+        assert_eq!(whole_plan.pulls.len(), 5);
+        assert_eq!(
+            whole_ids, batched_ids,
+            "the same files are pulled whether the manifest is whole or split"
+        );
     }
 }

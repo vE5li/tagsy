@@ -25,10 +25,12 @@ use crate::configuration::RuntimeConfiguration;
 use crate::operations;
 use crate::peer::fetch::{answer_local_chunk, spawn_content_receive};
 use crate::peer::plan::{
-    MissingContent, PeerDeletion, PeerMove, PeerRestore, SyncPlan, build_local_manifest,
-    plan_file_sync,
+    MissingContent, PeerDeletion, PeerMove, PeerRestore, SyncPlan, batch_manifest,
+    build_local_manifest, plan_file_sync,
 };
-use crate::peer::plan_tags::{build_local_tag_manifest, build_tag_request_response, plan_tag_sync};
+use crate::peer::plan_tags::{
+    batch_tag_manifest, build_local_tag_manifest, build_tag_request_response, plan_tag_sync,
+};
 use crate::peer::relay::{ChunkRelay, PreviewRelay};
 use crate::peer::transfer::{self, ChunkAnswer, ReceiveOutcome, VerifiedHashCache};
 use crate::store::CatalogStore;
@@ -90,6 +92,14 @@ pub struct PeerContext {
     /// Every session shares one clone so a bulk import announced across peers
     /// can't start an unbounded number of concurrent receives.
     pub pull_scheduler: crate::peer::pull_scheduler::PullScheduler,
+    /// Max file entries per connection-time `Sync::Manifest` frame; the
+    /// manifest is split into several frames of this size so no single
+    /// WebSocket message approaches the size ceiling. From
+    /// `Configuration::manifest_batch_size`.
+    pub manifest_batch_size: usize,
+    /// Max tag definitions/relationships per `Sync::TagManifest` frame. From
+    /// `Configuration::tag_manifest_batch_size`.
+    pub tag_manifest_batch_size: usize,
 }
 
 /// Drive a fully-handshaken WebSocket connection until it closes.
@@ -127,6 +137,8 @@ pub async fn run_peer_session<S>(
         operations,
         connections,
         pull_scheduler,
+        manifest_batch_size,
+        tag_manifest_batch_size,
     } = context;
 
     // Register this peer as connected for the life of the session. A connection
@@ -383,17 +395,27 @@ pub async fn run_peer_session<S>(
 
     // Announce our manifests by queueing them on the outbound channel (drained
     // by the writer), not by writing them inline — see the block comment above.
+    //
+    // Both manifests are split into batches of bounded size so no single
+    // WebSocket message approaches the size ceiling on a large catalog. Frames
+    // are queued in order (tag definitions, tag relationships, then files); the
+    // receiver reconciles each independently, so the split is behavior-
+    // preserving (see `batch_manifest` / `batch_tag_manifest`).
     match build_local_tag_manifest(&database) {
         Ok((definitions, relationships)) => {
-            let frame = Frame::Sync(SyncMessage::TagManifest {
-                definitions,
-                relationships,
-            });
-            if our_sender.send(frame).is_err() {
-                log::warn!("Failed to queue initial tag manifest to {peer_name}: writer gone");
-            } else {
-                log::debug!("Queued initial tag manifest to {peer_name}");
+            let frames = batch_tag_manifest(definitions, relationships, tag_manifest_batch_size);
+            let count = frames.len();
+            for (definitions, relationships) in frames {
+                let frame = Frame::Sync(SyncMessage::TagManifest {
+                    definitions,
+                    relationships,
+                });
+                if our_sender.send(frame).is_err() {
+                    log::warn!("Failed to queue tag manifest to {peer_name}: writer gone");
+                    break;
+                }
             }
+            log::debug!("Queued tag manifest to {peer_name} in {count} frame(s)");
         }
         Err(error) => {
             log::error!("Peer {peer_name}: failed to build initial tag manifest: {error:?}");
@@ -405,12 +427,17 @@ pub async fn run_peer_session<S>(
     // it against their own history and requests anything they need.
     match build_local_manifest(&database) {
         Ok(manifest) => {
-            let frame = Frame::Sync(SyncMessage::Manifest { entries: manifest });
-            if our_sender.send(frame).is_err() {
-                log::warn!("Failed to queue initial manifest to {peer_name}: writer gone");
-            } else {
-                log::debug!("Queued initial manifest to {peer_name}");
+            let total = manifest.len();
+            let batches = batch_manifest(manifest, manifest_batch_size);
+            let count = batches.len();
+            for entries in batches {
+                let frame = Frame::Sync(SyncMessage::Manifest { entries });
+                if our_sender.send(frame).is_err() {
+                    log::warn!("Failed to queue file manifest to {peer_name}: writer gone");
+                    break;
+                }
             }
+            log::debug!("Queued file manifest to {peer_name}: {total} entries in {count} frame(s)");
         }
         Err(error) => {
             log::error!("Peer {peer_name}: failed to build initial manifest: {error:?}");
@@ -553,6 +580,15 @@ pub async fn run_peer_session<S>(
                         }
                     }
                     Frame::Sync(SyncMessage::Manifest { entries }) => {
+                        // A peer's file manifest may arrive split across several
+                        // `Manifest` frames (see the send site's `batch_manifest`).
+                        // Each frame is reconciled independently here: reconciliation
+                        // is per-entry and additive, and nothing treats a frame as
+                        // "the complete set" (deletions are explicit per-entry flags,
+                        // and the placement sweep below iterates only this frame's
+                        // `announced_file_ids`). Do not add any cross-frame or
+                        // whole-catalog assumption to this arm.
+                        //
                         // Confirm the peer is registered (so the content
                         // receives below have a live link to drive) before running the
                         // synchronous reconciliation. Doing the DB work outside

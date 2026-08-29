@@ -25,6 +25,35 @@ pub fn build_local_tag_manifest(
     Ok((definitions, relationships))
 }
 
+/// Split a full tag manifest into batches, each destined for its own
+/// `Sync::TagManifest` frame, so a large tag set never approaches a single
+/// WebSocket message's size limit.
+///
+/// A `TagManifest` frame carries two vecs (definitions + relationships). Both
+/// are per-entry additive on the receiver (definitions drive a `TagRequest`,
+/// relationships apply by last-writer-wins), so they can be batched
+/// independently: this emits definition-only frames first, then
+/// relationship-only frames (each `(defs, rels)` pair has exactly one non-empty
+/// vec). The definitions-before-relationships order is a best-effort efficiency
+/// hint, not a correctness requirement.
+///
+/// Empty inputs yield no frames. `batch_size` is clamped to at least 1.
+pub fn batch_tag_manifest(
+    definitions: Vec<TagManifestEntry>,
+    relationships: Vec<RelationshipManifestEntry>,
+    batch_size: usize,
+) -> Vec<(Vec<TagManifestEntry>, Vec<RelationshipManifestEntry>)> {
+    let batch_size = batch_size.max(1);
+    let mut frames = Vec::new();
+    for chunk in definitions.chunks(batch_size) {
+        frames.push((chunk.to_vec(), Vec::new()));
+    }
+    for chunk in relationships.chunks(batch_size) {
+        frames.push((Vec::new(), chunk.to_vec()));
+    }
+    frames
+}
+
 /// Reconcile a peer's tag manifest against ours.
 ///
 /// - **Definitions**: for each tag whose `modified_at` is newer than ours (or
@@ -204,5 +233,85 @@ pub fn build_tag_request_response(
             );
             Frame::Sync(SyncMessage::TagNotFound { tag_id })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tagsy_core::state::RelationshipKind;
+
+    use super::*;
+
+    fn definition(n: u8) -> TagManifestEntry {
+        TagManifestEntry {
+            tag_id: TagId::new(),
+            modified_at: n as i64,
+            deleted: false,
+        }
+    }
+
+    fn relationship(n: u8) -> RelationshipManifestEntry {
+        RelationshipManifestEntry {
+            tag_id: TagId::new(),
+            target_id: FileId::new().to_string(),
+            kind: RelationshipKind::File,
+            modified_at: n as i64,
+            deleted: false,
+        }
+    }
+
+    /// Nothing to announce → no frames.
+    #[test]
+    fn batch_tag_manifest_empty_yields_no_frames() {
+        assert!(batch_tag_manifest(Vec::new(), Vec::new(), 5000).is_empty());
+    }
+
+    /// Definitions and relationships are batched independently into
+    /// single-kind frames (definitions first), splitting each by size.
+    #[test]
+    fn batch_tag_manifest_splits_each_kind_independently() {
+        let defs: Vec<_> = (0..5u8).map(definition).collect();
+        let rels: Vec<_> = (0..3u8).map(relationship).collect();
+
+        let frames = batch_tag_manifest(defs, rels, 2);
+        // ceil(5/2)=3 definition frames + ceil(3/2)=2 relationship frames.
+        assert_eq!(frames.len(), 5);
+
+        // Definition frames come first, each with only definitions.
+        assert_eq!(frames[0].0.len(), 2);
+        assert!(frames[0].1.is_empty());
+        assert_eq!(frames[1].0.len(), 2);
+        assert_eq!(frames[2].0.len(), 1);
+
+        // Then relationship frames, each with only relationships.
+        assert!(frames[3].0.is_empty());
+        assert_eq!(frames[3].1.len(), 2);
+        assert_eq!(frames[4].1.len(), 1);
+
+        // Nothing lost across the split.
+        let total_defs: usize = frames.iter().map(|(d, _)| d.len()).sum();
+        let total_rels: usize = frames.iter().map(|(_, r)| r.len()).sum();
+        assert_eq!(total_defs, 5);
+        assert_eq!(total_rels, 3);
+    }
+
+    /// Only-definitions and only-relationships inputs each produce their own
+    /// frames without a spurious empty frame for the missing kind.
+    #[test]
+    fn batch_tag_manifest_single_kind() {
+        let defs_only = batch_tag_manifest(vec![definition(1)], Vec::new(), 5000);
+        assert_eq!(defs_only.len(), 1);
+        assert_eq!(defs_only[0].0.len(), 1);
+
+        let rels_only = batch_tag_manifest(Vec::new(), vec![relationship(1)], 5000);
+        assert_eq!(rels_only.len(), 1);
+        assert_eq!(rels_only[0].1.len(), 1);
+    }
+
+    /// A zero batch size is clamped to 1.
+    #[test]
+    fn batch_tag_manifest_zero_size_is_clamped() {
+        let frames = batch_tag_manifest(vec![definition(1), definition(2)], Vec::new(), 0);
+        assert_eq!(frames.len(), 2);
     }
 }

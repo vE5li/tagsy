@@ -125,6 +125,21 @@ pub fn default_max_concurrent_pulls() -> usize {
     8
 }
 
+/// Default for [`Configuration::manifest_batch_size`]: at a few hundred bytes
+/// to ~1 KiB per file entry (a file's full version history), 2000 entries is
+/// well under a megabyte per frame — comfortably below the 64 MiB WebSocket
+/// ceiling even for files with long histories.
+pub fn default_manifest_batch_size() -> usize {
+    2000
+}
+
+/// Default for [`Configuration::tag_manifest_batch_size`]: tag definitions and
+/// relationships are small (a couple of ids + timestamps), so a larger batch is
+/// still tiny per frame.
+pub fn default_tag_manifest_batch_size() -> usize {
+    5000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Configuration {
     /// Synchronized directories on the device itself.
@@ -161,6 +176,23 @@ pub struct Configuration {
     /// [`default_max_concurrent_pulls`].
     #[serde(default = "default_max_concurrent_pulls")]
     pub max_concurrent_pulls: usize,
+    /// Maximum number of file entries packed into a single connection-time
+    /// `Sync::Manifest` frame. The manifest of a large catalog is split into
+    /// several frames of at most this many entries so no single WebSocket
+    /// message approaches tungstenite's default 64 MiB ceiling (a file entry
+    /// carries its full version history, so a big catalog with long histories
+    /// could otherwise overflow one frame and be rejected by the receiver).
+    /// Reconciliation is per-entry and additive, so splitting changes no
+    /// behavior. Defaults to [`default_manifest_batch_size`].
+    #[serde(default = "default_manifest_batch_size")]
+    pub manifest_batch_size: usize,
+    /// Maximum number of tag definitions *or* relationships packed into a
+    /// single connection-time `Sync::TagManifest` frame. Tag entries are
+    /// much smaller than file entries, so this is larger than
+    /// [`Self::manifest_batch_size`]. Defaults to
+    /// [`default_tag_manifest_batch_size`].
+    #[serde(default = "default_tag_manifest_batch_size")]
+    pub tag_manifest_batch_size: usize,
     /// Query → `argv` mapping consulted by the desktop UI's external-edit
     /// action. See [`EditorRule`]. Empty (the default) means no file has an
     /// external editor and the UI reports that rather than guessing. The
