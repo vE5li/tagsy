@@ -11,8 +11,10 @@
 // always reflects the current state of the store on rebuild.
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 
 import '../data/repository.dart';
@@ -220,6 +222,67 @@ class _TagDetailScreenState extends State<TagDetailScreen> {
       '${s.dotColor}|${s.background}|${s.gradient}|${s.foreground}|${s.border}|'
       '${s.borderWidth}|${s.borderStyle}|${s.shape}|${s.shadow}|${s.shadowColor}';
 
+  /// Serialize the ten style fields to a JSON object. No JSON codec is
+  /// generated for the FFI DTO, so the clipboard format is defined here: a flat
+  /// map of the same field names the Dart DTO exposes.
+  static Map<String, dynamic> _styleToJson(tagsy.TagStyleEntry s) => {
+    'dotColor': s.dotColor,
+    'background': s.background,
+    'gradient': s.gradient,
+    'foreground': s.foreground,
+    'border': s.border,
+    'borderWidth': s.borderWidth,
+    'borderStyle': s.borderStyle,
+    'shape': s.shape,
+    'shadow': s.shadow,
+    'shadowColor': s.shadowColor,
+  };
+
+  /// Inverse of [_styleToJson]. Throws if any field is missing or mistyped;
+  /// callers treat that as an invalid clipboard payload.
+  static tagsy.TagStyleEntry _styleFromJson(Map<String, dynamic> j) =>
+      tagsy.TagStyleEntry(
+        dotColor: j['dotColor'] as String,
+        background: j['background'] as String,
+        gradient: j['gradient'] as String,
+        foreground: j['foreground'] as String,
+        border: j['border'] as String,
+        borderWidth: (j['borderWidth'] as num).toDouble(),
+        borderStyle: j['borderStyle'] as String,
+        shape: j['shape'] as String,
+        shadow: j['shadow'] as bool,
+        shadowColor: j['shadowColor'] as String,
+      );
+
+  Future<void> _copyStyle() async {
+    final tag = _tag;
+    if (tag == null) return;
+    await Clipboard.setData(
+      ClipboardData(text: jsonEncode(_styleToJson(tag.style))),
+    );
+    _snack('Style copied.');
+  }
+
+  Future<void> _pasteStyle() async {
+    final tag = _tag;
+    if (tag == null) return;
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (text == null || text.trim().isEmpty) {
+      _snack('Clipboard is empty.');
+      return;
+    }
+    tagsy.TagStyleEntry style;
+    try {
+      style = _styleFromJson(jsonDecode(text) as Map<String, dynamic>);
+    } catch (_) {
+      _snack('Clipboard does not contain a tag style.');
+      return;
+    }
+    await _applyStyle(style);
+    _snack('Style pasted.');
+  }
+
   Future<void> _addParent() async {
     final chosen = await TagPickerSheet.show(
       context: context,
@@ -404,6 +467,17 @@ class _TagDetailScreenState extends State<TagDetailScreen> {
                 children: [
                   Text('Style', style: Theme.of(context).textTheme.titleMedium),
                   const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.copy_outlined),
+                    tooltip: 'Copy style',
+                    onPressed: _copyStyle,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.paste_outlined),
+                    tooltip: 'Paste style',
+                    onPressed: _pasteStyle,
+                  ),
+                  const SizedBox(width: 8),
                   TagChip(tag: tag),
                 ],
               ),
