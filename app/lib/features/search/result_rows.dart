@@ -1,5 +1,5 @@
 // The individual rows the home screen's search results are built from: a
-// section header, a tag row, a file row, and the one-off "create tag" row.
+// section header, a tag row, and a file row.
 //
 // Each interactive row takes a [FocusNode] owned by the enclosing
 // [RovingFocusList] (see widgets/roving_focus_list.dart) so the keyboard's
@@ -55,38 +55,6 @@ class TagRow extends StatelessWidget {
       title: Text(tag.name, style: titleStyle),
       trailing: const Icon(Icons.chevron_right),
       onTap: onActivate,
-    );
-  }
-}
-
-/// A one-off row rendered under the Tags section when the current query looks
-/// like a plausible tag name and no tag with that name (or any substring
-/// match) exists yet. Tapping it creates the tag with the engine's default
-/// color; the user can recolor via the tag detail screen.
-class CreateTagRow extends StatelessWidget {
-  const CreateTagRow({
-    super.key,
-    required this.name,
-    required this.onCreate,
-    this.focusNode,
-  });
-
-  final String name;
-  final VoidCallback onCreate;
-
-  /// See [TagRow.focusNode].
-  final FocusNode? focusNode;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      dense: true,
-      visualDensity: VisualDensity.compact,
-      minVerticalPadding: 0,
-      focusNode: focusNode,
-      leading: const Icon(Icons.add),
-      title: Text('Create tag "$name"'),
-      onTap: onCreate,
     );
   }
 }

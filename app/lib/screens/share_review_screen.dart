@@ -54,7 +54,6 @@ class _ShareReviewScreenState extends State<ShareReviewScreen> {
       repository: _repository,
       title: 'Add tag',
       excludeIds: _selected.keys.toSet(),
-      allowCreate: true,
     );
     if (chosen == null) return;
     setState(() => _selected[chosen.tagId] = chosen);

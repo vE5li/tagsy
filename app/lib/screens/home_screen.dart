@@ -1,8 +1,7 @@
 // Shared home screen: a live search bar that renders returned tags at the top
 // and returned files immediately below. Both open the corresponding detail
-// screen on tap; when a non-empty tag-name-shaped query resolves to zero tags,
-// a "Create tag" affordance appears in the tags section so tag creation
-// remains reachable without a dedicated management screen.
+// screen on tap. Tag creation lives in the tag picker (reachable from any
+// file/tag detail screen and the share-review flow), not here.
 //
 // The screen intentionally does NOT fetch anything on load: an empty
 // `runQuery` scans the entire store, which is a real performance hazard as the
@@ -232,34 +231,14 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  /// If the current query text is a plausible bare tag name (non-empty, no
-  /// whitespace, no query sigils) and the search returned zero tags, returns
-  /// that name so the results view can offer to create it. Otherwise returns
-  /// null and no "create" affordance is shown.
-  ///
-  /// The affordance is suppressed while [_showDeleted] is on: in that mode
-  /// the empty result set means "no *deleted* tag matches", not "no tag by
-  /// this name exists", so offering to create one would be misleading.
-  String? get _createCandidate {
-    if (_showDeleted) return null;
-    final text = _query.text.trim();
-    if (text.isEmpty) return null;
-    if (text.contains(RegExp(r'[\s$!]'))) return null;
-    final results = _results;
-    if (results == null) return null;
-    if (results.tags.isNotEmpty) return null;
-    return text;
-  }
-
   /// Handle Enter in the search field.
   ///
-  /// If the results list contains exactly one entry (across tags, the
-  /// create-tag affordance, and files combined) we activate it directly —
-  /// there's no ambiguity, and this preserves the fast "type + Enter to
-  /// open" flow for common cases like resolving a query down to a single
-  /// tag or offering to create a fresh tag name. Otherwise (two or more
-  /// entries, or none) we hand focus to the first row instead, so the user
-  /// can arrow-key their way to the desired result without tabbing past the
+  /// If the results list contains exactly one entry (across tags and files
+  /// combined) we activate it directly — there's no ambiguity, and this
+  /// preserves the fast "type + Enter to open" flow for common cases like
+  /// resolving a query down to a single tag. Otherwise (two or more entries,
+  /// or none) we hand focus to the first row instead, so the user can
+  /// arrow-key their way to the desired result without tabbing past the
   /// AppBar actions.
   ///
   /// Flushes any pending debounced query first so Enter works even when the
@@ -275,18 +254,12 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted) return;
     final results = _results;
     if (results == null) return;
-    final candidate = _createCandidate;
-    final total =
-        results.tags.length +
-        (candidate != null ? 1 : 0) +
-        results.files.length;
+    final total = results.tags.length + results.files.length;
     if (total == 1) {
       if (results.tags.length == 1) {
         // Sole result is a tag; open it and restore focus to row 0 on
         // return so a subsequent Enter re-opens the same tag.
         await _openTag(results.tags.first, restoreIndex: 0);
-      } else if (candidate != null) {
-        await _createTag(candidate);
       } else {
         await _openFile(results.files.first, restoreIndex: 0);
       }
@@ -345,24 +318,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     if (!mounted) return;
     _rows.restoreRow(restoreIndex);
-  }
-
-  Future<void> _createTag(String name) async {
-    final session = widget.session;
-    if (session == null) return;
-    try {
-      // Pass an empty color; the engine substitutes its default palette entry
-      // (see tagsyd::api::create_tag). The user can recolor via the tag
-      // detail screen.
-      await session.repository.createTag(name: name, color: '');
-      // The change stream will re-run the current query and the new tag will
-      // appear in the results (matching `name` as a substring).
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Failed to create tag: $error')));
-    }
   }
 
   @override
@@ -464,38 +419,35 @@ class _HomeScreenState extends State<HomeScreen> {
         onExitTop: _queryFocus.requestFocus,
       );
     }
-    final createCandidate = _createCandidate;
     final hasTags = results.tags.isNotEmpty;
     final hasFiles = results.files.isNotEmpty;
-    if (!hasTags && !hasFiles && createCandidate == null) {
+    if (!hasTags && !hasFiles) {
       return const Center(child: Text('No matches.'));
     }
     // A horizontal swipe cycles the file view mode (left = next, right = prev).
     // Wraps whichever surface the current mode builds. `onHorizontalDragEnd`
     // reads the fling velocity so it doesn't fight vertical scrolling.
     return switch (_fileViewMode) {
-      FileViewMode.list =>
-        _buildListResults(results, createCandidate, hasTags, hasFiles),
+      FileViewMode.list => _buildListResults(results, hasTags, hasFiles),
       FileViewMode.tile || FileViewMode.large =>
-        _buildTileResults(results, createCandidate, hasTags, hasFiles),
+        _buildTileResults(results, hasTags, hasFiles),
     };
   }
 
-  /// The original text-list result surface: tags → create-tag → files, all as
-  /// focusable rows in a [RovingFocusList] (owns per-row focus + arrow-key nav).
+  /// The original text-list result surface: tags → files, all as focusable rows
+  /// in a [RovingFocusList] (owns per-row focus + arrow-key nav).
   /// `restoreIndex` is the row's position among *focusable* rows only (headers
   /// don't count), matching the index RovingFocusList assigns — the tap and
   /// Enter handlers pass it back to `_openTag` / `_openFile` so focus resumes on
   /// the right row after a detail route pops.
   Widget _buildListResults(
     tagsy.QueryEntries results,
-    String? createCandidate,
     bool hasTags,
     bool hasFiles,
   ) {
     var rowIndex = 0;
     final items = <RovingFocusItem>[];
-    if (hasTags || createCandidate != null) {
+    if (hasTags) {
       items.add(const RovingFocusItem.header(SectionHeader('Tags')));
       for (final tag in results.tags) {
         final index = rowIndex++;
@@ -505,20 +457,6 @@ class _HomeScreenState extends State<HomeScreen> {
               tag: tag,
               focusNode: focusNode,
               onActivate: () => _openTag(tag, restoreIndex: index),
-            ),
-          ),
-        );
-      }
-      if (createCandidate != null) {
-        // The create-tag row doesn't push a route, so nothing to restore
-        // focus to; `_createTag` returns and the results list mutates.
-        rowIndex++;
-        items.add(
-          RovingFocusItem.row(
-            (focusNode) => CreateTagRow(
-              name: createCandidate,
-              onCreate: () => _createTag(createCandidate),
-              focusNode: focusNode,
             ),
           ),
         );
@@ -557,27 +495,18 @@ class _HomeScreenState extends State<HomeScreen> {
   /// passing index 0 just parks focus back near the top on return.
   Widget _buildTileResults(
     tagsy.QueryEntries results,
-    String? createCandidate,
     bool hasTags,
     bool hasFiles,
   ) {
     final session = widget.session!;
     final slivers = <Widget>[];
-    if (hasTags || createCandidate != null) {
+    if (hasTags) {
       final tagChildren = <Widget>[const SectionHeader('Tags')];
       for (final tag in results.tags) {
         tagChildren.add(
           TagRow(
             tag: tag,
             onActivate: () => _openTag(tag, restoreIndex: 0),
-          ),
-        );
-      }
-      if (createCandidate != null) {
-        tagChildren.add(
-          CreateTagRow(
-            name: createCandidate,
-            onCreate: () => _createTag(createCandidate),
           ),
         );
       }
