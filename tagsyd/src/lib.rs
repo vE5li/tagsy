@@ -392,6 +392,16 @@ pub async fn run(
             .expect("failed to spawn sync-directory thread")
     };
 
+    // One process-wide pull gate, shared by every path that starts a file
+    // byte-transfer: the peer sessions (live-sync / reconcile pulls) and the
+    // catalog's own recovery fetches (the connect-time missing-content sweep and
+    // deferred tag placement). Sharing one instance is what lets its
+    // `(file_id, content_hash)` dedup coalesce a sweep fetch against a
+    // concurrent reconcile pull for the same content, instead of racing two
+    // receives on the shared relay's per-chunk keys.
+    let pull_scheduler =
+        crate::peer::pull_scheduler::PullScheduler::new(configuration.max_concurrent_pulls);
+
     let catalog = catalog::CatalogWriter {
         configuration: configuration.clone(),
         tag_rules: tag_rules.clone(),
@@ -401,6 +411,7 @@ pub async fn run(
         preview_scheduler: catalog::preview_scheduler::PreviewScheduler::new(
             configuration.max_concurrent_preview_generations,
         ),
+        pull_scheduler: pull_scheduler.clone(),
         database,
         change_sender: change_sender.clone(),
         command_sender: command_sender.clone(),
@@ -422,9 +433,7 @@ pub async fn run(
         verified_hashes: VerifiedHashCache::new(),
         operations: operations.clone(),
         connections: connections.clone(),
-        pull_scheduler: crate::peer::pull_scheduler::PullScheduler::new(
-            configuration.max_concurrent_pulls,
-        ),
+        pull_scheduler,
         manifest_batch_size: configuration.manifest_batch_size,
         tag_manifest_batch_size: configuration.tag_manifest_batch_size,
     };

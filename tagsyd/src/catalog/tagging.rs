@@ -31,6 +31,7 @@ pub(crate) async fn apply_change(
     command_sender: &UnboundedSender<SyncDirectoryCommand>,
     change_sender: &UnboundedSender<CatalogCommand>,
     pending_fetches: &ChunkRelay,
+    pull_scheduler: &crate::peer::pull_scheduler::PullScheduler,
     operations: &operations::Operations,
     change: &Change,
     change_origin: &ChangeOrigin,
@@ -183,12 +184,14 @@ pub(crate) async fn apply_change(
             // `CatalogCommand::ReconcilePlacement`.
             if let Some(deferred) = placement::plan_placement(command_sender, database, *file_id) {
                 let pending_fetches = pending_fetches.clone();
+                let pull_scheduler = pull_scheduler.clone();
                 let change_sender = change_sender.clone();
                 let operations = operations.clone();
 
                 tokio::spawn(async move {
                     placement::fetch_and_place_deferred(
                         &pending_fetches,
+                        &pull_scheduler,
                         &change_sender,
                         &operations,
                         deferred,
@@ -243,12 +246,14 @@ pub(crate) async fn apply_change(
             // two arms structurally identical avoids future footguns.
             if let Some(deferred) = placement::plan_placement(command_sender, database, *file_id) {
                 let pending_fetches = pending_fetches.clone();
+                let pull_scheduler = pull_scheduler.clone();
                 let change_sender = change_sender.clone();
                 let operations = operations.clone();
 
                 tokio::spawn(async move {
                     placement::fetch_and_place_deferred(
                         &pending_fetches,
+                        &pull_scheduler,
                         &change_sender,
                         &operations,
                         deferred,

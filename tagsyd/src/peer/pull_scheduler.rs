@@ -21,6 +21,28 @@
 //! whose key is already in flight (running or queued), so the connect-time
 //! reconcile sweep and a concurrent live announce for the same file don't start
 //! two receives.
+//!
+//! # Scope: the fire-and-forget sync pulls
+//!
+//! Every *fire-and-forget* pull goes through here — the only paths that a bulk
+//! change can fan out into an unbounded stampede:
+//!
+//! - live-sync / reconcile pulls (the peer session's `start_pull`),
+//! - the connect-time missing-content sweep, and
+//! - deferred tag-based placement.
+//!
+//! Two *request/response* pulls deliberately stay outside the gate: the
+//! on-demand `CatalogCommand::Fetch` (`tagsy edit`) and the restore
+//! availability probe (`probe_availability`, a single discarded offset-0 chunk,
+//! not a real transfer). Both are rare, user-initiated, and single-file, so
+//! their unbounded concurrency can't stampede. They *cannot* use [`submit`]
+//! as-is anyway: a caller blocked on the receive's result would hang forever if
+//! its submission were coalesced away (the dropped job never sends a response).
+//! Routing them through the gate would require a coalesce-that-still-responds
+//! variant; until there's a reason to, this boundary is intentional — don't
+//! "fix" it by wrapping a responding caller in [`submit`].
+//!
+//! [`submit`]: PullScheduler::submit
 
 use std::collections::HashSet;
 use std::future::Future;

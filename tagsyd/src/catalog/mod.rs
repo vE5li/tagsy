@@ -77,6 +77,13 @@ pub struct CatalogWriter {
     pub pending_fetches: ChunkRelay,
     pub pending_previews: PreviewRelay,
     pub preview_scheduler: preview_scheduler::PreviewScheduler,
+    /// The process-wide pull gate, shared with the peer sessions. The catalog's
+    /// own recovery fetches (missing-content sweep, deferred placement) submit
+    /// through it so they inherit the same concurrency cap and, crucially, the
+    /// same `(file_id, content_hash)` dedup — coalescing against a concurrent
+    /// reconcile pull for the same content instead of starting a racing
+    /// receive.
+    pub pull_scheduler: crate::peer::pull_scheduler::PullScheduler,
     pub database: CatalogStore,
     pub change_sender: UnboundedSender<CatalogCommand>,
     pub command_sender: UnboundedSender<SyncDirectoryCommand>,
@@ -99,6 +106,7 @@ impl CatalogWriter {
             pending_fetches,
             pending_previews,
             preview_scheduler,
+            pull_scheduler,
             mut database,
             change_sender,
             command_sender,
@@ -166,10 +174,25 @@ impl CatalogWriter {
                         }
                     };
 
-                    // Surface this on-demand fetch as a live operation, then drive
-                    // the content-addressed receive off-loop (flooding across the
-                    // peer tree) so the single-threaded consumer is not blocked.
+                    // Surface this on-demand fetch as a live operation with byte
+                    // progress, then drive the content-addressed receive off-loop
+                    // (flooding across the peer tree) so the single-threaded
+                    // consumer is not blocked.
+                    //
+                    // Deliberately NOT routed through `pull_scheduler`: this is a
+                    // request/response pull (the caller blocks on `respond_to`),
+                    // and the scheduler drops coalesced duplicates un-run — which
+                    // would leave the caller hanging. It is rare, user-initiated,
+                    // and single-file, so it can't stampede. See the scope note on
+                    // `PullScheduler`.
                     let fetching = operations.begin(operations::OperationKind::fetching(file_id));
+                    let progress = {
+                        let operations = operations.clone();
+                        let id = fetching.id();
+                        Box::new(move |done: u64, total: Option<u64>| {
+                            operations.report_progress(id, done, total);
+                        }) as crate::peer::transfer::ProgressSink
+                    };
                     let pending_fetches_fetch = pending_fetches.clone();
                     tokio::spawn(async move {
                         let result = crate::peer::fetch::fetch_via_relay(
@@ -177,7 +200,7 @@ impl CatalogWriter {
                             file_id,
                             expected_hash,
                             expected_size,
-                            None,
+                            Some(progress),
                         )
                         .await;
                         match &result {
@@ -267,6 +290,9 @@ impl CatalogWriter {
                         let available = if locally_available {
                             true
                         } else {
+                            // A single discarded offset-0 chunk, not a real
+                            // transfer, so intentionally outside `pull_scheduler`
+                            // (see its scope note): nothing to cap or coalesce.
                             crate::peer::fetch::probe_availability(
                                 &pending_fetches_probe,
                                 file_id,
@@ -371,11 +397,13 @@ impl CatalogWriter {
                         placement::plan_placement(&command_sender, &database, file_id)
                     {
                         let pending_fetches = pending_fetches.clone();
+                        let pull_scheduler = pull_scheduler.clone();
                         let change_sender = change_sender.clone();
                         let operations = operations.clone();
                         tokio::spawn(async move {
                             placement::fetch_and_place_deferred(
                                 &pending_fetches,
+                                &pull_scheduler,
                                 &change_sender,
                                 &operations,
                                 deferred,
@@ -649,11 +677,13 @@ impl CatalogWriter {
                         placement::plan_placement(&command_sender, &database, file_id)
                     {
                         let pending_fetches = pending_fetches.clone();
+                        let pull_scheduler = pull_scheduler.clone();
                         let change_sender = change_sender.clone();
                         let operations = operations.clone();
                         tokio::spawn(async move {
                             placement::fetch_and_place_deferred(
                                 &pending_fetches,
+                                &pull_scheduler,
                                 &change_sender,
                                 &operations,
                                 deferred,
@@ -751,11 +781,13 @@ impl CatalogWriter {
                             continue;
                         };
                         let pending_fetches = pending_fetches.clone();
+                        let pull_scheduler = pull_scheduler.clone();
                         let change_sender = change_sender.clone();
                         let operations = operations.clone();
                         tokio::spawn(async move {
                             placement::fetch_and_materialize(
                                 &pending_fetches,
+                                &pull_scheduler,
                                 &change_sender,
                                 &operations,
                                 file_id,
@@ -886,6 +918,7 @@ impl CatalogWriter {
                     &command_sender,
                     &change_sender,
                     &pending_fetches,
+                    &pull_scheduler,
                     &operations,
                     &change,
                     &change_origin,

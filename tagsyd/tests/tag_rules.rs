@@ -129,6 +129,9 @@ impl Harness {
             preview_scheduler: tagsyd::catalog::preview_scheduler::PreviewScheduler::new(
                 tagsyd::configuration::default_max_concurrent_preview_generations(),
             ),
+            pull_scheduler: tagsyd::peer::pull_scheduler::PullScheduler::new(
+                tagsyd::configuration::default_max_concurrent_pulls(),
+            ),
             database,
             change_sender: change_sender.clone(),
             command_sender,

@@ -202,6 +202,7 @@ pub(crate) fn plan_placement(
 /// Takes only owned, `Send` data so the enclosing future can be spawned.
 pub(crate) async fn fetch_and_place_deferred(
     pending_fetches: &ChunkRelay,
+    pull_scheduler: &crate::peer::pull_scheduler::PullScheduler,
     change_sender: &UnboundedSender<CatalogCommand>,
     operations: &Operations,
     placement: DeferredPlacement,
@@ -232,6 +233,7 @@ pub(crate) async fn fetch_and_place_deferred(
     // bytes on demand using the file's latest catalog version hash.
     fetch_and_materialize(
         pending_fetches,
+        pull_scheduler,
         change_sender,
         operations,
         file_id,
@@ -252,8 +254,21 @@ pub(crate) async fn fetch_and_place_deferred(
 /// materialize. Takes only owned, `Send` data so the caller can spawn it off
 /// the single-threaded `handle_changes` consumer (awaiting a `fetch_via_relay`
 /// there would block the loop the resulting `Materialize` must be dequeued on).
+///
+/// The fetch is admitted through the shared [`PullScheduler`] like every other
+/// pull: it inherits the process-wide concurrency cap and, crucially, the
+/// `(file_id, content_hash)` dedup. On connect, the missing-content sweep and
+/// the manifest-driven reconcile pull can both target the same file; without
+/// the shared gate each started its own receive, and the two racing receivers
+/// corrupted each other's window on the relay's shared per-chunk keys (every
+/// transfer stalled and failed with a spurious `ChunkMiss`). Coalescing them to
+/// one receive is what fixes that.
+///
+/// [`PullScheduler`]: crate::peer::pull_scheduler::PullScheduler
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch_and_materialize(
     pending_fetches: &ChunkRelay,
+    pull_scheduler: &crate::peer::pull_scheduler::PullScheduler,
     change_sender: &UnboundedSender<CatalogCommand>,
     operations: &Operations,
     file_id: FileId,
@@ -274,74 +289,98 @@ pub(crate) async fn fetch_and_materialize(
         return;
     };
 
-    // Drive the content-addressed receive directly against the relay rather
-    // than routing a `CatalogCommand::Fetch` back onto the ingest bus: we are
-    // *inside* the single-threaded `handle_changes` consumer, so awaiting a
-    // reply to a message we enqueue onto our own channel would deadlock. The
-    // relay floods the live peer tree and resolves when the bytes arrive.
-    log::debug!(
-        "fetch_and_materialize: fetching {} at catalog hash {} to place it locally",
-        file_id.to_string(),
-        expected_hash,
-    );
-    // Surface the placement fetch as a live operation for the UI.
-    let placing = operations.begin(crate::operations::OperationKind::placing_file(file_id));
-
-    let content = match crate::peer::fetch::fetch_via_relay(
-        pending_fetches,
-        file_id,
-        expected_hash.clone(),
-        expected_size,
-        None,
-    )
-    .await
-    {
-        Ok(content) => {
+    // Admit through the shared pull gate. If a receive for this exact content is
+    // already in flight (e.g. a reconcile pull started by the peer session that
+    // just connected), `submit` drops this job un-run — the running receive will
+    // deliver the bytes and materialize them. Otherwise it runs once a slot is
+    // free. Everything the job needs is cloned so it can own its captures on the
+    // detached governor task.
+    let pending_fetches = pending_fetches.clone();
+    let change_sender = change_sender.clone();
+    let operations = operations.clone();
+    pull_scheduler
+        .submit(file_id, expected_hash.clone(), move || async move {
+            // Drive the content-addressed receive directly against the relay
+            // rather than routing a `CatalogCommand::Fetch` back onto the ingest
+            // bus: the resulting `Materialize` is enqueued onto `handle_changes`'
+            // own channel, so awaiting a reply there would deadlock. The relay
+            // floods the live peer tree and resolves when the bytes arrive.
             log::debug!(
-                "fetch_and_materialize: fetch of {} succeeded; materializing",
-                file_id.to_string()
+                "fetch_and_materialize: fetching {} at catalog hash {} to place it locally",
+                file_id.to_string(),
+                expected_hash,
             );
-            placing.complete();
-            content
-        }
-        Err(error) => {
-            // No peer had the bytes. Soft deferral: a later reconnect /
-            // announcement retries placement.
-            log::debug!(
-                "fetch_and_materialize: fetch of {} failed ({error:?}); placement deferred until \
-                 a peer can serve it",
-                file_id.to_string()
-            );
-            placing.fail(format!("{error:?}"));
-            return;
-        }
-    };
+            // Surface the placement fetch as a live operation for the UI, with
+            // byte progress so the transfer visibly advances rather than sitting
+            // at "active, no progress" for its whole duration. The receiver
+            // drives this sink on every written chunk; it reports against the
+            // same operation the completion below finalizes.
+            let placing = operations.begin(crate::operations::OperationKind::placing_file(file_id));
+            let progress = {
+                let operations = operations.clone();
+                let id = placing.id();
+                Box::new(move |done: u64, total: Option<u64>| {
+                    operations.report_progress(id, done, total);
+                }) as crate::peer::transfer::ProgressSink
+            };
 
-    // Place the fetched bytes via the normal materialize pipeline, which creates
-    // the file in every matching sync directory (tag-filtered). Fire-and-forget
-    // onto our own bus: processed on a later loop iteration, so this does not
-    // block or deadlock the current one.
-    if let Err(error) = change_sender.send(CatalogCommand::Materialize {
-        file_id,
-        content,
-        content_hash: expected_hash,
-        // Bytes sourced by our own on-demand fetch, not a specific announcing
-        // peer. `Materialize` does not record a version or forward, so the
-        // origin is only a sentinel here.
-        origin: ChangeOrigin::Local {
-            directory_path: PathBuf::new(),
-        },
-        placement: messages::MaterializePlacement::Create {
-            logical_path,
-            tags: file_tags,
-        },
-    }) {
-        log::error!(
-            "fetch_and_materialize: change channel closed; cannot materialize fetched bytes for \
-             {}: {error}",
-            file_id.to_string()
-        );
-    }
+            let content = match crate::peer::fetch::fetch_via_relay(
+                &pending_fetches,
+                file_id,
+                expected_hash.clone(),
+                expected_size,
+                Some(progress),
+            )
+            .await
+            {
+                Ok(content) => {
+                    log::debug!(
+                        "fetch_and_materialize: fetch of {} succeeded; materializing",
+                        file_id.to_string()
+                    );
+                    placing.complete();
+                    content
+                }
+                Err(error) => {
+                    // No peer had the bytes. Soft deferral: a later reconnect /
+                    // announcement retries placement.
+                    log::debug!(
+                        "fetch_and_materialize: fetch of {} failed ({error:?}); placement \
+                         deferred until a peer can serve it",
+                        file_id.to_string()
+                    );
+                    placing.fail(format!("{error:?}"));
+                    return;
+                }
+            };
+
+            // Place the fetched bytes via the normal materialize pipeline, which
+            // creates the file in every matching sync directory (tag-filtered).
+            // Fire-and-forget onto our own bus: processed on a later loop
+            // iteration, so this does not block or deadlock the current one.
+            if let Err(error) = change_sender.send(CatalogCommand::Materialize {
+                file_id,
+                content,
+                content_hash: expected_hash,
+                // Bytes sourced by our own on-demand fetch, not a specific
+                // announcing peer. `Materialize` does not record a version or
+                // forward, so the origin is only a sentinel here.
+                origin: ChangeOrigin::Local {
+                    directory_path: PathBuf::new(),
+                },
+                placement: messages::MaterializePlacement::Create {
+                    logical_path,
+                    tags: file_tags,
+                },
+            }) {
+                log::error!(
+                    "fetch_and_materialize: change channel closed; cannot materialize fetched \
+                     bytes for {}: {error}",
+                    file_id.to_string()
+                );
+            }
+        })
+        .await;
 }
 
 /// Build the list of sync directories that should receive a `ChangeFile`
