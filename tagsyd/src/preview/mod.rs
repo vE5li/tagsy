@@ -43,6 +43,7 @@ mod video;
 
 use image::generate_image;
 use pdf::generate_pdf;
+pub use pdf::render_pdf_to_png;
 use tagsy_core::Preview;
 use text::generate_text;
 use video::generate_video;

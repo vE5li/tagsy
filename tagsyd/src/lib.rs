@@ -50,6 +50,41 @@ pub mod store;
 pub mod sync_directories;
 pub mod transport;
 
+/// Entry point for the hidden `render-pdf-preview` subcommand.
+///
+/// Runs in a **short-lived child process** spawned by
+/// [`preview::generate_pdf`], isolating the crash-prone in-process pdfium
+/// render from the daemon: it reads a PDF from stdin, renders its first page
+/// with pdfium, and writes the PNG to stdout (writing nothing for an
+/// unrenderable-but-parseable document). If pdfium `abort`s or segfaults on a
+/// malformed PDF, only this child dies; the parent reads a failed subprocess
+/// and degrades to `Preview::None`.
+///
+/// Exit code is `0` on success (PNG on stdout) *and* on a clean "no preview"
+/// (empty stdout) — both are authoritative results the parent can act on. A
+/// non-zero exit or a signal death is the parent's cue that rendering crashed.
+///
+/// Only compiled with the `preview-generation` feature (which brings in
+/// pdfium); a build without it never spawns this child.
+#[cfg(feature = "preview-generation")]
+pub fn render_pdf_preview_child() -> std::io::Result<()> {
+    use std::io::{Read, Write};
+
+    // Read the whole PDF from stdin. The parent bounds the size before
+    // spawning, so this is already capped.
+    let mut bytes = Vec::new();
+    std::io::stdin().read_to_end(&mut bytes)?;
+
+    // The crash-prone call. If pdfium aborts/segfaults here, this process dies
+    // and never reaches the write below — exactly the containment we want.
+    if let Some(png) = preview::render_pdf_to_png(&bytes) {
+        std::io::stdout().write_all(&png)?;
+    }
+    // On `None` we write nothing and exit 0: an authoritative "no preview".
+
+    Ok(())
+}
+
 /// Cooperative shutdown handle for [`run`].
 ///
 /// A thin wrapper around a [`CancellationToken`]. The caller holds the

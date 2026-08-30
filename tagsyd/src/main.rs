@@ -27,6 +27,15 @@ enum Commands {
     Run {
         configuration_file: PathBuf,
     },
+    /// Internal: render a PDF (stdin) to a PNG preview (stdout).
+    ///
+    /// Not for direct use. The daemon spawns itself with this subcommand to run
+    /// the crash-prone pdfium render in an isolated child process, so a pdfium
+    /// `abort`/segfault on a malformed PDF cannot take the daemon down. Hidden
+    /// from `--help`.
+    #[cfg(feature = "preview-generation")]
+    #[command(hide = true)]
+    RenderPdfPreview,
 }
 
 /// Resolve on-disk paths from the environment.
@@ -51,6 +60,12 @@ async fn main() -> Result<(), std::io::Error> {
     let arguments = Arguments::parse();
 
     match arguments.command {
+        // Internal PDF-render helper: pure stdin→stdout, no env/config/runtime.
+        // Kept first and minimal so a pdfium crash here is a clean child death.
+        #[cfg(feature = "preview-generation")]
+        Commands::RenderPdfPreview => {
+            return tagsyd::render_pdf_preview_child();
+        }
         // FIX: Refactor, just output to stdout instead of writing to a file.
         Commands::Keygen => {
             let paths = paths_from_env();
