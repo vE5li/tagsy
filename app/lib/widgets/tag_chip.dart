@@ -184,16 +184,12 @@ class TagChip extends StatelessWidget {
     }
 
     if (style.shadow) {
-      pill = DecoratedBox(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: [
-            BoxShadow(
-              color: parseTagColor(style.shadowColor),
-              blurRadius: 8,
-              offset: const Offset(0, 3),
-            ),
-          ],
+      pill = CustomPaint(
+        painter: _ShapeShadowPainter(
+          shape: style.shape,
+          color: parseTagColor(style.shadowColor),
+          blurRadius: 4,
+          offset: const Offset(0, 3),
         ),
         child: pill,
       );
@@ -291,6 +287,40 @@ class _DashedPillPainter extends CustomPainter {
       old.fillColor != fillColor ||
       old.borderColor != borderColor ||
       old.borderWidth != borderWidth;
+}
+
+/// Paints a blurred drop shadow that follows the tag's own shape, rather than a
+/// fixed rounded rectangle. Reuses each shape's [ShapeBorder.getOuterPath] — the
+/// same outline the fill and border trace — so the shadow matches exactly.
+class _ShapeShadowPainter extends CustomPainter {
+  _ShapeShadowPainter({
+    required this.shape,
+    required this.color,
+    required this.blurRadius,
+    required this.offset,
+  });
+
+  final String shape;
+  final Color color;
+  final double blurRadius;
+  final Offset offset;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final path = _shapeBorder(shape, BorderSide.none).getOuterPath(rect);
+    final paint = Paint()
+      ..color = color
+      ..maskFilter = MaskFilter.blur(BlurStyle.normal, blurRadius);
+    canvas.drawPath(path.shift(offset), paint);
+  }
+
+  @override
+  bool shouldRepaint(_ShapeShadowPainter old) =>
+      old.shape != shape ||
+      old.color != color ||
+      old.blurRadius != blurRadius ||
+      old.offset != offset;
 }
 
 /// A default [tagsy.TagStyleEntry] with the given dot color, matching the core's
