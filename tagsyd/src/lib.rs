@@ -363,6 +363,9 @@ pub async fn run(
         runtime_configuration: runtime_configuration.clone(),
         pending_fetches: pending_fetches.clone(),
         pending_previews: pending_previews.clone(),
+        preview_scheduler: catalog::preview_scheduler::PreviewScheduler::new(
+            configuration.max_concurrent_preview_generations,
+        ),
         database,
         change_sender: change_sender.clone(),
         command_sender: command_sender.clone(),

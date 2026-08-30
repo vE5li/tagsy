@@ -597,6 +597,8 @@ mod tests {
             tags: Vec::new(),
             preview_generation_policy: crate::configuration::PreviewGenerationPolicy::Lazy,
             max_concurrent_pulls: crate::configuration::default_max_concurrent_pulls(),
+            max_concurrent_preview_generations:
+                crate::configuration::default_max_concurrent_preview_generations(),
             manifest_batch_size: crate::configuration::default_manifest_batch_size(),
             tag_manifest_batch_size: crate::configuration::default_tag_manifest_batch_size(),
             editor_rules: Vec::new(),
@@ -811,6 +813,8 @@ mod tests {
             tags: Vec::new(),
             preview_generation_policy: crate::configuration::PreviewGenerationPolicy::Lazy,
             max_concurrent_pulls: crate::configuration::default_max_concurrent_pulls(),
+            max_concurrent_preview_generations:
+                crate::configuration::default_max_concurrent_preview_generations(),
             manifest_batch_size: crate::configuration::default_manifest_batch_size(),
             tag_manifest_batch_size: crate::configuration::default_tag_manifest_batch_size(),
             editor_rules: Vec::new(),
@@ -885,6 +889,8 @@ mod tests {
             tags: Vec::new(),
             preview_generation_policy: crate::configuration::PreviewGenerationPolicy::Lazy,
             max_concurrent_pulls: crate::configuration::default_max_concurrent_pulls(),
+            max_concurrent_preview_generations:
+                crate::configuration::default_max_concurrent_preview_generations(),
             manifest_batch_size: crate::configuration::default_manifest_batch_size(),
             tag_manifest_batch_size: crate::configuration::default_tag_manifest_batch_size(),
             editor_rules: Vec::new(),
@@ -1058,6 +1064,8 @@ mod tests {
             tags: Vec::new(),
             preview_generation_policy: crate::configuration::PreviewGenerationPolicy::Lazy,
             max_concurrent_pulls: crate::configuration::default_max_concurrent_pulls(),
+            max_concurrent_preview_generations:
+                crate::configuration::default_max_concurrent_preview_generations(),
             manifest_batch_size: crate::configuration::default_manifest_batch_size(),
             tag_manifest_batch_size: crate::configuration::default_tag_manifest_batch_size(),
             editor_rules: Vec::new(),
@@ -1436,6 +1444,8 @@ mod tests {
             tags: Vec::new(),
             preview_generation_policy: crate::configuration::PreviewGenerationPolicy::Lazy,
             max_concurrent_pulls: crate::configuration::default_max_concurrent_pulls(),
+            max_concurrent_preview_generations:
+                crate::configuration::default_max_concurrent_preview_generations(),
             manifest_batch_size: crate::configuration::default_manifest_batch_size(),
             tag_manifest_batch_size: crate::configuration::default_tag_manifest_batch_size(),
             editor_rules: Vec::new(),

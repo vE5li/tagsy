@@ -44,6 +44,7 @@ pub mod files;
 pub mod forward;
 pub mod messages;
 pub mod placement;
+pub mod preview_scheduler;
 pub mod previews;
 pub mod tagging;
 
@@ -75,6 +76,7 @@ pub struct CatalogWriter {
     pub runtime_configuration: Arc<RwLock<RuntimeConfiguration>>,
     pub pending_fetches: ChunkRelay,
     pub pending_previews: PreviewRelay,
+    pub preview_scheduler: preview_scheduler::PreviewScheduler,
     pub database: CatalogStore,
     pub change_sender: UnboundedSender<CatalogCommand>,
     pub command_sender: UnboundedSender<SyncDirectoryCommand>,
@@ -96,6 +98,7 @@ impl CatalogWriter {
             runtime_configuration,
             pending_fetches,
             pending_previews,
+            preview_scheduler,
             mut database,
             change_sender,
             command_sender,
@@ -471,7 +474,11 @@ impl CatalogWriter {
                     let command_sender_preview = command_sender.clone();
                     let pending_previews_preview = pending_previews.clone();
                     let change_sender_preview = change_sender.clone();
-                    tokio::spawn(async move {
+                    // Admit the resolution through the process-wide scheduler so
+                    // a cold-cache stampede (a purge, a restore, a first sync)
+                    // resolves at most `max_concurrent_preview_generations` at a
+                    // time instead of reading + decoding every file at once.
+                    preview_scheduler.submit(async move {
                         let resolve_start = std::time::Instant::now();
                         let result = resolve_preview(
                             &command_sender_preview,

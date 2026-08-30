@@ -125,6 +125,14 @@ pub fn default_max_concurrent_pulls() -> usize {
     8
 }
 
+/// Default for [`Configuration::max_concurrent_preview_generations`]: a modest
+/// cap that keeps a cold-cache stampede (a purge, a restore, a first sync) from
+/// reading and decoding thousands of files at once and spiking memory, while
+/// still letting several previews resolve in parallel for warm-up throughput.
+pub fn default_max_concurrent_preview_generations() -> usize {
+    8
+}
+
 /// Default for [`Configuration::manifest_batch_size`]: at a few hundred bytes
 /// to ~1 KiB per file entry (a file's full version history), 2000 entries is
 /// well under a megabyte per frame — comfortably below the 64 MiB WebSocket
@@ -176,6 +184,19 @@ pub struct Configuration {
     /// [`default_max_concurrent_pulls`].
     #[serde(default = "default_max_concurrent_pulls")]
     pub max_concurrent_pulls: usize,
+    /// Maximum number of preview *resolutions* (local generation or peer fetch)
+    /// this device runs concurrently. A cold preview cache over a large catalog
+    /// — after a `PurgePreviews`, a backup restore, or a first sync — makes
+    /// startup preview-warming enqueue a `GetPreview` for every file at once;
+    /// each miss reads and re-hashes the whole file and then decodes/encodes a
+    /// thumbnail, so without a cap thousands run together and spike memory.
+    /// Resolutions beyond this limit queue and start as running ones finish
+    /// (see [`crate::catalog::preview_scheduler::PreviewScheduler`]). This is
+    /// the preview-generation analogue of [`Self::max_concurrent_pulls`], on
+    /// the local-CPU axis rather than the network axis. Defaults to
+    /// [`default_max_concurrent_preview_generations`].
+    #[serde(default = "default_max_concurrent_preview_generations")]
+    pub max_concurrent_preview_generations: usize,
     /// Maximum number of file entries packed into a single connection-time
     /// `Sync::Manifest` frame. The manifest of a large catalog is split into
     /// several frames of at most this many entries so no single WebSocket

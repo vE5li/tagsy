@@ -81,6 +81,8 @@ impl Harness {
             tags: Vec::new(),
             preview_generation_policy: PreviewGenerationPolicy::Never,
             max_concurrent_pulls: tagsyd::configuration::default_max_concurrent_pulls(),
+            max_concurrent_preview_generations:
+                tagsyd::configuration::default_max_concurrent_preview_generations(),
             manifest_batch_size: tagsyd::configuration::default_manifest_batch_size(),
             tag_manifest_batch_size: tagsyd::configuration::default_tag_manifest_batch_size(),
             editor_rules: Vec::new(),
@@ -124,6 +126,9 @@ impl Harness {
             runtime_configuration: runtime_configuration.clone(),
             pending_fetches,
             pending_previews: PreviewRelay::new(runtime_configuration),
+            preview_scheduler: tagsyd::catalog::preview_scheduler::PreviewScheduler::new(
+                tagsyd::configuration::default_max_concurrent_preview_generations(),
+            ),
             database,
             change_sender: change_sender.clone(),
             command_sender,
