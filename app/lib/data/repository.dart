@@ -91,17 +91,23 @@ class TagsyRepository {
 
   // --- Tags -----------------------------------------------------------------
 
-  /// Create a tag; returns the freshly-minted id string.
-  Future<String> createTag({required String name, required String color}) =>
-      _client.createTag(name: name, color: color);
+  /// Create a tag with an initial visual style; returns the freshly-minted id
+  /// string.
+  Future<String> createTag({
+    required String name,
+    required tagsy.TagStyleEntry style,
+  }) => _client.createTag(name: name, style: style);
 
   /// Rename a tag.
   Future<void> renameTag({required String tagId, required String name}) =>
       _client.renameTag(tagId: tagId, name: name);
 
-  /// Change a tag's color.
-  Future<void> setTagColor({required String tagId, required String color}) =>
-      _client.setTagColor(tagId: tagId, color: color);
+  /// Replace a tag's visual style (dot color, fill, border, shape, …). Dot
+  /// color is one property of the style, so this is also how a tag is recolored.
+  Future<void> setTagStyle({
+    required String tagId,
+    required tagsy.TagStyleEntry style,
+  }) => _client.setTagStyle(tagId: tagId, style: style);
 
   /// Delete a tag.
   Future<void> deleteTag({required String tagId}) =>

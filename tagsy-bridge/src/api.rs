@@ -295,11 +295,67 @@ impl From<HomeSection> for HomeSectionEntry {
     }
 }
 
+/// A tag's full visual style, flattened for the Dart UI. Mirrors
+/// [`tagsy_core::TagStyle`] one-to-one, but the two enums are carried as their
+/// lowercase string names (`border_style`: `none|solid|dashed`, `shape`:
+/// `rounded|stadium|square|cut_corner`) so the FFI DTO stays primitive and the
+/// Dart side reads self-describing values. See the `TagStyle` docs for the
+/// meaning and defaults of each field; every property is a concrete value (no
+/// nulls, nothing derived at render time).
+pub struct TagStyleEntry {
+    pub dot_color: String,
+    pub background: String,
+    pub gradient: String,
+    pub foreground: String,
+    pub border: String,
+    pub border_width: f64,
+    pub border_style: String,
+    pub shape: String,
+    pub shadow: bool,
+    pub shadow_color: String,
+}
+
+impl From<tagsy_core::TagStyle> for TagStyleEntry {
+    fn from(style: tagsy_core::TagStyle) -> Self {
+        Self {
+            dot_color: style.dot_color,
+            background: style.background,
+            gradient: style.gradient,
+            foreground: style.foreground,
+            border: style.border,
+            border_width: style.border_width,
+            border_style: style.border_style.as_str().to_owned(),
+            shape: style.shape.as_str().to_owned(),
+            shadow: style.shadow,
+            shadow_color: style.shadow_color,
+        }
+    }
+}
+
+impl From<TagStyleEntry> for tagsy_core::TagStyle {
+    fn from(entry: TagStyleEntry) -> Self {
+        Self {
+            dot_color: entry.dot_color,
+            background: entry.background,
+            gradient: entry.gradient,
+            foreground: entry.foreground,
+            border: entry.border,
+            border_width: entry.border_width,
+            border_style: tagsy_core::BorderStyle::from_str_or_default(&entry.border_style),
+            shape: tagsy_core::TagShape::from_str_or_default(&entry.shape),
+            shadow: entry.shadow,
+            shadow_color: entry.shadow_color,
+        }
+    }
+}
+
 /// A tag flattened into primitive fields for the Dart UI (see [`FileEntry`]).
 pub struct TagEntry {
     pub tag_id: String,
     pub name: String,
-    pub color: String,
+    /// The tag's full visual style. The old single `color` is now
+    /// `style.dot_color`.
+    pub style: TagStyleEntry,
     /// Whether this tag is soft-deleted (tombstoned). Mirrors
     /// [`FileEntry::deleted`]: always `false` for standard listings, only
     /// possibly `true` under [`DeletedRule::Include`].
@@ -311,7 +367,7 @@ impl From<Tag> for TagEntry {
         Self {
             tag_id: tag.id.to_string(),
             name: tag.name,
-            color: tag.color,
+            style: tag.style.into(),
             deleted: tag.deleted,
         }
     }
@@ -859,14 +915,14 @@ impl Tagsy {
         Ok(TagEntry::from(backend.get_tag(tag_id, deleted_rule).await?))
     }
 
-    /// Create a tag; returns the freshly-minted id as a string, which the Dart
-    /// UI can pass straight back to any other method here or use to fetch the
-    /// tag's flattened [`TagEntry`] for a chip. See the string-id convention
-    /// on [`Tagsy`].
-    pub async fn create_tag(&self, name: String, color: String) -> Result<String, ApiError> {
+    /// Create a tag with an initial visual style; returns the freshly-minted id
+    /// as a string, which the Dart UI can pass straight back to any other
+    /// method here or use to fetch the tag's flattened [`TagEntry`] for a
+    /// chip. See the string-id convention on [`Tagsy`].
+    pub async fn create_tag(&self, name: String, style: TagStyleEntry) -> Result<String, ApiError> {
         Ok(self
             .try_backend()?
-            .create_tag(name, color)
+            .create_tag(name, style.into())
             .await?
             .to_string())
     }
@@ -896,11 +952,17 @@ impl Tagsy {
         backend.rename_tag(tag_id, name).await
     }
 
-    /// Change a tag's color. Same propagation rules as [`Self::rename_tag`].
-    pub async fn set_tag_color(&self, tag_id: String, color: String) -> Result<(), ApiError> {
+    /// Replace a tag's visual style (dot color, fill, border, shape, …). Dot
+    /// color is one property of the style, so this is also how a tag is
+    /// recolored. Same propagation rules as [`Self::rename_tag`].
+    pub async fn set_tag_style(
+        &self,
+        tag_id: String,
+        style: TagStyleEntry,
+    ) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
         let tag_id = backend.resolve_tag_id(tag_id).await?;
-        backend.set_tag_color(tag_id, color).await
+        backend.set_tag_style(tag_id, style.into()).await
     }
 
     /// Upload a file from a path on disk; returns the freshly-minted id.
@@ -1164,7 +1226,7 @@ impl From<ApiEvent> for ApiEventDto {
             // Tag-only changes.
             Change::TagAdded { tag_id, .. }
             | Change::TagRenamed { tag_id, .. }
-            | Change::TagRecolored { tag_id, .. }
+            | Change::TagRestyled { tag_id, .. }
             | Change::TagChanged { tag_id, .. }
             | Change::TagRemoved { tag_id, .. } => ApiEventDto::TagChanged {
                 tag_id: tag_id.to_string(),

@@ -107,9 +107,9 @@ class TagPickerSheet {
     return chosen;
   }
 
-  /// Prompt for a tag name, create it, and return the fresh [tagsy.TagEntry]
-  /// (or `null` on cancel / failure). The engine substitutes a default palette
-  /// color for the empty color passed here.
+  /// Prompt for a tag name, create it with the default style, and return the
+  /// fresh [tagsy.TagEntry] (or `null` on cancel / failure). The tag can be
+  /// restyled afterward from its detail screen.
   static Future<tagsy.TagEntry?> _createTag(
     BuildContext context,
     TagsyRepository repository,
@@ -125,7 +125,10 @@ class TagPickerSheet {
     final trimmed = name?.trim();
     if (trimmed == null || trimmed.isEmpty) return null;
     try {
-      final tagId = await repository.createTag(name: trimmed, color: '');
+      final tagId = await repository.createTag(
+        name: trimmed,
+        style: defaultTagStyle(),
+      );
       return await repository.getTagEntry(
         tagId: tagId,
         deletedRule: tagsy.DeletedRule.exclude,
@@ -190,7 +193,7 @@ class _TagPickerSheetBodyState extends State<_TagPickerSheetBody> {
   /// A selectable tag row: color swatch + name, popping the sheet with the tag.
   Widget _tagTile(tagsy.TagEntry tag) => ListTile(
     visualDensity: VisualDensity.compact,
-    leading: TagColorSwatch(color: tag.color),
+    leading: TagColorSwatch(color: tag.style.dotColor),
     title: Text(tag.name),
     onTap: () => Navigator.pop(context, tag),
   );

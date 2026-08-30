@@ -14,7 +14,7 @@ use tagsy_api::{
     ApiError, ApiEvent, BackupOutcome, DeletedRule, EditorRule, HomeSection, RetagSummary,
     SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,
 };
-use tagsy_core::{FileId, FileInfo, Preview, TagId};
+use tagsy_core::{FileId, FileInfo, Preview, TagId, TagStyle};
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 /// A UI-facing API call, sent by a control client to the daemon.
@@ -72,7 +72,7 @@ pub enum ControlRequest {
     // Writes.
     CreateTag {
         name: String,
-        color: String,
+        style: TagStyle,
     },
     DeleteTag {
         tag_id: TagId,
@@ -84,9 +84,9 @@ pub enum ControlRequest {
         tag_id: TagId,
         name: String,
     },
-    SetTagColor {
+    SetTagStyle {
         tag_id: TagId,
-        color: String,
+        style: TagStyle,
     },
     /// Upload a file the client provides on demand. The client does *not* send
     /// the bytes; it sends the logical name, the precomputed BLAKE3

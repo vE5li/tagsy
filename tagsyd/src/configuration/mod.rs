@@ -113,7 +113,7 @@ pub struct TagDeclaration {
     /// used on every device that should share this tag.
     pub id: TagId,
     pub name: String,
-    /// Hex color (e.g. `#F44336`). Empty is allowed and normalized downstream.
+    // TODO: Add other properties here as well.
     #[serde(default)]
     pub color: String,
 }
@@ -137,7 +137,7 @@ pub fn default_manifest_batch_size() -> usize {
 /// relationships are small (a couple of ids + timestamps), so a larger batch is
 /// still tiny per frame.
 pub fn default_tag_manifest_batch_size() -> usize {
-    5000
+    3000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -133,18 +133,19 @@ fn enqueue_declared_tags(
             continue;
         }
 
-        // Normalize an empty color to the same default the API uses, so a
-        // declared tag renders consistently with a UI-created one.
-        let color = if tag.color.trim().is_empty() {
-            "#F44336".to_owned()
-        } else {
-            tag.color.clone()
-        };
+        // Build the tag's style from the declaration. Only the dot color is
+        // configurable today; the rest take their defaults. An empty declared
+        // color falls back to the default dot color, so a declared tag renders
+        // consistently with a UI-created one.
+        let mut style = tagsy_core::TagStyle::default();
+        if !tag.color.trim().is_empty() {
+            style.dot_color = tag.color.clone();
+        }
 
         let change = Change::TagAdded {
             tag_id: tag.id,
             tag_name: tag.name.clone(),
-            color,
+            style,
             metadata: None,
             modified_at: DECLARED_TAG_MODIFIED_AT,
         };

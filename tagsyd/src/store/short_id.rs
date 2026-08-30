@@ -199,7 +199,7 @@ impl CatalogStore {
             return Err(DatabaseError::MissingTag);
         }
 
-        shortest_unique_prefix_length(&self.connection, "tags_v1", "id", &tag_id.to_string())
+        shortest_unique_prefix_length(&self.connection, "tags_v2", "id", &tag_id.to_string())
     }
 
     /// Resolve a full-or-short tag id `prefix` to a single [`TagId`]. The tag
@@ -210,7 +210,7 @@ impl CatalogStore {
     /// - [`DatabaseError::AmbiguousIdPrefix`] if more than one tag matches.
     pub fn resolve_tag_id_prefix(&self, prefix: &str) -> Result<TagId, DatabaseError> {
         let normalized = normalize_id_prefix(prefix).ok_or(DatabaseError::MissingTag)?;
-        match resolve_id_prefix(&self.connection, "tags_v1", "id", &normalized)? {
+        match resolve_id_prefix(&self.connection, "tags_v2", "id", &normalized)? {
             PrefixResolution::Unique(id) => {
                 TagId::from_string(&id).ok_or(DatabaseError::MissingTag)
             }
@@ -226,7 +226,7 @@ mod tests {
 
     use super::*;
     use crate::store::DeletedRule;
-    use crate::store::fixtures::{file_id_from_hex, memory_db, tag_id_from_hex};
+    use crate::store::fixtures::{dot_style, file_id_from_hex, memory_db, tag_id_from_hex};
 
     #[test]
     fn shorten_file_id_single_file_needs_one_char() {
@@ -401,8 +401,8 @@ mod tests {
         let database = memory_db();
         let far_a = tag_id_from_hex("aaaa000000000000000000000000000a");
         let far_b = tag_id_from_hex("bbbb000000000000000000000000000b");
-        database.add_tag(far_a, "a", "red", 1).unwrap();
-        database.add_tag(far_b, "b", "red", 1).unwrap();
+        database.add_tag(far_a, "a", &dot_style("red"), 1).unwrap();
+        database.add_tag(far_b, "b", &dot_style("red"), 1).unwrap();
 
         assert_eq!(database.resolve_tag_id_prefix("a").unwrap(), far_a);
         assert_eq!(database.resolve_tag_id_prefix("b").unwrap(), far_b);
@@ -413,8 +413,12 @@ mod tests {
         let database = memory_db();
         let shared_a = tag_id_from_hex("abcd000000000000000000000000000a");
         let shared_b = tag_id_from_hex("abcd000000000000000000000000000b");
-        database.add_tag(shared_a, "a", "red", 1).unwrap();
-        database.add_tag(shared_b, "b", "red", 1).unwrap();
+        database
+            .add_tag(shared_a, "a", &dot_style("red"), 1)
+            .unwrap();
+        database
+            .add_tag(shared_b, "b", &dot_style("red"), 1)
+            .unwrap();
 
         assert!(matches!(
             database.resolve_tag_id_prefix("abcd"),
@@ -429,7 +433,7 @@ mod tests {
             .add_tag(
                 tag_id_from_hex("aaaa000000000000000000000000000a"),
                 "a",
-                "red",
+                &dot_style("red"),
                 1,
             )
             .unwrap();
@@ -447,7 +451,7 @@ mod tests {
         let shared_b = tag_id_from_hex("abcd000000000000000000000000000b");
         let far = tag_id_from_hex("ffff000000000000000000000000000f");
         for (id, name) in [(shared_a, "a"), (shared_b, "b"), (far, "c")] {
-            database.add_tag(id, name, "red", 1).unwrap();
+            database.add_tag(id, name, &dot_style("red"), 1).unwrap();
         }
 
         // Each tag's displayed short id must resolve back to exactly itself.

@@ -4,16 +4,55 @@
 use std::collections::HashMap;
 
 use serde_json::json;
-use tagsy_api::{Backend, DeletedRule, SubtagRule, Tag};
+use tagsy_api::{Backend, BorderStyle, DeletedRule, SubtagRule, Tag, TagShape, TagStyle};
 use tagsy_core::FileInfo;
 use tagsy_ipc::IpcBackend;
 
-use crate::commands::Commands;
+use crate::commands::{Commands, StyleArgs};
 use crate::output::{
     OutputMode, emit_connected_peers, emit_files, emit_operations, emit_scalar, emit_tags,
     emit_tags_and_files, print_json, print_tag_rule_report,
 };
 use crate::{common, upload};
+
+/// Apply the CLI's optional style flags on top of a base [`TagStyle`], leaving
+/// any unspecified property untouched. `create-tag` passes
+/// `TagStyle::default()` as the base; `set-tag-style` passes the tag's current
+/// style so it edits in place. Unrecognized enum spellings fall back to the
+/// default variant (same forgiving rule as the wire/SQL layer).
+fn apply_style_args(mut base: TagStyle, args: &StyleArgs) -> TagStyle {
+    if let Some(v) = &args.dot_color {
+        base.dot_color = v.clone();
+    }
+    if let Some(v) = &args.background {
+        base.background = v.clone();
+    }
+    if let Some(v) = &args.gradient {
+        base.gradient = v.clone();
+    }
+    if let Some(v) = &args.foreground {
+        base.foreground = v.clone();
+    }
+    if let Some(v) = &args.border {
+        base.border = v.clone();
+    }
+    if let Some(v) = args.border_width {
+        base.border_width = v;
+    }
+    if let Some(v) = &args.border_style {
+        base.border_style = BorderStyle::from_str_or_default(v);
+    }
+    if let Some(v) = &args.shape {
+        base.shape = TagShape::from_str_or_default(v);
+    }
+    if let Some(v) = args.shadow {
+        base.shadow = v;
+    }
+    if let Some(v) = &args.shadow_color {
+        base.shadow_color = v.clone();
+    }
+    base
+}
 
 pub async fn run(
     backend: &IpcBackend,
@@ -109,22 +148,22 @@ pub async fn run(
 
             emit_files(output_mode, &files, &file_tags);
         }
-        Commands::CreateTag { name, color } => {
+        Commands::CreateTag { name, style } => {
+            let style = apply_style_args(TagStyle::default(), &style);
             let tag_id = backend
-                .create_tag(name.clone(), color.clone())
+                .create_tag(name.clone(), style.clone())
                 .await
                 .map_err(|error| error.to_string())?;
 
             // Persistence is async (the write is enqueued), so we can't fetch the
             // row back yet without racing the pipeline. Render the full entry from
             // what we just sent instead — the id is authoritative and the
-            // name/color are exactly what the daemon will persist (the CLI's
-            // default color matches the daemon's empty-color default). A fresh tag
+            // name/style are exactly what the daemon will persist. A fresh tag
             // has no applied tags, so that column is empty.
             let tag = Tag {
                 id: tag_id,
                 name,
-                color,
+                style,
                 metadata: None,
                 // A freshly-created tag is live by construction.
                 deleted: false,
@@ -444,18 +483,26 @@ pub async fn run(
                 json!({ "id": tag_id, "name": name }),
             );
         }
-        Commands::SetTagColor { tag_id, color } => {
+        Commands::SetTagStyle { tag_id, style } => {
             let tag_id = common::resolve_tag_id(backend, &tag_id).await?;
 
+            // Fetch the current style so unspecified flags are preserved — a
+            // restyle replaces the whole style, so we must send the merged value.
+            let current = backend
+                .get_tag(tag_id, DeletedRule::Exclude)
+                .await
+                .map_err(|error| error.to_string())?;
+            let merged = apply_style_args(current.style, &style);
+
             backend
-                .set_tag_color(tag_id, color.clone())
+                .set_tag_style(tag_id, merged.clone())
                 .await
                 .map_err(|error| error.to_string())?;
 
             emit_scalar(
                 output_mode,
-                format!("Recolored tag {}", tag_id.to_string()),
-                json!({ "id": tag_id, "color": color }),
+                format!("Restyled tag {}", tag_id.to_string()),
+                json!({ "id": tag_id, "style": merged }),
             );
         }
         Commands::Move { id, path } => {

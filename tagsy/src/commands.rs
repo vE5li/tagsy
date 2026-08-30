@@ -3,7 +3,48 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+
+/// The tag-style flags shared by `create-tag` and `set-tag-style`. Every flag
+/// is optional; a flag left unset leaves that property at its existing value
+/// (for `set-tag-style`) or its default (for `create-tag`). This mirrors the
+/// ten properties of `tagsy_core::TagStyle` — colors are `#RRGGBB[AA]` hex,
+/// `--border-style` is `none|solid|dashed`, `--shape` is
+/// `rounded|stadium|square|cut_corner`.
+#[derive(Debug, Args)]
+pub struct StyleArgs {
+    /// Leading dot color (hex).
+    #[arg(long)]
+    pub dot_color: Option<String>,
+    /// Pill fill color (hex); default transparent.
+    #[arg(long)]
+    pub background: Option<String>,
+    /// Color the fill fades to, left→right (hex). Equal to background = no
+    /// gradient.
+    #[arg(long)]
+    pub gradient: Option<String>,
+    /// Text color (hex).
+    #[arg(long)]
+    pub foreground: Option<String>,
+    /// Border color (hex); default transparent.
+    #[arg(long)]
+    pub border: Option<String>,
+    /// Border stroke width.
+    #[arg(long)]
+    pub border_width: Option<f64>,
+    /// Border stroke style: none, solid, or dashed.
+    #[arg(long)]
+    pub border_style: Option<String>,
+    /// Pill shape: rounded, stadium, square, or cut_corner.
+    #[arg(long)]
+    pub shape: Option<String>,
+    /// Draw a soft drop shadow.
+    #[arg(long)]
+    pub shadow: Option<bool>,
+    /// Drop-shadow color (hex); used when --shadow is on.
+    #[arg(long)]
+    pub shadow_color: Option<String>,
+}
 
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
@@ -52,12 +93,14 @@ pub enum Commands {
         many: bool,
     },
     /// Create a tag; prints the newly-minted tag id.
+    ///
+    /// Unset style flags take their defaults (see `StyleArgs`); the dot color
+    /// defaults to `#F44336`, matching the Flutter app's palette so CLI- and
+    /// app-created tags render identically.
     CreateTag {
         name: String,
-        // Hex form (matches the Flutter app's palette, kTagColorPalette), so
-        // CLI- and app-created tags render identically.
-        #[arg(long, default_value = "#F44336")]
-        color: String,
+        #[command(flatten)]
+        style: StyleArgs,
     },
     /// Search files with a free-form query.
     ///
@@ -180,13 +223,16 @@ pub enum Commands {
         /// The tag's new name.
         name: String,
     },
-    /// Change a tag's color.
-    SetTagColor {
-        /// The tag to recolor (a full id or any unambiguous short-id prefix of
-        /// it.
+    /// Change a tag's visual style. Fetches the tag's current style and
+    /// overrides only the flags you pass, so e.g. `--border '#000000'` changes
+    /// just the border and leaves the dot color, shape, etc. untouched. Dot
+    /// color is one property (`--dot-color`), so this is also how you recolor.
+    SetTagStyle {
+        /// The tag to restyle (a full id or any unambiguous short-id prefix of
+        /// it).
         tag_id: String,
-        /// The tag's new color.
-        color: String,
+        #[command(flatten)]
+        style: StyleArgs,
     },
     /// Move (rename) a file to a new logical path.
     #[command(visible_alias = "mv")]

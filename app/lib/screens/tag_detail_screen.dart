@@ -1,10 +1,11 @@
-// Per-tag detail screen: shows every property of a single tag (id, name,
-// color swatch), the tag's parent tags (tags applied to this tag), and its
-// subtags (children). Tap the Name or Color row to edit; each of the two tag
-// sections has an Add button and per-chip remove; the AppBar action deletes
-// the tag itself. Live-updates on the change stream so rename / recolor /
-// external deletions land immediately (the screen pops itself if the tag
-// disappears underneath it).
+// Per-tag detail screen: shows every property of a single tag (id, name, and
+// its full visual style, edited inline), the tag's parent tags (tags applied to
+// this tag), and its subtags (children). Tap the Name row to rename; the inline
+// style editor persists each change immediately; each of the two tag sections
+// has an Add button and per-chip remove; the AppBar action deletes the tag
+// itself. Live-updates on the change stream so rename / restyle / external
+// deletions land immediately (the screen pops itself if the tag disappears
+// underneath it).
 //
 // The screen is keyed by [tagId] rather than by a captured [TagEntry] so it
 // always reflects the current state of the store on rebuild.
@@ -12,6 +13,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 
 import '../data/repository.dart';
 import '../rust/api.dart' as tagsy;
@@ -197,23 +199,26 @@ class _TagDetailScreenState extends State<TagDetailScreen> {
     }
   }
 
-  Future<void> _recolorTag() async {
+  Future<void> _applyStyle(tagsy.TagStyleEntry style) async {
     final tag = _tag;
     if (tag == null) return;
-    final result = await showDialog<String>(
-      context: context,
-      builder: (_) => _RecolorTagDialog(initial: tag.color),
-    );
-    if (result == null || result == tag.color) return;
     try {
-      await _repository.setTagColor(tagId: tag.tagId, color: result);
+      await _repository.setTagStyle(tagId: tag.tagId, style: style);
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('Failed to change color: $error')));
+      ).showSnackBar(SnackBar(content: Text('Failed to change style: $error')));
     }
   }
+
+  /// A value key summarizing a style, used to reseat the inline editor's text
+  /// controllers only when the style actually changes (a rebuild that leaves
+  /// the style unchanged — e.g. a subtag edit — keeps the same key so the
+  /// editor's fields don't lose focus mid-typing).
+  String _styleKey(tagsy.TagStyleEntry s) =>
+      '${s.dotColor}|${s.background}|${s.gradient}|${s.foreground}|${s.border}|'
+      '${s.borderWidth}|${s.borderStyle}|${s.shape}|${s.shadow}|${s.shadowColor}';
 
   Future<void> _addParent() async {
     final chosen = await TagPickerSheet.show(
@@ -390,12 +395,29 @@ class _TagDetailScreenState extends State<TagDetailScreen> {
           trailing: const Icon(Icons.edit_outlined, size: 20),
           onTap: _renameTag,
         ),
-        PropertyTile(
-          label: 'Color',
-          value: tag.color,
-          trailing: TagColorSwatch(color: tag.color),
-          onTap: _recolorTag,
-          monospace: true,
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Text('Style', style: Theme.of(context).textTheme.titleMedium),
+                  const Spacer(),
+                  TagChip(tag: tag),
+                ],
+              ),
+              const SizedBox(height: 8),
+              // Keyed by the tag's current style so the field controllers
+              // reseat if the style changes underneath us (e.g. a peer edit).
+              _StyleEditor(
+                key: ValueKey(_styleKey(tag.style)),
+                style: tag.style,
+                tagName: tag.name,
+                onChanged: _applyStyle,
+              ),
+            ],
+          ),
         ),
         const SizedBox(height: 12),
         TagsSection(
@@ -429,117 +451,347 @@ class _TagDetailScreenState extends State<TagDetailScreen> {
   }
 }
 
-/// Lets the user pick a new color from [kTagColorPalette]. Pops the chosen
-/// `#RRGGBB` string, or `null` on cancel.
-class _RecolorTagDialog extends StatefulWidget {
-  const _RecolorTagDialog({required this.initial});
+/// An inline tag-style editor. Edits every one of the ten style properties with
+/// equal weight and persists each change immediately via [onChanged] — there is
+/// no Save/Cancel step; the tag detail screen owns the persisted style and
+/// rebuilds from the store.
+///
+/// Color fields persist when the user submits or leaves the field (not on every
+/// keystroke) so a half-typed hex doesn't spam the daemon; the slider, dropdowns
+/// and switches persist immediately.
+class _StyleEditor extends StatefulWidget {
+  const _StyleEditor({
+    super.key,
+    required this.style,
+    required this.tagName,
+    required this.onChanged,
+  });
 
-  final String initial;
+  final tagsy.TagStyleEntry style;
+
+  /// The tag's name, shown in the color picker's live preview chip.
+  final String tagName;
+
+  final ValueChanged<tagsy.TagStyleEntry> onChanged;
 
   @override
-  State<_RecolorTagDialog> createState() => _RecolorTagDialogState();
+  State<_StyleEditor> createState() => _StyleEditorState();
 }
 
-class _RecolorTagDialogState extends State<_RecolorTagDialog> {
-  late final TextEditingController _controller = TextEditingController(
-    text: widget.initial,
-  );
-
-  @override
-  void initState() {
-    super.initState();
-    // Rebuild on every keystroke so the preview swatch, preset selection ring,
-    // and Save-button enablement all track the live text value.
-    _controller.addListener(() => setState(() {}));
-  }
+class _StyleEditorState extends State<_StyleEditor> {
+  late final _dotColor = TextEditingController(text: widget.style.dotColor);
+  late final _background = TextEditingController(text: widget.style.background);
+  late final _gradient = TextEditingController(text: widget.style.gradient);
+  late final _foreground = TextEditingController(text: widget.style.foreground);
+  late final _border = TextEditingController(text: widget.style.border);
+  late final _shadowColor =
+      TextEditingController(text: widget.style.shadowColor);
 
   @override
   void dispose() {
-    _controller.dispose();
+    _dotColor.dispose();
+    _background.dispose();
+    _gradient.dispose();
+    _foreground.dispose();
+    _border.dispose();
+    _shadowColor.dispose();
     super.dispose();
   }
 
-  /// Returns the normalized `#RRGGBB[AA]` form of the current input, or `null`
-  /// if it doesn't parse. Accepts input with or without a leading `#` and
-  /// treats it case-insensitively.
-  String? get _normalized {
-    var text = _controller.text.trim();
-    if (text.startsWith('#')) text = text.substring(1);
-    if (text.length != 6 && text.length != 8) return null;
-    if (int.tryParse(text, radix: 16) == null) return null;
-    return '#${text.toUpperCase()}';
+  /// The style as currently shown in the editor: the color fields' live
+  /// (normalized) text plus the enum/slider/switch state from [widget.style].
+  /// This is the single source the preview and [_emit] both build on.
+  tagsy.TagStyleEntry _liveStyle() => tagsy.TagStyleEntry(
+    dotColor: _normalizeColor(_dotColor.text),
+    background: _normalizeColor(_background.text),
+    gradient: _normalizeColor(_gradient.text),
+    foreground: _normalizeColor(_foreground.text),
+    border: _normalizeColor(_border.text),
+    borderWidth: widget.style.borderWidth,
+    borderStyle: widget.style.borderStyle,
+    shape: widget.style.shape,
+    shadow: widget.style.shadow,
+    shadowColor: _normalizeColor(_shadowColor.text),
+  );
+
+  /// Emit a style with `mutate` applied to the current live style, so a submit
+  /// picks up whatever is typed alongside a same-instant enum/slider change.
+  void _emit(tagsy.TagStyleEntry Function(tagsy.TagStyleEntry base) mutate) {
+    widget.onChanged(mutate(_liveStyle()));
   }
 
   @override
   Widget build(BuildContext context) {
-    final normalized = _normalized;
-    return AlertDialog(
-      title: const Text('Tag color'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _controller,
-                  autofocus: true,
-                  decoration: InputDecoration(
-                    labelText: 'Hex color',
-                    hintText: '#RRGGBB',
-                    errorText: normalized == null && _controller.text.isNotEmpty
-                        ? 'Expected #RRGGBB or #RRGGBBAA'
-                        : null,
-                  ),
-                  onSubmitted: (_) {
-                    if (normalized != null) Navigator.pop(context, normalized);
-                  },
-                ),
+    return Column(
+      children: [
+        _colorField('Dot color', _dotColor,
+            (base, hex) => _copyColor(base, dotColor: hex)),
+        _colorField('Background', _background,
+            (base, hex) => _copyColor(base, background: hex)),
+        _colorField('Gradient (fades from background)', _gradient,
+            (base, hex) => _copyColor(base, gradient: hex)),
+        _colorField('Text', _foreground,
+            (base, hex) => _copyColor(base, foreground: hex)),
+        _colorField('Border', _border,
+            (base, hex) => _copyColor(base, border: hex)),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            const Text('Border width'),
+            Expanded(
+              child: Slider(
+                value: widget.style.borderWidth.clamp(0, 8),
+                min: 0,
+                max: 8,
+                divisions: 16,
+                label: widget.style.borderWidth.toStringAsFixed(1),
+                onChanged: (v) => _emit((b) => _copyWith(b, borderWidth: v)),
               ),
-              const SizedBox(width: 12),
-              // Live preview of whatever is currently typed. Falls back to grey
-              // via [parseTagColor] when the input is invalid.
-              TagColorSwatch(color: normalized ?? _controller.text),
-            ],
-          ),
-          const SizedBox(height: 16),
-          const Text('Presets'),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final color in kTagColorPalette)
-                GestureDetector(
-                  onTap: () {
-                    _controller.text = color;
-                    _controller.selection = TextSelection.collapsed(
-                      offset: color.length,
-                    );
-                  },
-                  child: TagColorSwatch(
-                    color: color,
-                    selected:
-                        normalized != null && color.toUpperCase() == normalized,
-                  ),
-                ),
-            ],
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
+            ),
+          ],
         ),
-        TextButton(
-          onPressed: normalized == null
-              ? null
-              : () => Navigator.pop(context, normalized),
-          child: const Text('Save'),
+        _enumField('Border style', kTagBorderStyles, widget.style.borderStyle,
+            (v) => _emit((b) => _copyWith(b, borderStyle: v))),
+        _enumField('Shape', kTagShapes, widget.style.shape,
+            (v) => _emit((b) => _copyWith(b, shape: v))),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Shadow'),
+          value: widget.style.shadow,
+          onChanged: (v) => _emit((b) => _copyWith(b, shadow: v)),
         ),
+        _colorField('Shadow color', _shadowColor,
+            (base, hex) => _copyColor(base, shadowColor: hex)),
       ],
     );
   }
+
+  /// A row: label, a hex text field, and a live swatch that opens a full color
+  /// picker (wheel + alpha + hex). The hex field remains the authoritative
+  /// manual-entry path; the picker is a convenience that writes back into it.
+  /// Persists on submit or focus-loss rather than per keystroke.
+  ///
+  /// `withColor(base, hex)` places a chosen color into *this* field's property
+  /// of a style, so the picker can preview the whole tag with just this color
+  /// changed.
+  Widget _colorField(
+    String label,
+    TextEditingController controller,
+    tagsy.TagStyleEntry Function(tagsy.TagStyleEntry base, String hex) withColor,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Focus(
+        onFocusChange: (hasFocus) {
+          if (!hasFocus) _emit((b) => b);
+        },
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: controller,
+                decoration: InputDecoration(
+                  labelText: label,
+                  hintText: '#AARRGGBB or #RRGGBB',
+                  isDense: true,
+                ),
+                onSubmitted: (_) => _emit((b) => b),
+                // Rebuild so the swatch tracks the live text.
+                onChanged: (_) => setState(() {}),
+              ),
+            ),
+            const SizedBox(width: 4),
+            // A generously-sized tap target around the swatch: the swatch stays
+            // a compact 28px, but the InkWell fills a ~48px box (Material's
+            // minimum touch target) so it's easy to hit. The trailing edit icon
+            // makes the tap affordance obvious.
+            Tooltip(
+              message: 'Open color picker',
+              child: InkWell(
+                onTap: () => _pickColor(label, controller, withColor),
+                borderRadius: BorderRadius.circular(8),
+                child: SizedBox(
+                  height: 48,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        TagColorSwatch(color: controller.text),
+                        const SizedBox(width: 4),
+                        Icon(
+                          Icons.edit_outlined,
+                          size: 16,
+                          color: Theme.of(context).colorScheme.outline,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Open a wheel+alpha+hex color picker seeded from the field's current value,
+  /// showing a live preview of the whole tag (with only this color changed)
+  /// above the wheel. On confirm, write the chosen color back as `#AARRGGBB`
+  /// and persist. The dialog is the visual assist; the text field stays the
+  /// source of truth.
+  Future<void> _pickColor(
+    String label,
+    TextEditingController controller,
+    tagsy.TagStyleEntry Function(tagsy.TagStyleEntry base, String hex) withColor,
+  ) async {
+    var picked = parseTagColor(controller.text);
+    // Snapshot the rest of the style now so the preview reflects the other
+    // fields as they currently stand while only this color tracks the wheel.
+    final baseStyle = _liveStyle();
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final previewStyle = withColor(baseStyle, formatTagColor(picked));
+          final previewTag = tagsy.TagEntry(
+            tagId: 'preview',
+            name: widget.tagName,
+            style: previewStyle,
+            deleted: false,
+          );
+          return AlertDialog(
+            title: Text(label),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Live preview of the tag as it would look if accepted.
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: TagChip(tag: previewTag),
+                  ),
+                  ColorPicker(
+                    pickerColor: picked,
+                    onColorChanged: (color) =>
+                        setDialogState(() => picked = color),
+                    paletteType: PaletteType.hueWheel,
+                    enableAlpha: true,
+                    hexInputBar: true,
+                    portraitOnly: true,
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Select'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (confirmed != true) return;
+    controller.text = formatTagColor(picked);
+    setState(() {}); // refresh the swatch
+    _emit((b) => b); // persist
+  }
+
+  /// A labeled dropdown over a fixed set of enum names.
+  Widget _enumField(
+    String label,
+    List<String> options,
+    String value,
+    ValueChanged<String> onChanged,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label),
+          DropdownButton<String>(
+            value: options.contains(value) ? value : options.first,
+            items: [
+              for (final option in options)
+                DropdownMenuItem(value: option, child: Text(option)),
+            ],
+            onChanged: (v) {
+              if (v != null) onChanged(v);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Normalize free-form input to `#AARRGGBB` (or `#RRGGBB`) when it parses,
+  /// else pass it through so the field keeps the user's text (swatch grey).
+  String _normalizeColor(String input) {
+    var text = input.trim();
+    if (text.startsWith('#')) text = text.substring(1);
+    if ((text.length == 6 || text.length == 8) &&
+        int.tryParse(text, radix: 16) != null) {
+      return '#${text.toUpperCase()}';
+    }
+    return input;
+  }
+}
+
+/// Copy a [tagsy.TagStyleEntry] overriding the non-color (enum/scalar/bool)
+/// fields; the color fields are always taken from the editor's live text via
+/// `_emit`'s base.
+tagsy.TagStyleEntry _copyWith(
+  tagsy.TagStyleEntry base, {
+  double? borderWidth,
+  String? borderStyle,
+  String? shape,
+  bool? shadow,
+}) {
+  return tagsy.TagStyleEntry(
+    dotColor: base.dotColor,
+    background: base.background,
+    gradient: base.gradient,
+    foreground: base.foreground,
+    border: base.border,
+    borderWidth: borderWidth ?? base.borderWidth,
+    borderStyle: borderStyle ?? base.borderStyle,
+    shape: shape ?? base.shape,
+    shadow: shadow ?? base.shadow,
+    shadowColor: base.shadowColor,
+  );
+}
+
+/// Copy a [tagsy.TagStyleEntry] overriding exactly one color field, leaving the
+/// rest (colors, enums, scalars, bools) intact. Used by the color picker's live
+/// preview to show the whole tag with just this color changed.
+tagsy.TagStyleEntry _copyColor(
+  tagsy.TagStyleEntry base, {
+  String? dotColor,
+  String? background,
+  String? gradient,
+  String? foreground,
+  String? border,
+  String? shadowColor,
+}) {
+  return tagsy.TagStyleEntry(
+    dotColor: dotColor ?? base.dotColor,
+    background: background ?? base.background,
+    gradient: gradient ?? base.gradient,
+    foreground: foreground ?? base.foreground,
+    border: border ?? base.border,
+    borderWidth: base.borderWidth,
+    borderStyle: base.borderStyle,
+    shape: base.shape,
+    shadow: base.shadow,
+    shadowColor: shadowColor ?? base.shadowColor,
+  );
 }

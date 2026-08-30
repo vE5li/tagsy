@@ -212,10 +212,10 @@ pub fn build_tag_request_response(
     database: &CatalogStore,
 ) -> Frame {
     match database.tag_definition(tag_id) {
-        Ok(Some((name, color, modified_at))) => Frame::Change(Change::TagAdded {
+        Ok(Some((name, style, modified_at))) => Frame::Change(Change::TagAdded {
             tag_id,
             tag_name: name,
-            color,
+            style,
             metadata: None,
             modified_at,
         }),

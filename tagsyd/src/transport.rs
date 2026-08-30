@@ -46,7 +46,7 @@ use std::path::PathBuf;
 pub use tagsy_api::{
     Backend, ConnectionStream, ConnectionUpdate, EventStream, OperationStream, OperationUpdate,
 };
-use tagsy_core::{FileId, FileInfo, Preview, TagId};
+use tagsy_core::{FileId, FileInfo, Preview, TagId, TagStyle};
 
 use crate::configuration::{EditorRule, HomeSection};
 use crate::connections::ConnectedPeer;
@@ -140,8 +140,8 @@ impl Backend for InProcessBackend {
         self.api.tags_for_tag(tag_id, subtag_rule)
     }
 
-    async fn create_tag(&self, name: String, color: String) -> Result<TagId, ApiError> {
-        self.api.create_tag(name, color)
+    async fn create_tag(&self, name: String, style: TagStyle) -> Result<TagId, ApiError> {
+        self.api.create_tag(name, style)
     }
 
     async fn delete_tag(&self, tag_id: TagId) -> Result<(), ApiError> {
@@ -156,8 +156,8 @@ impl Backend for InProcessBackend {
         self.api.rename_tag(tag_id, name)
     }
 
-    async fn set_tag_color(&self, tag_id: TagId, color: String) -> Result<(), ApiError> {
-        self.api.set_tag_color(tag_id, color)
+    async fn set_tag_style(&self, tag_id: TagId, style: TagStyle) -> Result<(), ApiError> {
+        self.api.set_tag_style(tag_id, style)
     }
 
     async fn upload_file(
@@ -421,10 +421,10 @@ impl Backend for AnyBackend {
         }
     }
 
-    async fn create_tag(&self, name: String, color: String) -> Result<TagId, ApiError> {
+    async fn create_tag(&self, name: String, style: TagStyle) -> Result<TagId, ApiError> {
         match self {
-            AnyBackend::InProcess(backend) => backend.create_tag(name, color).await,
-            AnyBackend::Ipc(backend) => backend.create_tag(name, color).await,
+            AnyBackend::InProcess(backend) => backend.create_tag(name, style).await,
+            AnyBackend::Ipc(backend) => backend.create_tag(name, style).await,
         }
     }
 
@@ -449,10 +449,10 @@ impl Backend for AnyBackend {
         }
     }
 
-    async fn set_tag_color(&self, tag_id: TagId, color: String) -> Result<(), ApiError> {
+    async fn set_tag_style(&self, tag_id: TagId, style: TagStyle) -> Result<(), ApiError> {
         match self {
-            AnyBackend::InProcess(backend) => backend.set_tag_color(tag_id, color).await,
-            AnyBackend::Ipc(backend) => backend.set_tag_color(tag_id, color).await,
+            AnyBackend::InProcess(backend) => backend.set_tag_style(tag_id, style).await,
+            AnyBackend::Ipc(backend) => backend.set_tag_style(tag_id, style).await,
         }
     }
 

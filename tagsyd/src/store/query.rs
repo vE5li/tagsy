@@ -541,7 +541,7 @@ mod tests {
 
     use super::*;
     use crate::clock::now_millis;
-    use crate::store::fixtures::memory_db;
+    use crate::store::fixtures::{dot_style, memory_db};
 
     /// Build a catalog of files at the given logical paths, returning the ids
     /// in the same order.
@@ -681,8 +681,12 @@ mod tests {
         let database = memory_db();
         let wip = TagId::new();
         let done = TagId::new();
-        database.add_tag(wip, "wip-draft", "red", 1).unwrap();
-        database.add_tag(done, "done", "red", 1).unwrap();
+        database
+            .add_tag(wip, "wip-draft", &dot_style("red"), 1)
+            .unwrap();
+        database
+            .add_tag(done, "done", &dot_style("red"), 1)
+            .unwrap();
 
         let matched = database
             .tag_ids_matching_pattern(&regex("^wip-"), DeletedRule::Exclude)
@@ -696,7 +700,9 @@ mod tests {
     fn regex_token_does_not_resolve_tags_by_id() {
         let database = memory_db();
         let tag_id = TagId::new();
-        database.add_tag(tag_id, "unrelated", "red", 1).unwrap();
+        database
+            .add_tag(tag_id, "unrelated", &dot_style("red"), 1)
+            .unwrap();
 
         // A pattern matching the tag's own id prefix, which the substring path
         // *would* resolve.
@@ -723,8 +729,10 @@ mod tests {
         // Two distinct tags both containing the substring 'foo'.
         let foo = TagId::new();
         let foobar = TagId::new();
-        database.add_tag(foo, "foo", "red", 1).unwrap();
-        database.add_tag(foobar, "foobar", "red", 1).unwrap();
+        database.add_tag(foo, "foo", &dot_style("red"), 1).unwrap();
+        database
+            .add_tag(foobar, "foobar", &dot_style("red"), 1)
+            .unwrap();
 
         // file_a carries `foo`, file_b carries `foobar`, file_c carries neither.
         let file_a = FileId::new();
@@ -769,8 +777,10 @@ mod tests {
         let mut database = memory_db();
         let foo = TagId::new();
         let foobar = TagId::new();
-        database.add_tag(foo, "foo", "red", 1).unwrap();
-        database.add_tag(foobar, "foobar", "red", 1).unwrap();
+        database.add_tag(foo, "foo", &dot_style("red"), 1).unwrap();
+        database
+            .add_tag(foobar, "foobar", &dot_style("red"), 1)
+            .unwrap();
 
         let file_a = FileId::new();
         let file_b = FileId::new();
@@ -804,7 +814,9 @@ mod tests {
         // ones; the evaluator does not do that step itself.
         let mut database = memory_db();
         let tag_id = TagId::new();
-        database.add_tag(tag_id, "photos", "red", 10).unwrap();
+        database
+            .add_tag(tag_id, "photos", &dot_style("red"), 10)
+            .unwrap();
 
         let live = FileId::new();
         let dead = FileId::new();
@@ -925,7 +937,9 @@ mod tests {
         use crate::store::fixtures::file_id_from_hex;
         let database = memory_db();
         let tag_id = TagId::new();
-        database.add_tag(tag_id, "photos", "red", 1).unwrap();
+        database
+            .add_tag(tag_id, "photos", &dot_style("red"), 1)
+            .unwrap();
 
         let some_file = file_id_from_hex("abcd000000000000000000000000000a");
         let terms = vec![QueryTerm::AnyMatch(
@@ -948,7 +962,9 @@ mod tests {
         use crate::store::fixtures::file_id_from_hex;
         let database = memory_db();
         let tag_id = TagId::new();
-        database.add_tag(tag_id, "photos", "red", 1).unwrap();
+        database
+            .add_tag(tag_id, "photos", &dot_style("red"), 1)
+            .unwrap();
 
         let some_file = file_id_from_hex("abcd000000000000000000000000000a");
         for term in [
@@ -975,9 +991,15 @@ mod tests {
         let parent = tag_id_from_hex("abcd000000000000000000000000000a");
         let child = TagId::new();
         let unrelated = TagId::new();
-        database.add_tag(parent, "work", "red", 1).unwrap();
-        database.add_tag(child, "urgent", "red", 1).unwrap();
-        database.add_tag(unrelated, "leisure", "red", 1).unwrap();
+        database
+            .add_tag(parent, "work", &dot_style("red"), 1)
+            .unwrap();
+        database
+            .add_tag(child, "urgent", &dot_style("red"), 1)
+            .unwrap();
+        database
+            .add_tag(unrelated, "leisure", &dot_style("red"), 1)
+            .unwrap();
         // `urgent` is a subtag of `work`.
         database.tag_tag(parent, child, 1).unwrap();
 

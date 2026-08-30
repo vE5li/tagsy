@@ -199,7 +199,7 @@ version stamp lives in the archive itself.
 
 There are two SQLite databases, both owned by `tagsyd/src/store/`:
 
-- the **main catalog** (`CatalogStore`) — `files_v2`, `tags_v1`,
+- the **main catalog** (`CatalogStore`) — `files_v2`, `tags_v2`,
   `entries_v1`, `file_versions_v1`, `previews_v1`.
 - a **per-sync-directory index** (`DirectoryIndex`) — one database per sync
   directory, holding a single `files_v1` table. Unrelated to the main
@@ -213,7 +213,7 @@ module that owns it:
 | Table | Owning module |
 |---|---|
 | `files_v2` | `store/files.rs` |
-| `tags_v1` | `store/tags.rs` |
+| `tags_v2` | `store/tags.rs` |
 | `entries_v1` | `store/entries.rs` |
 | `file_versions_v1` | `store/versions.rs` |
 | `previews_v1` | `store/previews.rs` |
@@ -222,21 +222,29 @@ module that owns it:
 Three modules also touch a table they don't own — check them too when
 versioning one:
 
-- `store/entries.rs` `LEFT JOIN`s `tags_v1` in its three tag-returning
+- `store/entries.rs` `LEFT JOIN`s `tags_v2` in its three tag-returning
   traversals, to drop tombstoned tags from a walk.
 - `store/files.rs` `JOIN`s `file_versions_v1` to resolve each file's latest
   version.
-- `store/short_id.rs` names `files_v2` and `tags_v1` as string arguments
+- `store/short_id.rs` names `files_v2` and `tags_v2` as string arguments
   rather than in SQL (see step 6 below).
 
 `store/query.rs` issues no SQL at all; it composes the primitives above.
 
 Migrations are free functions in `store::schema` taking `&Connection`, called
 in sequence from `CatalogStore::initialize` and `DirectoryIndex::initialize`.
-**Exactly one exists today:**
+**Two exist today:**
 
 - `migrate_files_to_v2` — main catalog `files_v1` → `files_v2`, adding the
   `restored_at` clock.
+- `migrate_tags_to_v2` — main catalog `tags_v1` → `tags_v2`, adding the nine
+  tag-style columns (`background`, `gradient`, `foreground`, `border`,
+  `border_width`, `border_style`, `shape`, `shadow`, `shadow_color`) and
+  renaming the old `color` column to `dot_color`. A tag's style is these ten
+  properties together (the single `tagsy_core::TagStyle`); each is a concrete
+  stored value with a default — nothing is derived at render time, so every
+  frontend renders identically. The old `color` becomes `dot_color`; the rest
+  take defaults, reproducing a migrated tag's previous dot-only look.
 
 Every other table is still at its first version and has no migration function.
 
@@ -269,7 +277,7 @@ When the schema needs to change again — steps 1–4 all happen in
    table above, then grep the old suffix across `tagsyd/src/store/` to
    confirm you got them all; it should survive only inside the frozen
    `migrate_*_to_vN` functions.
-6. If `files_v2` or `tags_v1` changed, update the four hardcoded table names
+6. If `files_v2` or `tags_v2` changed, update the four hardcoded table names
    in `store/short_id.rs` — two `resolve_id_prefix` calls and two
    `shortest_unique_prefix_length` calls. They take the table name as a
    string argument, so the grep in step 5 still finds them.

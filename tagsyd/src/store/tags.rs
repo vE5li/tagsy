@@ -1,17 +1,44 @@
-//! The `tags_v1` table: tag definitions, their last-writer-wins clock, and the
-//! name/id lookups search resolves user input through.
+//! The `tags_v2` table: tag definitions (including their full visual
+//! [`TagStyle`]), their last-writer-wins clock, and the name/id lookups search
+//! resolves user input through.
+//!
+//! This module is the *only* place that maps a [`TagStyle`] to and from its ten
+//! individual SQL columns; every layer above it carries the bundled struct.
 
 use std::collections::BTreeSet;
 
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, Row};
 use tagsy_api::{DeletedRule, Tag};
-use tagsy_core::TagId;
 use tagsy_core::state::TagManifestEntry;
+use tagsy_core::{BorderStyle, TagId, TagShape, TagStyle};
 
 use super::CatalogStore;
 use super::query::TextPattern;
 use super::short_id::normalize_id_prefix;
 use super::types::{DatabaseError, and_deleted_clause, where_deleted_clause};
+
+/// The ten style columns, in a fixed order, for building SELECTs and reading
+/// rows back. Kept in one place so the column list and [`style_from_row`] stay
+/// in sync.
+const STYLE_COLUMNS: &str = "dot_color, background, gradient, foreground, border, border_width, \
+                             border_style, shape, shadow, shadow_color";
+
+/// Read a [`TagStyle`] from ten consecutive columns of `row`, starting at
+/// `base` (the index of `dot_color`). The order must match [`STYLE_COLUMNS`].
+fn style_from_row(row: &Row, base: usize) -> rusqlite::Result<TagStyle> {
+    Ok(TagStyle {
+        dot_color: row.get(base)?,
+        background: row.get(base + 1)?,
+        gradient: row.get(base + 2)?,
+        foreground: row.get(base + 3)?,
+        border: row.get(base + 4)?,
+        border_width: row.get(base + 5)?,
+        border_style: BorderStyle::from_str_or_default(&row.get::<_, String>(base + 6)?),
+        shape: TagShape::from_str_or_default(&row.get::<_, String>(base + 7)?),
+        shadow: row.get::<_, i64>(base + 8)? != 0,
+        shadow_color: row.get(base + 9)?,
+    })
+}
 
 impl CatalogStore {
     /// Every tag definition as a lightweight manifest entry (`tag_id` +
@@ -24,7 +51,7 @@ impl CatalogStore {
     pub fn tag_manifest_entries(&self) -> Result<Vec<TagManifestEntry>, DatabaseError> {
         let mut statement = self
             .connection
-            .prepare("SELECT id, modified_at, deleted FROM tags_v1")?;
+            .prepare("SELECT id, modified_at, deleted FROM tags_v2")?;
         let entries = statement
             .query_map([], |row| {
                 let deleted: i64 = row.get(2)?;
@@ -44,7 +71,7 @@ impl CatalogStore {
     pub fn tag_modified_at(&self, tag_id: TagId) -> Result<Option<i64>, DatabaseError> {
         self.connection
             .query_row(
-                "SELECT modified_at FROM tags_v1 WHERE id = ?1",
+                "SELECT modified_at FROM tags_v2 WHERE id = ?1",
                 [tag_id],
                 |row| row.get(0),
             )
@@ -52,20 +79,21 @@ impl CatalogStore {
             .map_err(DatabaseError::from)
     }
 
-    /// The full stored definition of a tag as `(name, color, modified_at)`, or
+    /// The full stored definition of a tag as `(name, style, modified_at)`, or
     /// `None` if the tag is unknown. Used to answer a peer's `TagRequest` with
     /// a `Change::TagAdded`.
     pub fn tag_definition(
         &self,
         tag_id: TagId,
-    ) -> Result<Option<(String, String, i64)>, DatabaseError> {
+    ) -> Result<Option<(String, TagStyle, i64)>, DatabaseError> {
         self.connection
             .query_row(
-                "SELECT name, color, modified_at FROM tags_v1 WHERE id = ?1",
+                &format!("SELECT name, modified_at, {STYLE_COLUMNS} FROM tags_v2 WHERE id = ?1"),
                 [tag_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, style_from_row(row, 2)?)),
             )
             .optional()
+            .map(|opt| opt.map(|(name, modified_at, style)| (name, style, modified_at)))
             .map_err(DatabaseError::from)
     }
 
@@ -73,7 +101,7 @@ impl CatalogStore {
     /// [`file_exists`](Self::file_exists).
     pub fn tag_exists(&self, tag_id: TagId) -> Result<bool, DatabaseError> {
         let count: i64 = self.connection.query_row(
-            "SELECT COUNT(*) FROM tags_v1 WHERE id = ?1",
+            "SELECT COUNT(*) FROM tags_v2 WHERE id = ?1",
             [tag_id],
             |row| row.get(0),
         )?;
@@ -95,35 +123,58 @@ impl CatalogStore {
         &self,
         tag_id: TagId,
         name: impl Into<String>,
-        color: impl Into<String>,
+        style: &TagStyle,
         modified_at: i64,
     ) -> Result<(), DatabaseError> {
         let name = name.into();
-        let color = color.into();
 
         // TODO: Check that the tag name is not only numbers.
         if name.is_empty() {
             return Err(DatabaseError::InvalidTagName);
         }
 
-        // TODO: Check that the color is valid.
-        if color.is_empty() {
-            return Err(DatabaseError::InvalidColor);
-        }
+        // TODO: Validate the style colors are well-formed hex.
 
         // Upsert with a last-writer-wins guard: on conflict, overwrite only when
         // the incoming `modified_at` is strictly newer. `excluded` refers to the
-        // values we tried to insert.
+        // values we tried to insert. Every style column is written together —
+        // the whole definition (name + style) is one LWW value.
         self.connection.execute(
-            "INSERT INTO tags_v1 (id, name, color, modified_at, deleted)
-                 VALUES (?1, ?2, ?3, ?4, 0)
+            "INSERT INTO tags_v2
+                 (id, name, modified_at, deleted,
+                  dot_color, background, gradient, foreground, border,
+                  border_width, border_style, shape, shadow, shadow_color)
+                 VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT(id) DO UPDATE SET
                      name = excluded.name,
-                     color = excluded.color,
                      modified_at = excluded.modified_at,
-                     deleted = 0
-                 WHERE excluded.modified_at > tags_v1.modified_at",
-            (tag_id, &name, &color, modified_at),
+                     deleted = 0,
+                     dot_color = excluded.dot_color,
+                     background = excluded.background,
+                     gradient = excluded.gradient,
+                     foreground = excluded.foreground,
+                     border = excluded.border,
+                     border_width = excluded.border_width,
+                     border_style = excluded.border_style,
+                     shape = excluded.shape,
+                     shadow = excluded.shadow,
+                     shadow_color = excluded.shadow_color
+                 WHERE excluded.modified_at > tags_v2.modified_at",
+            rusqlite::params![
+                tag_id,
+                &name,
+                modified_at,
+                &style.dot_color,
+                &style.background,
+                &style.gradient,
+                &style.foreground,
+                &style.border,
+                style.border_width,
+                style.border_style.as_str(),
+                style.shape.as_str(),
+                style.shadow as i64,
+                &style.shadow_color,
+            ],
         )?;
 
         Ok(())
@@ -146,7 +197,7 @@ impl CatalogStore {
         }
 
         self.connection.execute(
-            "UPDATE tags_v1 SET name = ?2, modified_at = ?3
+            "UPDATE tags_v2 SET name = ?2, modified_at = ?3
                  WHERE id = ?1 AND ?3 > modified_at",
             (tag_id, name, modified_at),
         )?;
@@ -154,25 +205,38 @@ impl CatalogStore {
         Ok(())
     }
 
-    /// Update a tag's color with a last-writer-wins guard. See
+    /// Replace a tag's entire visual [`TagStyle`] with a last-writer-wins
+    /// guard. All ten style columns are set together (there is no per-property
+    /// mutation — a restyle carries the complete new style). See
     /// [`CatalogStore::add_tag`] for the `modified_at` contract.
-    pub fn update_tag_color(
+    pub fn update_tag_style(
         &self,
         tag_id: TagId,
-        color: impl Into<String>,
+        style: &TagStyle,
         modified_at: i64,
     ) -> Result<(), DatabaseError> {
-        let color = color.into();
-
-        // TODO: Check that the color is valid.
-        if color.is_empty() {
-            return Err(DatabaseError::InvalidColor);
-        }
+        // TODO: Validate the style colors are well-formed hex.
 
         self.connection.execute(
-            "UPDATE tags_v1 SET color = ?2, modified_at = ?3
-                 WHERE id = ?1 AND ?3 > modified_at",
-            (tag_id, color, modified_at),
+            "UPDATE tags_v2 SET
+                 dot_color = ?2, background = ?3, gradient = ?4, foreground = ?5,
+                 border = ?6, border_width = ?7, border_style = ?8, shape = ?9,
+                 shadow = ?10, shadow_color = ?11, modified_at = ?12
+                 WHERE id = ?1 AND ?12 > modified_at",
+            rusqlite::params![
+                tag_id,
+                &style.dot_color,
+                &style.background,
+                &style.gradient,
+                &style.foreground,
+                &style.border,
+                style.border_width,
+                style.border_style.as_str(),
+                style.shape.as_str(),
+                style.shadow as i64,
+                &style.shadow_color,
+                modified_at,
+            ],
         )?;
 
         Ok(())
@@ -192,7 +256,7 @@ impl CatalogStore {
     /// out-dated it (the tag stays live).
     pub fn remove_tag(&self, tag_id: TagId, deleted_at: i64) -> Result<bool, DatabaseError> {
         let affected = self.connection.execute(
-            "UPDATE tags_v1 SET deleted = 1, modified_at = ?2
+            "UPDATE tags_v2 SET deleted = 1, modified_at = ?2
                  WHERE id = ?1 AND ?2 > modified_at",
             (&tag_id, deleted_at),
         )?;
@@ -210,7 +274,7 @@ impl CatalogStore {
         deleted_rule: DeletedRule,
     ) -> Result<impl IntoIterator<Item = Tag>, DatabaseError> {
         let sql = format!(
-            "SELECT id, name, color, deleted FROM tags_v1{}",
+            "SELECT id, name, deleted, {STYLE_COLUMNS} FROM tags_v2{}",
             where_deleted_clause(deleted_rule),
         );
         let mut statement = self.connection.prepare(&sql)?;
@@ -220,9 +284,9 @@ impl CatalogStore {
                 Ok(Tag {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    color: row.get(2)?,
+                    deleted: row.get::<_, i64>(2)? != 0,
+                    style: style_from_row(row, 3)?,
                     metadata: None,
-                    deleted: row.get::<_, i64>(3)? != 0,
                 })
             })?
             .map(|tag| tag.unwrap())
@@ -242,7 +306,7 @@ impl CatalogStore {
         deleted_rule: DeletedRule,
     ) -> Result<Tag, DatabaseError> {
         let sql = format!(
-            "SELECT name, color, deleted FROM tags_v1 WHERE id = ?1{}",
+            "SELECT name, deleted, {STYLE_COLUMNS} FROM tags_v2 WHERE id = ?1{}",
             and_deleted_clause(deleted_rule),
         );
         let mut statement = self.connection.prepare(&sql)?;
@@ -252,9 +316,9 @@ impl CatalogStore {
                 Ok(Tag {
                     id: tag_id,
                     name: row.get(0)?,
-                    color: row.get(1)?,
+                    deleted: row.get::<_, i64>(1)? != 0,
+                    style: style_from_row(row, 2)?,
                     metadata: None,
-                    deleted: row.get::<_, i64>(2)? != 0,
                 })
             })?
             .map(|tag| tag.unwrap())
@@ -317,7 +381,7 @@ impl CatalogStore {
             .replace('_', "\\_");
         let pattern = format!("%{escaped}%");
         let name_sql = format!(
-            "SELECT id FROM tags_v1 WHERE name LIKE ?1 ESCAPE '\\'{}",
+            "SELECT id FROM tags_v2 WHERE name LIKE ?1 ESCAPE '\\'{}",
             and_deleted_clause(deleted_rule),
         );
         let mut statement = self.connection.prepare(&name_sql)?;
@@ -352,7 +416,7 @@ impl CatalogStore {
         };
         let id_pattern = format!("{prefix}%");
         let id_sql = format!(
-            "SELECT id FROM tags_v1 WHERE id LIKE ?1{}",
+            "SELECT id FROM tags_v2 WHERE id LIKE ?1{}",
             and_deleted_clause(deleted_rule),
         );
         let mut statement = self.connection.prepare(&id_sql)?;
@@ -367,7 +431,7 @@ impl CatalogStore {
     pub fn tag_id_from_name(&self, name: &str) -> Result<TagId, DatabaseError> {
         let mut statement = self
             .connection
-            .prepare("SELECT id FROM tags_v1 WHERE name = ?1 AND deleted = 0")?;
+            .prepare("SELECT id FROM tags_v2 WHERE name = ?1 AND deleted = 0")?;
 
         let tag_id = statement
             .query_map([name], |row| row.get(0))?
@@ -382,7 +446,7 @@ impl CatalogStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::fixtures::{memory_db, tag_id_from_hex};
+    use crate::store::fixtures::{dot_style as dot, memory_db, tag_id_from_hex};
 
     /// `tag_ids_matching_id_prefix` resolves by id only — a payload that is a
     /// tag *name* but not a hex prefix returns nothing, distinguishing it from
@@ -391,7 +455,7 @@ mod tests {
     fn tag_ids_matching_id_prefix_is_id_only() {
         let database = memory_db();
         let tag_id = tag_id_from_hex("abcd000000000000000000000000000a");
-        database.add_tag(tag_id, "abcd", "red", 1).unwrap();
+        database.add_tag(tag_id, "abcd", &dot("red"), 1).unwrap();
 
         // The hex prefix resolves the tag.
         assert_eq!(
@@ -416,17 +480,19 @@ mod tests {
         let database = memory_db();
         let tag_id = TagId::new();
 
-        database.add_tag(tag_id, "work", "red", 100).unwrap();
+        database.add_tag(tag_id, "work", &dot("red"), 100).unwrap();
         // A newer definition overwrites.
-        database.add_tag(tag_id, "job", "blue", 200).unwrap();
-        let (name, color, modified_at) = database.tag_definition(tag_id).unwrap().unwrap();
+        database.add_tag(tag_id, "job", &dot("blue"), 200).unwrap();
+        let (name, style, modified_at) = database.tag_definition(tag_id).unwrap().unwrap();
         assert_eq!(
-            (name.as_str(), color.as_str(), modified_at),
+            (name.as_str(), style.dot_color.as_str(), modified_at),
             ("job", "blue", 200)
         );
 
         // A stale definition (older modified_at) must not clobber.
-        database.add_tag(tag_id, "stale", "green", 150).unwrap();
+        database
+            .add_tag(tag_id, "stale", &dot("green"), 150)
+            .unwrap();
         let (name, _, modified_at) = database.tag_definition(tag_id).unwrap().unwrap();
         assert_eq!((name.as_str(), modified_at), ("job", 200));
     }
@@ -435,7 +501,7 @@ mod tests {
     fn update_tag_name_respects_lww() {
         let database = memory_db();
         let tag_id = TagId::new();
-        database.add_tag(tag_id, "work", "red", 100).unwrap();
+        database.add_tag(tag_id, "work", &dot("red"), 100).unwrap();
 
         // Older rename loses.
         database.update_tag_name(tag_id, "old", 50).unwrap();
@@ -452,8 +518,8 @@ mod tests {
         let database = memory_db();
         let a = TagId::new();
         let b = TagId::new();
-        database.add_tag(a, "work", "red", 100).unwrap();
-        database.add_tag(b, "work", "blue", 100).unwrap();
+        database.add_tag(a, "work", &dot("red"), 100).unwrap();
+        database.add_tag(b, "work", &dot("blue"), 100).unwrap();
 
         assert!(database.tag_definition(a).unwrap().is_some());
         assert!(database.tag_definition(b).unwrap().is_some());
@@ -470,8 +536,8 @@ mod tests {
         let database = memory_db();
         let a = TagId::new();
         let b = TagId::new();
-        database.add_tag(a, "one", "red", 111).unwrap();
-        database.add_tag(b, "two", "blue", 222).unwrap();
+        database.add_tag(a, "one", &dot("red"), 111).unwrap();
+        database.add_tag(b, "two", &dot("blue"), 222).unwrap();
 
         let mut entries = database.tag_manifest_entries().unwrap();
         entries.sort_by_key(|entry| entry.modified_at);
@@ -487,10 +553,10 @@ mod tests {
         let foobar = TagId::new();
         let barfoo = TagId::new();
         let unrelated = TagId::new();
-        database.add_tag(foo, "foo", "red", 1).unwrap();
-        database.add_tag(foobar, "foobar", "red", 1).unwrap();
-        database.add_tag(barfoo, "barfoo", "red", 1).unwrap();
-        database.add_tag(unrelated, "baz", "red", 1).unwrap();
+        database.add_tag(foo, "foo", &dot("red"), 1).unwrap();
+        database.add_tag(foobar, "foobar", &dot("red"), 1).unwrap();
+        database.add_tag(barfoo, "barfoo", &dot("red"), 1).unwrap();
+        database.add_tag(unrelated, "baz", &dot("red"), 1).unwrap();
 
         // A different case still matches (case-insensitive substring).
         let matched: BTreeSet<TagId> = database
@@ -512,7 +578,9 @@ mod tests {
     #[test]
     fn tag_ids_matching_token_empty_when_nothing_matches() {
         let database = memory_db();
-        database.add_tag(TagId::new(), "alpha", "red", 1).unwrap();
+        database
+            .add_tag(TagId::new(), "alpha", &dot("red"), 1)
+            .unwrap();
 
         assert!(
             database
@@ -530,7 +598,7 @@ mod tests {
     fn tag_delete_soft_deletes_and_hides_from_reads() {
         let database = memory_db();
         let tag_id = TagId::new();
-        database.add_tag(tag_id, "work", "red", 10).unwrap();
+        database.add_tag(tag_id, "work", &dot("red"), 10).unwrap();
 
         // Delete with a newer modified_at.
         assert!(database.remove_tag(tag_id, 20).unwrap());
@@ -560,7 +628,7 @@ mod tests {
     fn tag_delete_loses_to_newer_edit() {
         let database = memory_db();
         let tag_id = TagId::new();
-        database.add_tag(tag_id, "work", "red", 100).unwrap();
+        database.add_tag(tag_id, "work", &dot("red"), 100).unwrap();
 
         // A delete older than the tag's modified_at is a no-op (LWW).
         assert!(!database.remove_tag(tag_id, 50).unwrap());
@@ -572,14 +640,14 @@ mod tests {
         // Restore: a rename/re-add newer than the delete clears the tombstone.
         let database = memory_db();
         let tag_id = TagId::new();
-        database.add_tag(tag_id, "work", "red", 10).unwrap();
+        database.add_tag(tag_id, "work", &dot("red"), 10).unwrap();
         assert!(database.remove_tag(tag_id, 20).unwrap());
         assert!(database.tag_from_id(tag_id, DeletedRule::Exclude).is_err());
 
         // A newer add (upsert) revives it.
-        database.add_tag(tag_id, "work", "blue", 30).unwrap();
+        database.add_tag(tag_id, "work", &dot("blue"), 30).unwrap();
         let tag = database.tag_from_id(tag_id, DeletedRule::Exclude).unwrap();
-        assert_eq!(tag.color, "blue");
+        assert_eq!(tag.style.dot_color, "blue");
     }
 
     #[test]
@@ -590,23 +658,25 @@ mod tests {
         // becomes live again.
         let database = memory_db();
         let tag_id = TagId::new();
-        database.add_tag(tag_id, "work", "#123456", 10).unwrap();
+        database
+            .add_tag(tag_id, "work", &dot("#123456"), 10)
+            .unwrap();
         assert!(database.remove_tag(tag_id, 20).unwrap());
 
         // Read the tombstoned definition (as the API does with `Include`)...
         let deleted = database.tag_from_id(tag_id, DeletedRule::Include).unwrap();
         assert!(deleted.deleted);
         assert_eq!(deleted.name, "work");
-        assert_eq!(deleted.color, "#123456");
+        assert_eq!(deleted.style.dot_color, "#123456");
 
         // ...and re-announce it with a newer timestamp to restore it.
         database
-            .add_tag(tag_id, deleted.name, deleted.color, 30)
+            .add_tag(tag_id, deleted.name, &deleted.style, 30)
             .unwrap();
         let restored = database.tag_from_id(tag_id, DeletedRule::Exclude).unwrap();
         assert!(!restored.deleted);
         assert_eq!(restored.name, "work");
-        assert_eq!(restored.color, "#123456");
+        assert_eq!(restored.style.dot_color, "#123456");
     }
 
     #[test]
@@ -616,8 +686,8 @@ mod tests {
         let database = memory_db();
         let live = TagId::new();
         let dead = TagId::new();
-        database.add_tag(live, "live", "red", 10).unwrap();
-        database.add_tag(dead, "dead", "blue", 10).unwrap();
+        database.add_tag(live, "live", &dot("red"), 10).unwrap();
+        database.add_tag(dead, "dead", &dot("blue"), 10).unwrap();
         assert!(database.remove_tag(dead, 20).unwrap());
 
         let excluded: Vec<_> = database
@@ -647,7 +717,7 @@ mod tests {
         // back to a deleted tag by name.
         let database = memory_db();
         let dead = TagId::new();
-        database.add_tag(dead, "receipts", "red", 10).unwrap();
+        database.add_tag(dead, "receipts", &dot("red"), 10).unwrap();
         assert!(database.remove_tag(dead, 20).unwrap());
 
         // Exclude hides the tombstoned tag.

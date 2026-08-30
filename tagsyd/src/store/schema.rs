@@ -116,7 +116,56 @@ pub(super) fn create_files_v2(connection: &Connection) -> Result<(), DatabaseErr
     Ok(())
 }
 
-pub(super) fn create_tags_v1(connection: &Connection) -> Result<(), DatabaseError> {
+/// Migrate the main catalog `tags_v1` → `tags_v2`, adding the nine tag-style
+/// columns that join the (renamed) `dot_color` to make up a tag's full visual
+/// style: `background`, `gradient`, `foreground`, `border`, `border_width`,
+/// `border_style`, `shape`, `shadow`, `shadow_color`.
+///
+/// Frozen once shipped (see AGENTS.md): never edit this. If `tags_v1` exists
+/// (an older backup restored on this build), create `tags_v2` and copy every
+/// row across, then drop `tags_v1`. A no-op when `tags_v1` is absent.
+///
+/// The whole migration story is one line: the old `color` column becomes
+/// `dot_color`, and every other style column takes its concrete default (see
+/// `create_tags_v2` for the defaults and why they are stored, not derived). An
+/// old tag therefore reproduces its previous look exactly — a neutral
+/// (transparent) pill carrying the colored dot. `gradient` is seeded equal to
+/// `background` so it renders as no visible gradient (a fade from a color to
+/// itself); since both are transparent here, that is simply "no fill".
+pub(super) fn migrate_tags_to_v2(connection: &Connection) -> Result<(), DatabaseError> {
+    let tags_v1_exists: bool = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tags_v1'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+
+    if !tags_v1_exists {
+        return Ok(());
+    }
+
+    create_tags_v2(connection)?;
+
+    connection.execute(
+        "INSERT INTO tags_v2
+                (id, name, dot_color, metadata, modified_at, deleted,
+                 background, gradient, foreground, border,
+                 border_width, border_style, shape, shadow, shadow_color)
+             SELECT id, name, color, metadata, modified_at, deleted,
+                 '#FFFFFF', '#FFFFFF', '#000000', '#00000000',
+                 1.5, 'solid', 'stadium', 0, '#80000000'
+             FROM tags_v1",
+        (),
+    )?;
+
+    connection.execute("DROP TABLE tags_v1", ())?;
+
+    Ok(())
+}
+
+pub(super) fn create_tags_v2(connection: &Connection) -> Result<(), DatabaseError> {
     // `name` is intentionally NOT `UNIQUE`: two devices editing offline
     // can each mint a tag with the same name but a different `TagId`.
     // When they reconcile, both tags must be able to coexist rather than
@@ -128,7 +177,9 @@ pub(super) fn create_tags_v1(connection: &Connection) -> Result<(), DatabaseErro
     // `modified_at` is the unix-millis wall-clock time, stamped on the
     // *originating* device and preserved across the wire, that drives
     // last-writer-wins reconciliation of tag definitions. Never restamp
-    // it when applying a peer's change.
+    // it when applying a peer's change. A restyle reuses this same clock
+    // (there is no separate style clock): the whole tag definition —
+    // name, color, and every style column — is one LWW value.
     //
     // `deleted` is the soft-delete tombstone. Unlike files, a tag
     // already carries `modified_at` as its single last-writer-wins
@@ -137,14 +188,52 @@ pub(super) fn create_tags_v1(connection: &Connection) -> Result<(), DatabaseErro
     // separate `deleted_at` is needed. All live reads filter
     // `deleted = 0`; reconciliation considers tombstoned rows so a
     // delete can win LWW against a stale peer.
+    //
+    // Style columns (all added in v2). Every one of the ten style properties
+    // is a *peer*: none is nullable, each carries a concrete stored default,
+    // and nothing is ever computed at render time. This is deliberate — a
+    // "derive it from the fill" fallback would be re-implemented slightly
+    // differently by each frontend (Flutter, CLI, a future web UI) and drift
+    // apart. Storing the concrete value makes every frontend render
+    // identically from one source of truth.
+    //
+    // Colors are hex strings: `#RRGGBB` or `#RRGGBBAA` (the latter for the
+    // ones that can be transparent). Defaults:
+    // - `dot_color`  = `#000000`.
+    // - `background` = `#00000000` (transparent — no fill by default).
+    // - `gradient`   = seeded equal to `background`; when it differs, the fill is a
+    //   fixed left→right fade `background`→`gradient`. Equal stops = no visible
+    //   gradient, which is why this replaces a nullable column: there is no "unset"
+    //   state to represent.
+    // - `foreground` = `#000000` (black text).
+    // - `border`     = `#00000000` (transparent — no visible border by default;
+    //   width still applies but paints nothing).
+    // - `border_width` = 1.5.
+    // - `border_style` = `solid` (one of `none|solid|dashed`).
+    // - `shape` = `stadium` (one of `rounded|stadium|square|cut_corner`).
+    // - `shadow` = 0 (boolean: whether a drop shadow is painted).
+    // - `shadow_color` = `#80000000` (semi-transparent black — the color of that
+    //   shadow, used when `shadow` is on).
+    //
+    // Enum columns store the lowercase variant name so the wire value is
+    // self-describing.
     connection.execute(
-        "CREATE TABLE IF NOT EXISTS tags_v1 (
-                id          TEXT PRIMARY KEY,
-                name        TEXT NOT NULL,
-                color       TEXT NOT NULL,
-                metadata    TEXT,
-                modified_at INTEGER NOT NULL DEFAULT 0,
-                deleted     INTEGER NOT NULL
+        "CREATE TABLE IF NOT EXISTS tags_v2 (
+                id           TEXT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                metadata     TEXT,
+                modified_at  INTEGER NOT NULL DEFAULT 0,
+                deleted      INTEGER NOT NULL,
+                dot_color    TEXT NOT NULL DEFAULT '#000000',
+                background   TEXT NOT NULL DEFAULT '#FFFFFF',
+                gradient     TEXT NOT NULL DEFAULT '#FFFFFF',
+                foreground   TEXT NOT NULL DEFAULT '#000000',
+                border       TEXT NOT NULL DEFAULT '#00000000',
+                border_width REAL NOT NULL DEFAULT 1.5,
+                border_style TEXT NOT NULL DEFAULT 'solid',
+                shape        TEXT NOT NULL DEFAULT 'stadium',
+                shadow       INTEGER NOT NULL DEFAULT 0,
+                shadow_color TEXT NOT NULL DEFAULT '#80000000'
             )",
         (),
     )?;
@@ -291,4 +380,139 @@ pub(super) fn create_directory_files_v1(connection: &Connection) -> Result<(), D
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A legacy `tags_v1` row migrates so its old `color` becomes `dot_color`
+    /// and every new style column takes its documented default — reproducing
+    /// the tag's previous dot-only look.
+    #[test]
+    fn migrate_tags_to_v2_maps_color_to_dot_and_defaults_the_rest() {
+        let connection = Connection::open_in_memory().unwrap();
+
+        // The pre-v2 schema (matches the shipped `create_tags_v1`).
+        connection
+            .execute(
+                "CREATE TABLE tags_v1 (
+                    id          TEXT PRIMARY KEY,
+                    name        TEXT NOT NULL,
+                    color       TEXT NOT NULL,
+                    metadata    TEXT,
+                    modified_at INTEGER NOT NULL DEFAULT 0,
+                    deleted     INTEGER NOT NULL
+                )",
+                (),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO tags_v1 (id, name, color, metadata, modified_at, deleted)
+                 VALUES ('t1', 'work', '#123456', NULL, 42, 0)",
+                (),
+            )
+            .unwrap();
+
+        migrate_tags_to_v2(&connection).unwrap();
+
+        // tags_v1 is gone, tags_v2 exists with the migrated row.
+        let v1_gone: bool = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tags_v1'",
+                [],
+                |_| Ok(true),
+            )
+            .optional()
+            .unwrap()
+            .is_none();
+        assert!(v1_gone, "tags_v1 should be dropped after migration");
+
+        let (
+            dot_color,
+            background,
+            gradient,
+            foreground,
+            border,
+            border_width,
+            border_style,
+            shape,
+            shadow,
+            shadow_color,
+            name,
+            modified_at,
+        ): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            f64,
+            String,
+            String,
+            i64,
+            String,
+            String,
+            i64,
+        ) = connection
+            .query_row(
+                "SELECT dot_color, background, gradient, foreground, border,
+                        border_width, border_style, shape, shadow, shadow_color,
+                        name, modified_at
+                 FROM tags_v2 WHERE id = 't1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        // The old color became the dot; unrelated columns preserved.
+        assert_eq!(dot_color, "#123456");
+        assert_eq!(name, "work");
+        assert_eq!(modified_at, 42);
+        // Every other style property took its default.
+        assert_eq!(background, "#FFFFFF");
+        assert_eq!(gradient, "#FFFFFF");
+        assert_eq!(foreground, "#000000");
+        assert_eq!(border, "#00000000");
+        assert_eq!(border_width, 1.5);
+        assert_eq!(border_style, "solid");
+        assert_eq!(shape, "stadium");
+        assert_eq!(shadow, 0);
+        assert_eq!(shadow_color, "#80000000");
+    }
+
+    /// The migration is a no-op when there is no legacy table (fresh install).
+    #[test]
+    fn migrate_tags_to_v2_is_noop_without_legacy_table() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate_tags_to_v2(&connection).unwrap();
+        // No tags_v2 conjured from nothing; a fresh install creates it via
+        // `create_tags_v2` in `initialize`, not the migration.
+        let v2_exists: bool = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tags_v2'",
+                [],
+                |_| Ok(true),
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or(false);
+        assert!(!v2_exists);
+    }
 }

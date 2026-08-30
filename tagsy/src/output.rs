@@ -49,11 +49,15 @@ impl FileRow {
 }
 
 /// A serializable tag row, shared by every command that prints tags.
+///
+/// `style` carries the tag's full [`tagsy_api::TagStyle`] — every property with
+/// equal weight, matching the human table's `Style` column. No single property
+/// (dot color included) is promoted to its own field.
 #[derive(Debug, Serialize)]
 struct TagRow {
     id: TagId,
     name: String,
-    color: String,
+    style: tagsy_api::TagStyle,
     tags: Vec<String>,
     deleted: bool,
 }
@@ -64,7 +68,7 @@ impl TagRow {
         Self {
             id: tag.id,
             name: tag.name.clone(),
-            color: tag.color.clone(),
+            style: tag.style.clone(),
             tags,
             deleted: tag.deleted,
         }
@@ -125,6 +129,31 @@ fn highlight_id(id: &str, prefix_length: usize) -> String {
     format!("{}{}", unique.magenta().bold(), rest.bright_black())
 }
 
+/// Render a tag's full [`TagStyle`] as a compact `key=value` list for the
+/// table.
+///
+/// Every one of the ten style properties is shown, in the same order and with
+/// equal weight — the CLI does not single out the dot color (or any other
+/// property) with its own column. Kept to a single cell so the table stays
+/// legible; the machine-readable JSON path emits the same properties as a
+/// structured object.
+fn format_style(style: &tagsy_api::TagStyle) -> String {
+    format!(
+        "dot={} bg={} grad={} fg={} border={} width={} border_style={} shape={} shadow={} \
+         shadow_color={}",
+        style.dot_color,
+        style.background,
+        style.gradient,
+        style.foreground,
+        style.border,
+        style.border_width,
+        style.border_style.as_str(),
+        style.shape.as_str(),
+        style.shadow,
+        style.shadow_color,
+    )
+}
+
 /// The single tag table used by *every* command that prints a set of tags
 /// (`search`, `tags-for-file`, `subtags`).
 ///
@@ -144,7 +173,7 @@ fn tag_table(tags: &[Tag], tags_by_tag: &HashMap<TagId, Vec<String>>) -> Table {
     table
         .load_preset(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec!["Tag id", "Name", "Color", "Tags"]);
+        .set_header(vec!["Tag id", "Name", "Style", "Tags"]);
 
     for tag in tags {
         let id = tag.id.to_string();
@@ -157,7 +186,7 @@ fn tag_table(tags: &[Tag], tags_by_tag: &HashMap<TagId, Vec<String>>) -> Table {
         table.add_row(vec![
             Cell::new(highlight_id(&id, prefix_length)),
             Cell::new(&tag.name),
-            Cell::new(&tag.color),
+            Cell::new(format_style(&tag.style)),
             // TODO: Store the ids instead of the names.
             Cell::new(tags_column),
         ]);
@@ -534,7 +563,10 @@ mod tests {
         let tag = Tag {
             id: TagId::new(),
             name: "work".to_owned(),
-            color: "#00FF00".to_owned(),
+            style: tagsy_api::TagStyle {
+                dot_color: "#00FF00".to_owned(),
+                ..tagsy_api::TagStyle::default()
+            },
             metadata: None,
             deleted: false,
         };
@@ -542,7 +574,7 @@ mod tests {
 
         assert_eq!(row.id, tag.id);
         assert_eq!(row.name, "work");
-        assert_eq!(row.color, "#00FF00");
+        assert_eq!(row.style.dot_color, "#00FF00");
         assert_eq!(row.tags, vec!["parent".to_owned()]);
         assert!(!row.deleted);
     }

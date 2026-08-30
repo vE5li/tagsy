@@ -10,7 +10,7 @@ use std::future::Future;
 use std::path::PathBuf;
 
 use tagsy_core::state::Change;
-use tagsy_core::{FileId, FileInfo, Preview, TagId};
+use tagsy_core::{FileId, FileInfo, Preview, TagId, TagStyle};
 use tokio::sync::broadcast;
 
 use crate::connections::{ConnectedPeer, ConnectionEvent};
@@ -97,11 +97,12 @@ pub trait Backend {
         subtag_rule: SubtagRule,
     ) -> impl Future<Output = Result<Vec<TagId>, ApiError>> + Send;
 
-    /// Create a tag; returns the freshly-minted id.
+    /// Create a tag with an initial visual style; returns the freshly-minted
+    /// id. Callers with no styling preference pass [`TagStyle::default`].
     fn create_tag(
         &self,
         name: String,
-        color: String,
+        style: TagStyle,
     ) -> impl Future<Output = Result<TagId, ApiError>> + Send;
 
     /// Delete a tag.
@@ -117,11 +118,13 @@ pub trait Backend {
         name: String,
     ) -> impl Future<Output = Result<(), ApiError>> + Send;
 
-    /// Change a tag's color.
-    fn set_tag_color(
+    /// Replace a tag's visual style (dot color, fill, border, shape, …). Dot
+    /// color is one property of the style, so this is also how a tag is
+    /// recolored.
+    fn set_tag_style(
         &self,
         tag_id: TagId,
-        color: String,
+        style: TagStyle,
     ) -> impl Future<Output = Result<(), ApiError>> + Send;
 
     /// Upload a file from a path on disk; returns the freshly-minted id.

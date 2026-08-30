@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tagsy_core::state::{Change, ChangeOrigin};
-use tagsy_core::{FileId, LogicalPath, TagId};
+use tagsy_core::{FileId, LogicalPath, TagId, TagStyle};
 
 use super::{ApiError, ApiService};
 use crate::catalog::messages::{CatalogCommand, Ingest};
@@ -38,24 +38,22 @@ impl ApiService {
     /// Create a tag. Mints a fresh `TagId` and enqueues `Change::TagAdded`;
     /// the id is returned immediately (persistence is asynchronous — observe
     /// the event stream for confirmation).
-    pub fn create_tag(&self, name: String, color: String) -> Result<TagId, ApiError> {
+    ///
+    /// `style` is the tag's full initial visual style. Callers with no styling
+    /// preference pass `TagStyle::default()`; the empty-color special-case that
+    /// used to live here is gone — an unset dot color is no longer
+    /// representable, every property has a concrete value.
+    pub fn create_tag(&self, name: String, style: TagStyle) -> Result<TagId, ApiError> {
         if name.trim().is_empty() {
             return Err(ApiError::InvalidArgument("tag name is empty".to_owned()));
         }
         // A locally-originated mutation is stamped with our wall clock now; the
         // timestamp then rides the change unchanged to peers for LWW.
-        // Hex form (matches the CLI's default and the Flutter app's palette),
-        // so tags created with an empty color render consistently everywhere.
-        let color = if color.trim().is_empty() {
-            "#F44336".to_owned()
-        } else {
-            color
-        };
         let tag_id = TagId::new();
         self.enqueue(Change::TagAdded {
             tag_id,
             tag_name: name,
-            color,
+            style,
             metadata: None,
             modified_at: crate::clock::now_millis(),
         })?;
@@ -93,7 +91,7 @@ impl ApiService {
         self.enqueue(Change::TagAdded {
             tag_id,
             tag_name: tag.name,
-            color: tag.color,
+            style: tag.style,
             metadata: None,
             modified_at: crate::clock::now_millis(),
         })
@@ -112,15 +110,14 @@ impl ApiService {
         })
     }
 
-    /// Change a tag's color. Enqueues `Change::TagRecolored` carrying the full
-    /// new color, stamped with our wall clock now for last-writer-wins.
-    pub fn set_tag_color(&self, tag_id: TagId, color: String) -> Result<(), ApiError> {
-        if color.trim().is_empty() {
-            return Err(ApiError::InvalidArgument("color is empty".to_owned()));
-        }
-        self.enqueue(Change::TagRecolored {
+    /// Replace a tag's visual style. Enqueues `Change::TagRestyled` carrying
+    /// the full new [`TagStyle`], stamped with our wall clock now for
+    /// last-writer-wins. Dot color is one property of the style, so this is
+    /// also how a recolor is performed (the former `set_tag_color` is gone).
+    pub fn set_tag_style(&self, tag_id: TagId, style: TagStyle) -> Result<(), ApiError> {
+        self.enqueue(Change::TagRestyled {
             tag_id,
-            color,
+            style,
             modified_at: crate::clock::now_millis(),
         })
     }

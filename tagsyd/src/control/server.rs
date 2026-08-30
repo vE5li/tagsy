@@ -380,7 +380,7 @@ async fn dispatch(
             Ok(tag_ids) => ControlResponse::TagIds(tag_ids),
             Err(error) => ControlResponse::Error(error),
         },
-        ControlRequest::CreateTag { name, color } => match api.create_tag(name, color) {
+        ControlRequest::CreateTag { name, style } => match api.create_tag(name, style) {
             Ok(tag_id) => ControlResponse::TagId(tag_id),
             Err(error) => ControlResponse::Error(error),
         },
@@ -396,7 +396,7 @@ async fn dispatch(
             Ok(()) => ControlResponse::Ok,
             Err(error) => ControlResponse::Error(error),
         },
-        ControlRequest::SetTagColor { tag_id, color } => match api.set_tag_color(tag_id, color) {
+        ControlRequest::SetTagStyle { tag_id, style } => match api.set_tag_style(tag_id, style) {
             Ok(()) => ControlResponse::Ok,
             Err(error) => ControlResponse::Error(error),
         },

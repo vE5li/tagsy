@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tagsy_core::state::Change;
 use tagsy_core::tag::MetadataFormat;
-use tagsy_core::{FileId, FileInfo, TagId};
+use tagsy_core::{FileId, FileInfo, TagId, TagStyle};
 
 /// Whether a read walks the tag hierarchy transitively (`Include`) or looks at
 /// only direct relationships (`Exclude`).
@@ -36,14 +36,16 @@ pub enum DeletedRule {
     Exclude,
 }
 
-/// A tag as the UI sees it: id, name, color, optional metadata, and its
-/// tombstone flag.
+/// A tag as the UI sees it: id, name, its full visual style, optional metadata,
+/// and its tombstone flag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct Tag {
     pub id: TagId,
     pub name: String,
-    pub color: String,
+    /// The tag's complete visual style. The old single `color` field is now
+    /// `style.dot_color`, one peer property among ten.
+    pub style: TagStyle,
     pub metadata: Option<MetadataFormat>,
     /// Whether the tag is soft-deleted (tombstoned). Always `false` when the
     /// row was fetched under [`DeletedRule::Exclude`] (the default). Under

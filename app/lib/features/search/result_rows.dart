@@ -51,7 +51,7 @@ class TagRow extends StatelessWidget {
       visualDensity: VisualDensity.compact,
       minVerticalPadding: 0,
       focusNode: focusNode,
-      leading: TagColorSwatch(color: tag.color),
+      leading: TagColorSwatch(color: tag.style.dotColor),
       title: Text(tag.name, style: titleStyle),
       trailing: const Icon(Icons.chevron_right),
       onTap: onActivate,

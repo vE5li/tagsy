@@ -556,7 +556,11 @@ impl CatalogWriter {
                 CatalogCommand::PurgePreviews { respond_to } => {
                     // Operator-initiated wipe of the whole preview cache, handled on
                     // the sole DB writer. Previews are hash-keyed and regenerated on
-                    // demand, so this only forces re-evaluation on the next request.
+                    // demand, so this forces re-evaluation on the next request per
+                    // file — and, on an `Eager` device, kicks off proactive re-warm
+                    // immediately below so the operator does not have to restart the
+                    // daemon (which would otherwise be the only way to re-run the
+                    // startup catch-up sweep that ordinarily warms every local file).
                     let result = database.purge_previews();
                     match &result {
                         Ok(purged) => log::info!("PurgePreviews: purged {purged} cached previews"),
@@ -564,7 +568,58 @@ impl CatalogWriter {
                             log::error!("PurgePreviews: failed to purge previews: {error:?}")
                         }
                     }
+
+                    // Reply *before* the re-warm sweep: the sweep only enqueues
+                    // fire-and-forget `GetPreview` commands (idempotent, cheap
+                    // no-op on cache hits — see `maybe_eager_preview`), which
+                    // will be processed by *this same loop* after the current
+                    // handler returns. Holding the reply for the enqueue loop
+                    // to finish would delay the operator's confirmation for no
+                    // gain; the actual generation happens off-loop in
+                    // `spawn_blocking` regardless.
                     let _ = respond_to.send(result);
+
+                    // Non-`Eager` devices: `maybe_eager_preview` is a documented
+                    // no-op, so we could gate this whole block on
+                    // `is_eager()` — but skipping the enumeration on the
+                    // non-eager path is cheaper and keeps the intent obvious.
+                    if configuration.preview_generation_policy.is_eager() {
+                        match database.get_all_files(store::DeletedRule::Exclude) {
+                            Ok(files) => {
+                                let count = files.len();
+                                for file in files {
+                                    // Fire-and-forget re-warm: on a cache miss
+                                    // (which every file now is, post-purge)
+                                    // this resolves via `resolve_preview`,
+                                    // which is presence-first — locally-held
+                                    // bytes regenerate on this device, others
+                                    // fall through to peers exactly like a
+                                    // normal request would. Files without
+                                    // local bytes therefore cost only a peer
+                                    // round-trip, not a fetch, which matches
+                                    // the existing `Eager` semantics.
+                                    previews::maybe_eager_preview(
+                                        &configuration,
+                                        &change_sender,
+                                        file.file_id,
+                                    );
+                                }
+                                log::info!(
+                                    "PurgePreviews: enqueued eager re-warm for {count} file(s)"
+                                );
+                            }
+                            Err(error) => {
+                                // A DB read failure here does not undo the
+                                // purge — the operator's request succeeded;
+                                // the next `get_preview` per file will still
+                                // regenerate on demand. Log and move on.
+                                log::error!(
+                                    "PurgePreviews: failed to enumerate files for eager re-warm: \
+                                     {error:?}; previews will regenerate on next request"
+                                );
+                            }
+                        }
+                    }
                     continue;
                 }
                 CatalogCommand::ReconcilePlacement { file_id } => {

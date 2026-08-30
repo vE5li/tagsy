@@ -8,7 +8,7 @@
 //! The `*_inner` walkers traverse that graph transitively under
 //! [`SubtagRule::Include`]. The three tag-returning traversals
 //! (`tag_ids_for_file`, `subtag_ids_for_tag_inner`, `tag_ids_for_subtag_inner`)
-//! `LEFT JOIN tags_v1` so a tombstoned tag drops out of the walk, while a
+//! `LEFT JOIN tags_v2` so a tombstoned tag drops out of the walk, while a
 //! relationship whose tag definition has not reconciled yet is still
 //! followed.
 
@@ -299,18 +299,18 @@ impl CatalogStore {
         subtag_rule: SubtagRule,
     ) -> Result<impl IntoIterator<Item = TagId>, DatabaseError> {
         // Exclude both the relationship tombstone (`entries_v1.deleted`) *and*
-        // tags whose own row is tombstoned (`tags_v1.deleted`): deleting a tag
+        // tags whose own row is tombstoned (`tags_v2.deleted`): deleting a tag
         // is distinct from untagging, so the relationship survives, but a
         // deleted tag must not appear as an applied tag (the UI would then try
         // to fetch a `MissingTag` and error).
         //
         // LEFT JOIN (not INNER): a live relationship can legitimately reference
         // a tag whose definition hasn't been reconciled yet (`FileTagged` can
-        // arrive before `TagAdded`). Such a tag has no `tags_v1` row — keep it
+        // arrive before `TagAdded`). Such a tag has no `tags_v2` row — keep it
         // (`t.deleted IS NULL`); only exclude tags we *know* are tombstoned.
         let mut statement = self.connection.prepare(
             "SELECT e.tag_id FROM entries_v1 AS e
-                 LEFT JOIN tags_v1 AS t ON t.id = e.tag_id
+                 LEFT JOIN tags_v2 AS t ON t.id = e.tag_id
                  WHERE e.target_id = ?1 AND e.type = 0 AND e.deleted = 0
                    AND (t.deleted = 0 OR t.deleted IS NULL)",
         )?;
@@ -345,11 +345,11 @@ impl CatalogStore {
     ) -> Result<(), DatabaseError> {
         // Skip subtags whose own tag row is tombstoned (a deleted tag is not a
         // live subtag), alongside the relationship tombstone. LEFT JOIN so a
-        // subtag whose definition hasn't reconciled yet (no `tags_v1` row) is
+        // subtag whose definition hasn't reconciled yet (no `tags_v2` row) is
         // still returned; only known-tombstoned tags are excluded.
         let mut statement = self.connection.prepare(
             "SELECT e.target_id FROM entries_v1 AS e
-                 LEFT JOIN tags_v1 AS t ON t.id = e.target_id
+                 LEFT JOIN tags_v2 AS t ON t.id = e.target_id
                  WHERE e.tag_id = ?1 AND e.type = 1 AND e.deleted = 0
                    AND (t.deleted = 0 OR t.deleted IS NULL)",
         )?;
@@ -394,11 +394,11 @@ impl CatalogStore {
     ) -> Result<(), DatabaseError> {
         // Skip parent tags whose own tag row is tombstoned (a deleted tag is not
         // a live parent), alongside the relationship tombstone. LEFT JOIN so a
-        // parent whose definition hasn't reconciled yet (no `tags_v1` row) is
+        // parent whose definition hasn't reconciled yet (no `tags_v2` row) is
         // still returned; only known-tombstoned tags are excluded.
         let mut statement = self.connection.prepare(
             "SELECT e.tag_id FROM entries_v1 AS e
-                 LEFT JOIN tags_v1 AS t ON t.id = e.tag_id
+                 LEFT JOIN tags_v2 AS t ON t.id = e.tag_id
                  WHERE e.target_id = ?1 AND e.type = 1 AND e.deleted = 0
                    AND (t.deleted = 0 OR t.deleted IS NULL)",
         )?;
@@ -440,7 +440,7 @@ mod tests {
     use tagsy_core::LogicalPath;
 
     use super::*;
-    use crate::store::fixtures::memory_db;
+    use crate::store::fixtures::{dot_style, memory_db};
 
     #[test]
     fn tag_tag_then_subtag_ids_lists_children() {
@@ -449,7 +449,7 @@ mod tests {
         let child_a = TagId::new();
         let child_b = TagId::new();
         for (id, name) in [(parent, "parent"), (child_a, "a"), (child_b, "b")] {
-            database.add_tag(id, name, "red", 1).unwrap();
+            database.add_tag(id, name, &dot_style("red"), 1).unwrap();
         }
 
         database.tag_tag(parent, child_a, 10).unwrap();
@@ -470,7 +470,7 @@ mod tests {
         let parent = TagId::new();
         let child = TagId::new();
         for (id, name) in [(grandparent, "gp"), (parent, "p"), (child, "c")] {
-            database.add_tag(id, name, "red", 1).unwrap();
+            database.add_tag(id, name, &dot_style("red"), 1).unwrap();
         }
 
         database.tag_tag(grandparent, parent, 10).unwrap();
@@ -498,8 +498,12 @@ mod tests {
         let database = memory_db();
         let parent = TagId::new();
         let child = TagId::new();
-        database.add_tag(parent, "parent", "red", 1).unwrap();
-        database.add_tag(child, "child", "red", 1).unwrap();
+        database
+            .add_tag(parent, "parent", &dot_style("red"), 1)
+            .unwrap();
+        database
+            .add_tag(child, "child", &dot_style("red"), 1)
+            .unwrap();
 
         database.tag_tag(parent, child, 10).unwrap();
         database.untag_tag(parent, child, 20).unwrap();
@@ -516,7 +520,7 @@ mod tests {
     fn tag_tag_rejects_self() {
         let database = memory_db();
         let tag = TagId::new();
-        database.add_tag(tag, "t", "red", 1).unwrap();
+        database.add_tag(tag, "t", &dot_style("red"), 1).unwrap();
         assert!(matches!(
             database.tag_tag(tag, tag, 10),
             Err(DatabaseError::CantTagItself)
@@ -567,7 +571,9 @@ mod tests {
         database
             .add_file(file_id, &LogicalPath::new("a.txt"), 0)
             .unwrap();
-        database.add_tag(tag_id, "work", "red", 10).unwrap();
+        database
+            .add_tag(tag_id, "work", &dot_style("red"), 10)
+            .unwrap();
         database.tag_file(tag_id, file_id, 100).unwrap();
 
         // Applied while the tag is live.
@@ -588,7 +594,9 @@ mod tests {
         assert!(tags.is_empty(), "a deleted tag must not appear as applied");
 
         // Restoring the tag makes it applied again (the relationship survived).
-        database.add_tag(tag_id, "work", "red", 300).unwrap();
+        database
+            .add_tag(tag_id, "work", &dot_style("red"), 300)
+            .unwrap();
         let tags: Vec<_> = database
             .tag_ids_for_file(file_id, SubtagRule::Exclude)
             .unwrap()
@@ -601,7 +609,7 @@ mod tests {
     fn applied_tag_without_definition_is_still_returned() {
         // A `FileTagged` relationship can arrive before the tag's `TagAdded`
         // definition during reconciliation, so a live relationship may point at
-        // a tag with no `tags_v1` row yet. That tag must still be returned (the
+        // a tag with no `tags_v2` row yet. That tag must still be returned (the
         // filter only excludes *known-tombstoned* tags).
         let database = memory_db();
         let file_id = FileId::new();

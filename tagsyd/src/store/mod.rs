@@ -11,7 +11,7 @@
 //! | `schema` | every `CREATE TABLE` / migration, for both databases |
 //! | `types` | the shared value types and [`DatabaseError`] |
 //! | `files` | `files_v2` — existence, logical path, tombstone LWW, manifests |
-//! | `tags` | `tags_v1` — tag definitions and name/pattern lookup |
+//! | `tags` | `tags_v2` — tag definitions and name/pattern lookup |
 //! | `entries` | `entries_v1` — the tag graph and its traversals |
 //! | `versions` | `file_versions_v1` — the append-only content log |
 //! | `previews` | `previews_v1` — the hash-keyed preview cache |
@@ -72,9 +72,10 @@ impl CatalogStore {
         // `create_*_vN` so a restored older-version backup is walked forward
         // through every intermediate version on startup (see AGENTS.md).
         schema::migrate_files_to_v2(&connection)?;
+        schema::migrate_tags_to_v2(&connection)?;
 
         schema::create_files_v2(&connection)?;
-        schema::create_tags_v1(&connection)?;
+        schema::create_tags_v2(&connection)?;
         schema::create_entries_v1(&connection)?;
         schema::create_file_versions_v1(&connection)?;
         schema::create_previews_v1(&connection)?;

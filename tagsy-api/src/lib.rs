@@ -25,6 +25,7 @@ pub use error::ApiError;
 pub use operations::{
     Direction, Operation, OperationEvent, OperationId, OperationKind, OperationStatus, Progress,
 };
+pub use tagsy_core::{BorderStyle, TagShape, TagStyle};
 pub use types::{
     ApiEvent, BackupOutcome, DeletedRule, EditOutcome, EditorRule, HomeSection, RetagSummary,
     SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,

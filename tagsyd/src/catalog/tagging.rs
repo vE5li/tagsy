@@ -1,5 +1,5 @@
 //! The tag and file-tag arms of the catalog's metadata dispatch: `TagAdded`,
-//! `TagRenamed`, `TagRecolored`, `TagChanged`, `TagRemoved`, `FileTagged`,
+//! `TagRenamed`, `TagRestyled`, `TagChanged`, `TagRemoved`, `FileTagged`,
 //! `FileTagChanged`, `FileUntagged`, `TagTagged`, `TagTagChanged`,
 //! `TagUntagged`.
 //!
@@ -44,11 +44,11 @@ pub(crate) async fn apply_change(
         Change::TagAdded {
             tag_id,
             tag_name,
-            color,
+            style,
             metadata: _,
             modified_at,
         } => {
-            if let Err(error) = database.add_tag(*tag_id, tag_name, color, *modified_at) {
+            if let Err(error) = database.add_tag(*tag_id, tag_name, style, *modified_at) {
                 log::error!(
                     "Failed to add tag {} ({}): {:?}",
                     tag_id.to_string(),
@@ -82,16 +82,16 @@ pub(crate) async fn apply_change(
             .await;
             Some(true)
         }
-        Change::TagRecolored {
+        Change::TagRestyled {
             tag_id,
-            color,
+            style,
             modified_at,
         } => {
-            // Carries the full new color; applied with the same `modified_at`
+            // Carries the full new style; applied with the same `modified_at`
             // LWW guard as the other tag mutations, then forwarded so peers
             // converge. Mirrors `TagRenamed`.
-            if let Err(error) = database.update_tag_color(*tag_id, color, *modified_at) {
-                log::error!("Failed to recolor tag {}: {:?}", tag_id.to_string(), error);
+            if let Err(error) = database.update_tag_style(*tag_id, style, *modified_at) {
+                log::error!("Failed to restyle tag {}: {:?}", tag_id.to_string(), error);
             }
             super::forward::forward_to_peers(
                 configuration,

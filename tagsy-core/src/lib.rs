@@ -6,6 +6,9 @@ use uuid::Uuid;
 pub mod clock;
 pub mod content;
 pub mod paths;
+pub mod tag_style;
+
+pub use tag_style::{BorderStyle, TagShape, TagStyle};
 
 /// The peer wire-protocol version. Exchanged in the handshake
 /// (`identity::HandshakeMessage::protocol_version`) and required to match
@@ -16,7 +19,7 @@ pub mod paths;
 /// which every node derives identically). Since all devices are operated by the
 /// same user and updated together, there is no compatibility range — a mismatch
 /// is fail-closed.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub mod tag {
     use std::collections::HashMap;
@@ -93,7 +96,7 @@ pub mod state {
     use serde::{Deserialize, Serialize};
 
     use crate::tag::{MetadataFormat, MetadataValues};
-    use crate::{FileId, LogicalPath, Preview, TagId};
+    use crate::{FileId, LogicalPath, Preview, TagId, TagStyle};
 
     pub enum ChangeOrigin {
         Local { directory_path: PathBuf },
@@ -214,7 +217,10 @@ pub mod state {
         TagAdded {
             tag_id: TagId,
             tag_name: String,
-            color: String,
+            /// The tag's full visual style (dot color, fill, border, shape, …).
+            /// A newly minted tag carries `TagStyle::default()`; the old
+            /// single `color` field is now `style.dot_color`.
+            style: TagStyle,
             metadata: Option<MetadataFormat>,
             modified_at: i64,
         },
@@ -223,13 +229,16 @@ pub mod state {
             tag_name: String,
             modified_at: i64,
         },
-        /// Set a tag's color. Like every other mutation variant, it carries the
-        /// complete new value of the field it changes (there is no partial /
-        /// keep-existing semantics anywhere in the protocol). Mirrors
-        /// `TagRenamed` for the color field.
-        TagRecolored {
+        /// Set a tag's visual style. Like every other mutation variant it
+        /// carries the *complete* new value of the field it changes (there is
+        /// no partial / keep-existing semantics anywhere in the protocol): the
+        /// whole [`TagStyle`] is replaced. This replaced the former
+        /// `TagRecolored` — dot color is now just one property of the style, so
+        /// a recolor is an ordinary restyle. Mirrors `TagRenamed` for the
+        /// style.
+        TagRestyled {
             tag_id: TagId,
-            color: String,
+            style: TagStyle,
             modified_at: i64,
         },
         TagChanged {

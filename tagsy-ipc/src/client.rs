@@ -18,7 +18,7 @@ use tagsy_api::{
     OperationStream, RetagSummary, SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,
 };
 use tagsy_core::content::hash_and_len;
-use tagsy_core::{FileId, FileInfo, Preview, TagId};
+use tagsy_core::{FileId, FileInfo, Preview, TagId, TagStyle};
 use tokio::net::UnixStream;
 use tokio::sync::{Mutex, oneshot};
 use tokio_tungstenite::WebSocketStream;
@@ -438,8 +438,8 @@ impl Backend for IpcBackend {
         }
     }
 
-    async fn create_tag(&self, name: String, color: String) -> Result<TagId, ApiError> {
-        match self.call(ControlRequest::CreateTag { name, color }).await? {
+    async fn create_tag(&self, name: String, style: TagStyle) -> Result<TagId, ApiError> {
+        match self.call(ControlRequest::CreateTag { name, style }).await? {
             ControlResponse::TagId(tag_id) => Ok(tag_id),
             other => Err(unexpected(other)),
         }
@@ -469,9 +469,9 @@ impl Backend for IpcBackend {
         }
     }
 
-    async fn set_tag_color(&self, tag_id: TagId, color: String) -> Result<(), ApiError> {
+    async fn set_tag_style(&self, tag_id: TagId, style: TagStyle) -> Result<(), ApiError> {
         match self
-            .call(ControlRequest::SetTagColor { tag_id, color })
+            .call(ControlRequest::SetTagStyle { tag_id, style })
             .await?
         {
             ControlResponse::Ok => Ok(()),
