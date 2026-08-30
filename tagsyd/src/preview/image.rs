@@ -2,7 +2,8 @@
 
 use std::io::Cursor;
 
-use image::ImageReader;
+use image::metadata::Orientation;
+use image::{DynamicImage, ImageDecoder, ImageReader};
 use tagsy_core::Preview;
 
 use super::{MAX_IMAGE_EDGE, MAX_IMAGE_SOURCE_BYTES};
@@ -27,8 +28,22 @@ pub(super) fn generate_image(bytes: &[u8]) -> Option<Preview> {
     // Decoding the *full* source image to a bitmap is by far the most expensive
     // step for a large photo (a few-MB JPEG can expand to tens of MB of pixels),
     // so time decode, resize, and encode separately.
+    //
+    // Go through the lower-level `ImageDecoder` path (rather than
+    // `reader.decode()`) so we can read the EXIF `Orientation` tag *before*
+    // consuming the decoder to build the `DynamicImage`. The `image` crate does
+    // not apply orientation on decode — the pixels come out as stored — so a
+    // phone photo shot in portrait (which is typically encoded landscape + an
+    // `Orientation=6` tag) would otherwise be thumbnailed sideways. Only JPEG,
+    // TIFF, and WebP carry an orientation tag; the other enabled formats
+    // return `NoTransforms` and `apply_orientation` is a no-op.
     let decode_start = std::time::Instant::now();
-    let decoded = reader.decode().ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    // A missing or malformed orientation tag is not a decode failure — fall
+    // back to `NoTransforms` and continue rather than dropping the preview.
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut decoded = DynamicImage::from_decoder(decoder).ok()?;
+    decoded.apply_orientation(orientation);
     let decode_elapsed = decode_start.elapsed();
 
     // Downscale preserving aspect ratio; `thumbnail` uses a fast filter and
@@ -92,6 +107,82 @@ mod tests {
                 assert!(width >= height);
             }
             other => panic!("expected image, got {other:?}"),
+        }
+    }
+
+    /// Phone cameras store portrait photos as landscape *pixels* plus an EXIF
+    /// `Orientation=6` tag ("rotate 90 CW to display"). The `image` crate does
+    /// not apply orientation on decode, so a preview generator that skips the
+    /// tag produces a sideways thumbnail — this test reproduces exactly that
+    /// scenario and asserts the preview comes out portrait.
+    #[test]
+    fn jpeg_exif_orientation_is_applied() {
+        // Encode a landscape (wider than tall) JPEG with plain `image`. The
+        // resulting bytes have no EXIF; we splice one in below.
+        let mut jpeg = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            200,
+            100,
+            image::Rgb([200, 50, 50]),
+        ))
+        .write_to(&mut Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+        .unwrap();
+
+        // The JPEG must start with SOI (`FFD8`); insert an APP1/EXIF segment
+        // right after it, before any other marker. This is exactly how a
+        // camera writes EXIF, and it is what `image`'s JPEG decoder reads to
+        // populate `ImageDecoder::orientation`.
+        assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "expected JPEG SOI marker");
+
+        // Minimal little-endian TIFF/EXIF payload declaring Orientation=6.
+        // Layout (mirrors `metadata.rs`'s `locate_orientation_entry`):
+        //   "Exif\0\0"                        6 bytes  (APP1 identifier)
+        //   TIFF header  "II" 42 0            4 bytes  (little-endian magic)
+        //   IFD0 offset  = 8                  4 bytes
+        //   IFD0 entry count = 1              2 bytes
+        //   Tag 0x0112 (Orientation)          2 bytes
+        //   Format 3 (u16)                    2 bytes
+        //   Count 1                           4 bytes
+        //   Value 6 + u16 padding             4 bytes
+        // Total: 28 bytes (next-IFD offset omitted; the decoder does not
+        // require it for the single-IFD case).
+        let exif_payload: [u8; 28] = [
+            b'E', b'x', b'i', b'f', 0x00, 0x00, // APP1 identifier
+            0x49, 0x49, 0x2A, 0x00, // TIFF little-endian magic
+            0x08, 0x00, 0x00, 0x00, // IFD0 offset = 8
+            0x01, 0x00, // 1 entry
+            0x12, 0x01, // tag 0x0112 (Orientation)
+            0x03, 0x00, // format 3 (u16)
+            0x01, 0x00, 0x00, 0x00, // count = 1
+            0x06, 0x00, // value = 6 (Rotate 90 CW)
+            0x00,
+            0x00, /* padding
+                   * next-IFD offset intentionally omitted; `image` accepts this. */
+        ];
+        // APP1 segment length is (2 bytes for the length field itself + payload).
+        let app1_len: u16 = 2 + exif_payload.len() as u16;
+        let mut app1 = Vec::with_capacity(4 + exif_payload.len());
+        app1.extend_from_slice(&[0xFF, 0xE1]); // APP1 marker
+        app1.extend_from_slice(&app1_len.to_be_bytes());
+        app1.extend_from_slice(&exif_payload);
+
+        let mut with_exif = Vec::with_capacity(jpeg.len() + app1.len());
+        with_exif.extend_from_slice(&jpeg[..2]); // SOI
+        with_exif.extend_from_slice(&app1); // APP1/EXIF
+        with_exif.extend_from_slice(&jpeg[2..]); // rest of the JPEG
+
+        match generate(&from_bytes(&with_exif), Some("jpg")) {
+            Some(Preview::Image { width, height, .. }) => {
+                // Source pixels were 200x100 (landscape). With Orientation=6
+                // applied, the displayed image is 100x200 (portrait), so the
+                // thumbnail must be taller than it is wide.
+                assert!(
+                    height > width,
+                    "orientation not applied: got {width}x{height}, expected portrait"
+                );
+                assert!(width <= MAX_IMAGE_EDGE && height <= MAX_IMAGE_EDGE);
+            }
+            other => panic!("expected image preview, got {other:?}"),
         }
     }
 }

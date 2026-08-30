@@ -15,7 +15,7 @@ clap = { version = "4.5.20", features = ["derive"] }
 comfy-table = { version = "7", features = ["custom_styling"] }
 ed25519-dalek = "3.0.0"
 env_logger = "0.11"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "tiff"] }
 infer = { version = "0.16", default-features = false }
 # PDF first-page rasterization for previews. Binds to libpdfium at *runtime*
 # via libloading (dynamic), so the build does not link pdfium; the daemon
