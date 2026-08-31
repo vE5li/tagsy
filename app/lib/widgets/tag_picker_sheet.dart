@@ -190,11 +190,15 @@ class _TagPickerSheetBodyState extends State<_TagPickerSheetBody> {
         .toList();
   }
 
-  /// A selectable tag row: color swatch + name, popping the sheet with the tag.
+  /// A selectable tag row: a fully-styled [TagChip] (fill, gradient, border,
+  /// shape, shadow — not just the dot color), popping the sheet with the tag.
+  /// Tapping the chip and tapping the row both select the tag.
   Widget _tagTile(tagsy.TagEntry tag) => ListTile(
     visualDensity: VisualDensity.compact,
-    leading: TagColorSwatch(color: tag.style.dotColor),
-    title: Text(tag.name),
+    title: Align(
+      alignment: Alignment.centerLeft,
+      child: TagChip(tag: tag, onPressed: () => Navigator.pop(context, tag)),
+    ),
     onTap: () => Navigator.pop(context, tag),
   );
 

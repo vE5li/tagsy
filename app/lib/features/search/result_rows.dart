@@ -40,21 +40,55 @@ class TagRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The tag's identity is carried by a fully-styled [TagChip] so the row
+    // reflects the tag's real appearance (fill, gradient, border, shape,
+    // shadow), not just its dot color. Tapping the chip and tapping the row
+    // do the same thing, so the chip forwards its press to [onActivate].
+    //
     // Deleted rows only appear under the "show deleted" toggle; strike the
-    // name through so the user can tell at a glance that a row is a
-    // tombstone rather than a live tag.
-    final titleStyle = tag.deleted
-        ? const TextStyle(decoration: TextDecoration.lineThrough)
-        : null;
+    // chip through so the user can tell at a glance that a row is a tombstone
+    // rather than a live tag.
+    final chip = TagChip(tag: tag, onPressed: onActivate);
     return ListTile(
       dense: true,
       visualDensity: VisualDensity.compact,
       minVerticalPadding: 0,
       focusNode: focusNode,
-      leading: TagColorSwatch(color: tag.style.dotColor),
-      title: Text(tag.name, style: titleStyle),
+      title: Align(
+        alignment: Alignment.centerLeft,
+        child: tag.deleted
+            ? _StrikeThrough(child: chip)
+            : chip,
+      ),
       trailing: const Icon(Icons.chevron_right),
       onTap: onActivate,
+    );
+  }
+}
+
+/// Draws a horizontal strike-through line across its child, used to mark a
+/// tombstoned tag's styled chip (the chip paints its own text color, so a
+/// [TextDecoration] on the label wouldn't reliably show).
+class _StrikeThrough extends StatelessWidget {
+  const _StrikeThrough({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        child,
+        Positioned.fill(
+          child: Center(
+            child: Container(
+              height: 1.5,
+              color: Theme.of(context).colorScheme.onSurface,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
