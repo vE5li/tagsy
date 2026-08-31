@@ -147,7 +147,7 @@ class TagChip extends StatelessWidget {
     );
 
     final content = Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       child: label,
     );
 
