@@ -114,41 +114,88 @@ class TagChip extends StatelessWidget {
     final showBorder =
         style.borderStyle != 'none' && borderColor != Colors.transparent;
 
-    final label = DefaultTextStyle.merge(
+    // The pill is two side-by-side tap cells, never nested: the body cell
+    // (dot + name) opens the tag, the delete cell (the X) untags. Keeping them
+    // as siblings — rather than a small delete target floating inside the body
+    // target — is what makes each region own a clean rectangle with no
+    // fall-through strips, and lets the row's own height drive both cells (so
+    // the delete cell is full-height without any stretch-to-unbounded tricks).
+    //
+    // Only the body cell carries the left padding and, when there's no delete
+    // cell, the right padding too. When the delete cell is present it supplies
+    // its own right padding, so its tap area reaches the pill's right edge and
+    // the overall pill is exactly the same size as a chip without a delete X.
+    final body = InkWell(
+      onTap: onPressed,
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 10,
+          right: onDeleted != null ? 0 : 10,
+          top: 5,
+          bottom: 5,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (dotColor != Colors.transparent) ...[
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  color: dotColor,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 6),
+            ],
+            Text(tag.name),
+          ],
+        ),
+      ),
+    );
+
+    // When there's no delete cell the pill is just the body — no row, no
+    // intrinsic pass, identical to a plain chip.
+    Widget content = DefaultTextStyle.merge(
       style: TextStyle(
         color: foreground,
         fontWeight: FontWeight.w600,
         fontSize: 13,
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (dotColor != Colors.transparent) ...[
-            Container(
-              width: 10,
-              height: 10,
-              decoration: BoxDecoration(
-                color: dotColor,
-                shape: BoxShape.circle,
+      child: onDeleted == null
+          ? body
+          // Two cells, made equal-height so the delete cell can own the pill's
+          // full height (no strips above/below the X). `stretch` alone can't do
+          // this here: a tag chip is laid out inside a `Wrap`, which gives its
+          // children an *unbounded* height, and stretching into an unbounded
+          // cross-axis throws (that's what blanked the screen). `IntrinsicHeight`
+          // first resolves the row to a tight height equal to its tallest child
+          // (the text cell), turning the cross-axis bounded so `stretch` is
+          // well-defined. It's an extra layout pass, but on a one-line pill
+          // that's negligible.
+          : IntrinsicHeight(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  body,
+                  InkWell(
+                    onTap: onDeleted,
+                    child: Padding(
+                      // Small gap from the name on the left; the 10px on the
+                      // right reproduces the chip's normal horizontal inset, so
+                      // adding the delete cell doesn't widen the pill.
+                      padding: const EdgeInsets.only(left: 4, right: 10),
+                      // Center the X within the now-full-height cell.
+                      child: Center(
+                        widthFactor: 1,
+                        child: Icon(Icons.close, size: 14, color: foreground),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(width: 6),
-          ],
-          Text(tag.name),
-          if (onDeleted != null) ...[
-            const SizedBox(width: 4),
-            InkWell(
-              onTap: onDeleted,
-              child: Icon(Icons.close, size: 14, color: foreground),
-            ),
-          ],
-        ],
-      ),
-    );
-
-    final content = Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      child: label,
     );
 
     // Dashed borders need a painter (Flutter's ShapeBorder can't dash a
@@ -195,11 +242,10 @@ class TagChip extends StatelessWidget {
       );
     }
 
-    return InkWell(
-      onTap: onPressed,
-      borderRadius: BorderRadius.circular(20),
-      child: pill,
-    );
+    // Taps are owned by the two inner cells (`body`/delete), not a whole-pill
+    // wrapper — a single outer InkWell would sit *under* the delete cell and
+    // re-open the tag on an X tap. So the assembled pill is returned as-is.
+    return pill;
   }
 }
 
