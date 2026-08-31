@@ -111,47 +111,21 @@ class _TagDetailScreenState extends State<TagDetailScreen> {
   };
 
   Future<void> _load() async {
+    // Load in two phases so `UnknownId` from the primary tag and `UnknownId`
+    // from a related-tag lookup take different paths: only the *primary* being
+    // gone means "the screen's subject is gone, pop." A related lookup failing
+    // is a data-shape issue and must not close the screen.
+    //
+    // For the tag itself we pass `Include` so a tombstoned tag opened from
+    // the home screen's "show deleted" toggle still loads (with its
+    // `deleted` flag set). Parents/subtags are always live-only — a
+    // tombstoned tag can't participate in a live hierarchy edge.
+    final tagsy.TagEntry tag;
     try {
-      // Direct parents/subtags only (Exclude = no hierarchy walk). Matches the
-      // file detail, which also shows direct membership.
-      //
-      // For the tag itself we pass `Include` so a tombstoned tag opened from
-      // the home screen's "show deleted" toggle still loads (with its
-      // `deleted` flag set). Parents/subtags are always live-only — a
-      // tombstoned tag can't participate in a live hierarchy edge.
-      final tag = await _repository.getTagEntry(
+      tag = await _repository.getTagEntry(
         tagId: widget.tagId,
         deletedRule: tagsy.DeletedRule.include,
       );
-      final parents = await _repository.tagIdsForTag(
-        tagId: widget.tagId,
-        subtagRule: tagsy.SubtagRule.exclude,
-      );
-      final subtags = await _repository.subtagIdsForTag(
-        tagId: widget.tagId,
-        subtagRule: tagsy.SubtagRule.exclude,
-      );
-      // Resolve every related tag by id. Bounded by parents.length +
-      // subtags.length; avoids the whole-store listing that `runQuery('')`
-      // would do.
-      final relatedIds = {...parents, ...subtags};
-      final relatedEntries = await Future.wait(
-        relatedIds.map(
-          (id) => _repository.getTagEntry(
-            tagId: id,
-            deletedRule: tagsy.DeletedRule.exclude,
-          ),
-        ),
-      );
-      if (!mounted) return;
-      setState(() {
-        _tag = tag;
-        _parentTagIds = parents;
-        _subtagIds = subtags;
-        _relatedTags = {for (final t in relatedEntries) t.tagId: t};
-        _loading = false;
-        _error = null;
-      });
     } catch (error) {
       if (!mounted) return;
       // `getTagEntry` rejects with `UnknownId` when the tag is gone; treat
@@ -171,6 +145,68 @@ class _TagDetailScreenState extends State<TagDetailScreen> {
         } else {
           _error = '$error';
         }
+        _loading = false;
+      });
+      return;
+    }
+
+    // Direct parents/subtags only (Exclude = no hierarchy walk). Matches the
+    // file detail, which also shows direct membership.
+    try {
+      final parents = await _repository.tagIdsForTag(
+        tagId: widget.tagId,
+        subtagRule: tagsy.SubtagRule.exclude,
+      );
+      final subtags = await _repository.subtagIdsForTag(
+        tagId: widget.tagId,
+        subtagRule: tagsy.SubtagRule.exclude,
+      );
+      // Resolve every related tag by id. Bounded by parents.length +
+      // subtags.length; avoids the whole-store listing that `runQuery('')`
+      // would do.
+      //
+      // A related-id lookup can fail with `UnknownId` when a hierarchy edge
+      // references a tag whose *definition* hasn't reconciled on this device
+      // yet: the daemon's `tag_ids_for_subtag` / `subtag_ids_for_tag` SQL
+      // deliberately admits such ids (LEFT JOIN with `t.deleted IS NULL`) so
+      // the edge isn't silently dropped, expecting the caller to tolerate the
+      // missing tags_v2 row. That tolerance lives here: on `UnknownId` we drop
+      // the id from `_relatedTags` and let `TagsSection` render the fallback
+      // raw-id chip. Any other error propagates.
+      final relatedIds = {...parents, ...subtags};
+      final relatedEntries = await Future.wait(
+        relatedIds.map((id) async {
+          try {
+            return await _repository.getTagEntry(
+              tagId: id,
+              deletedRule: tagsy.DeletedRule.exclude,
+            );
+          } on tagsy.ApiError_UnknownId {
+            return null;
+          }
+        }),
+      );
+      if (!mounted) return;
+      setState(() {
+        _tag = tag;
+        _parentTagIds = parents;
+        _subtagIds = subtags;
+        _relatedTags = {
+          for (final t in relatedEntries.whereType<tagsy.TagEntry>())
+            t.tagId: t,
+        };
+        _loading = false;
+        _error = null;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      // The primary tag loaded fine; treat any downstream failure as a
+      // partial-load error rather than a "screen went away" pop. Render the
+      // primary tag we already have so the user can still act on it (rename,
+      // restyle, delete) while the hierarchy sections show the error.
+      setState(() {
+        _tag = tag;
+        _error = '$error';
         _loading = false;
       });
     }
@@ -443,15 +479,27 @@ class _TagDetailScreenState extends State<TagDetailScreen> {
 
   Widget _buildBody() {
     if (_loading) return const Center(child: CircularProgressIndicator());
-    if (_error != null) return Center(child: Text('Error: $_error'));
     final tag = _tag;
+    // Full-screen error only when the primary tag itself failed to load.
+    // If we have `tag` and `_error != null`, the hierarchy load failed after
+    // the primary loaded — render the tag with an inline banner so the user
+    // can still act on it (see `_load`'s two-phase design).
     if (tag == null) {
+      if (_error != null) return Center(child: Text('Error: $_error'));
       // Post-frame pop is queued; render a neutral state in the meantime.
       return const SizedBox.shrink();
     }
     return ListView(
       padding: const EdgeInsets.symmetric(vertical: 8),
       children: [
+        if (_error != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              'Could not load related tags: $_error',
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ),
         PropertyTile(
           label: 'Name',
           value: tag.name,

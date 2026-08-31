@@ -17,13 +17,23 @@ import 'tag_chip.dart';
 ///
 /// [tagIds] gives the render order; [resolved] maps each id to its
 /// [tagsy.TagEntry] for the chip's name/color. An id missing from [resolved]
-/// (a transient load race) falls back to a monospace chip showing the raw id,
-/// so the row stays meaningful.
+/// falls back to a placeholder chip that still uses the standard [TagChip]
+/// visual (default style, `?<short-id>` label) so the row's shape and
+/// affordances stay consistent — crucially, [onRemove] still fires, since the
+/// hierarchy edge referencing an unresolved id is a real edge the user can
+/// (and often needs to) untag. Tapping the placeholder body is disabled: an
+/// unresolved id has no detail to open.
+///
+/// Ids reach this state when a hierarchy edge references a tag whose
+/// definition hasn't reconciled to this device yet (see
+/// `tag_ids_for_subtag` / `subtag_ids_for_tag` in the daemon's `entries.rs`,
+/// which deliberately admit such rows via `t.deleted IS NULL`).
 ///
 /// The three interactions are optional so one widget covers every caller:
 ///   * [onAdd] — the header's Add button; the button is disabled when null.
-///   * [onTapTag] — tapping a chip body (e.g. to open its detail); chips are
-///     not tappable when null.
+///   * [onTapTag] — tapping a resolved chip body (e.g. to open its detail);
+///     resolved chips are not tappable when null, placeholder chips are never
+///     tappable.
 ///   * [onRemove] — the chip's trailing X (untag); no X is shown when null.
 class TagsSection extends StatelessWidget {
   const TagsSection({
@@ -75,20 +85,35 @@ class TagsSection extends StatelessWidget {
   }
 
   Widget _chipFor(String tagId) {
-    final tag = resolved[tagId];
-    if (tag == null) {
-      // Tag not resolved (e.g. a race between the caller's load steps). Show
-      // the raw id so the row is still meaningful.
-      return Chip(
-        label: Text(tagId, style: const TextStyle(fontFamily: 'monospace')),
-      );
-    }
+    final resolvedTag = resolved[tagId];
+    final tag = resolvedTag ?? _placeholderEntry(tagId);
     final onTapTag = this.onTapTag;
     final onRemove = this.onRemove;
     return TagChip(
       tag: tag,
-      onPressed: onTapTag == null ? null : () => onTapTag(tagId),
+      // Placeholder chips are never tappable (there's no detail to open for
+      // an unresolved id). Removal remains available so the user can untag
+      // even when the definition hasn't reconciled.
+      onPressed: resolvedTag == null || onTapTag == null
+          ? null
+          : () => onTapTag(tagId),
       onDeleted: onRemove == null ? null : () => onRemove(tagId),
+    );
+  }
+
+  /// Build a stand-in [tagsy.TagEntry] for an unresolved tag id: the default
+  /// style plus a short label so the chip renders with the standard visual.
+  /// The label is `?<first-8-of-id>` — a short id has proven enough to
+  /// disambiguate across the store (see the daemon's short-id machinery), so
+  /// eight characters plus the leading `?` marker is enough for the user to
+  /// spot which edge they're removing.
+  static tagsy.TagEntry _placeholderEntry(String tagId) {
+    final short = tagId.length > 8 ? tagId.substring(0, 8) : tagId;
+    return tagsy.TagEntry(
+      tagId: tagId,
+      name: '?$short',
+      style: defaultTagStyle(),
+      deleted: false,
     );
   }
 }
