@@ -20,9 +20,10 @@ path = "src/main.rs"
 #
 # Enabled by default so the desktop/server build gets previews out of the box.
 # A minimal client (e.g. the Android bridge) can build with
-# `--no-default-features` to drop the `image`/`pdfium` dependencies entirely.
+# `--no-default-features` to drop the `image`/`pdfium`/`resvg` dependencies
+# entirely.
 default = ["preview-generation"]
-preview-generation = ["dep:image", "dep:infer", "dep:pdfium-render"]
+preview-generation = ["dep:image", "dep:infer", "dep:pdfium-render", "dep:resvg"]
 
 [dependencies]
 base64 = { workspace = true }
@@ -53,6 +54,7 @@ zstd = { workspace = true }
 image = { workspace = true, optional = true }
 infer = { workspace = true, optional = true }
 pdfium-render = { workspace = true, optional = true }
+resvg = { workspace = true, optional = true }
 
 [dev-dependencies]
 # `test-util` (not part of tokio's `full`) enables paused-time tests
