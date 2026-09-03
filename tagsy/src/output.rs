@@ -8,7 +8,7 @@ use owo_colors::OwoColorize;
 use serde::Serialize;
 use serde_json::json;
 use tagsy_api::{ConnectedPeer, Direction, Operation, OperationKind, OperationStatus, Tag};
-use tagsy_core::{FileId, FileInfo, TagId};
+use tagsy_core::{FileId, FileInfo, FileKind, TagId};
 
 /// How command results are rendered to stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +21,19 @@ pub enum OutputMode {
     Json,
 }
 
+/// The lowercase name of a [`FileKind`] for machine-readable output.
+fn file_kind_name(kind: FileKind) -> &'static str {
+    match kind {
+        FileKind::Image => "image",
+        FileKind::Svg => "svg",
+        FileKind::Pdf => "pdf",
+        FileKind::Video => "video",
+        FileKind::Markdown => "markdown",
+        FileKind::Text => "text",
+        FileKind::Other => "other",
+    }
+}
+
 /// A serializable file row, shared by every command that prints files.
 #[derive(Debug, Serialize)]
 struct FileRow {
@@ -28,6 +41,9 @@ struct FileRow {
     path: String,
     version: i64,
     content_hash: String,
+    /// The file's type, decided from its extension by the daemon's shared
+    /// classifier (see [`FileKind`]). Rendered as a lowercase name.
+    kind: &'static str,
     size: u64,
     tags: Vec<String>,
     deleted: bool,
@@ -41,6 +57,7 @@ impl FileRow {
             path: file.logical_path.to_string(),
             version: file.version_number,
             content_hash: file.content_hash.clone(),
+            kind: file_kind_name(file.kind()),
             size: file.size,
             tags,
             deleted: file.deleted,
@@ -204,7 +221,7 @@ fn file_table(files: &[FileInfo], tags_by_file: &HashMap<FileId, Vec<String>>) -
     table
         .load_preset(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec!["File id", "Path", "Version", "Size", "Tags"]);
+        .set_header(vec!["File id", "Path", "Kind", "Version", "Size", "Tags"]);
 
     for file in files {
         let id = file.file_id.to_string();
@@ -216,6 +233,7 @@ fn file_table(files: &[FileInfo], tags_by_file: &HashMap<FileId, Vec<String>>) -
         table.add_row(vec![
             Cell::new(highlight_id(&id, file.short_id_length)),
             Cell::new(&file.logical_path),
+            Cell::new(file_kind_name(file.kind())),
             Cell::new(format!("v{}", file.version_number)),
             Cell::new(format!("{}b", file.size)),
             Cell::new(tags),
@@ -553,6 +571,7 @@ mod tests {
         assert_eq!(row.path, "photos/cat.jpg");
         assert_eq!(row.version, 3);
         assert_eq!(row.content_hash, "deadbeef");
+        assert_eq!(row.kind, "image");
         assert_eq!(row.size, 2048);
         assert_eq!(row.tags, vec!["photos".to_owned()]);
         assert!(row.deleted);

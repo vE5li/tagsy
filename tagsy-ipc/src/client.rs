@@ -18,7 +18,7 @@ use tagsy_api::{
     OperationStream, RetagSummary, SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,
 };
 use tagsy_core::content::hash_and_len;
-use tagsy_core::{FileId, FileInfo, Preview, TagId, TagStyle};
+use tagsy_core::{FileId, FileInfo, FileKind, Preview, TagId, TagStyle};
 use tokio::net::UnixStream;
 use tokio::sync::{Mutex, oneshot};
 use tokio_tungstenite::WebSocketStream;
@@ -387,6 +387,13 @@ impl Backend for IpcBackend {
             .await?
         {
             ControlResponse::File(file) => Ok(file),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    async fn classify(&self, name: String) -> Result<FileKind, ApiError> {
+        match self.call(ControlRequest::Classify { name }).await? {
+            ControlResponse::FileKind(kind) => Ok(kind),
             other => Err(unexpected(other)),
         }
     }

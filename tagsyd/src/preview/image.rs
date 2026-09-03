@@ -81,7 +81,7 @@ pub(super) fn generate_image(bytes: &[u8]) -> Option<Preview> {
 mod tests {
     use std::io::Cursor;
 
-    use tagsy_core::Preview;
+    use tagsy_core::{FileKind, Preview};
 
     use super::super::tests::from_bytes;
     use super::super::{MAX_IMAGE_EDGE, generate};
@@ -95,7 +95,7 @@ mod tests {
             .write_to(&mut Cursor::new(&mut source), image::ImageFormat::Png)
             .unwrap();
 
-        match generate(&from_bytes(&source), None) {
+        match generate(&from_bytes(&source), FileKind::Image) {
             Some(Preview::Image {
                 bytes,
                 width,
@@ -171,7 +171,7 @@ mod tests {
         with_exif.extend_from_slice(&app1); // APP1/EXIF
         with_exif.extend_from_slice(&jpeg[2..]); // rest of the JPEG
 
-        match generate(&from_bytes(&with_exif), Some("jpg")) {
+        match generate(&from_bytes(&with_exif), FileKind::Image) {
             Some(Preview::Image { width, height, .. }) => {
                 // Source pixels were 200x100 (landscape). With Orientation=6
                 // applied, the displayed image is 100x200 (portrait), so the

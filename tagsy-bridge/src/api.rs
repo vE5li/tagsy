@@ -23,7 +23,7 @@
 // exactly how `flutter_rust_bridge_codegen` references them in the generated
 // `frb_generated.rs`. A plain private `use` would not be visible through that
 // glob and the generated code fails to compile.
-pub use tagsy_core::{FileInfo, Preview};
+pub use tagsy_core::{FileInfo, FileKind, Preview};
 pub use tagsyd::configuration::{EditorRule, HomeSection};
 pub use tagsyd::connections::{ConnectedPeer, ConnectionEvent};
 pub use tagsyd::frontend::api::{ApiError, ApiEvent, StorageStats};
@@ -40,6 +40,33 @@ use tokio::sync::Mutex;
 
 use crate::runtime::StartError;
 
+/// A file's type as a flat tag the Dart UI can switch on. Mirrors the core
+/// [`FileKind`] (frb cannot see inside a foreign enum, so it is re-declared
+/// here, exactly as [`PreviewKind`] mirrors [`Preview`]).
+pub enum FileKindEntry {
+    Image,
+    Svg,
+    Pdf,
+    Video,
+    Markdown,
+    Text,
+    Other,
+}
+
+impl From<FileKind> for FileKindEntry {
+    fn from(kind: FileKind) -> Self {
+        match kind {
+            FileKind::Image => Self::Image,
+            FileKind::Svg => Self::Svg,
+            FileKind::Pdf => Self::Pdf,
+            FileKind::Video => Self::Video,
+            FileKind::Markdown => Self::Markdown,
+            FileKind::Text => Self::Text,
+            FileKind::Other => Self::Other,
+        }
+    }
+}
+
 /// A file flattened into primitive fields for the Dart UI.
 ///
 /// The core [`FileInfo`] is crossed to Dart as an *opaque* handle (frb cannot
@@ -52,6 +79,10 @@ pub struct FileEntry {
     pub path: String,
     pub content_hash: String,
     pub version_number: i64,
+    /// What kind of file this is, decided by the daemon from the file's
+    /// extension alone (see [`FileKindEntry`]). Authoritative: the UI picks its
+    /// icon / label / preview strategy from this and never re-classifies.
+    pub kind: FileKindEntry,
     /// The latest version's content size in bytes.
     pub size: i64,
     /// Number of leading characters of `file_id` that uniquely identify this
@@ -77,11 +108,14 @@ pub struct FileEntry {
 
 impl From<FileInfo> for FileEntry {
     fn from(info: FileInfo) -> Self {
+        // Compute before moving fields out of `info`.
+        let kind = info.kind().into();
         Self {
             file_id: info.file_id.to_string(),
             path: info.logical_path.into_string(),
             content_hash: info.content_hash,
             version_number: info.version_number,
+            kind,
             size: info.size as i64,
             short_id_length: info.short_id_length as i64,
             deleted: info.deleted,
@@ -744,6 +778,16 @@ impl Tagsy {
         Ok(FileEntry::from(
             backend.get_file(file_id, deleted_rule).await?,
         ))
+    }
+
+    /// Classify a file's logical `name` into its [`FileKindEntry`] from the
+    /// extension alone — the daemon's authoritative, byte-free classification.
+    ///
+    /// For a file not (yet) in the catalog (e.g. a share-review candidate on
+    /// disk before upload), where no [`FileEntry::kind`] is available. Catalog
+    /// files should read [`FileEntry::kind`] directly instead.
+    pub async fn classify(&self, name: String) -> Result<FileKindEntry, ApiError> {
+        Ok(self.try_backend()?.classify(name).await?.into())
     }
 
     /// Absolute on-disk path where `file_id`'s bytes currently live locally,

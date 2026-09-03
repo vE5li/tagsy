@@ -20,9 +20,8 @@ import '../rust/api.dart' as tagsy;
 import '../session/session.dart';
 import '../widgets/busy_icon_button.dart';
 import '../widgets/file_preview.dart';
+import '../widgets/preview.dart';
 import '../widgets/property_tile.dart';
-import '../widgets/remote_preview.dart';
-import '../widgets/section_header.dart';
 import '../widgets/tag_picker_sheet.dart';
 import '../widgets/tags_section.dart';
 import '../widgets/text_prompt_dialog.dart';
@@ -371,23 +370,18 @@ class _FileDetailScreenState extends State<FileDetailScreen> {
     final file = _file;
     if (file == null) return;
     setState(() => _sharing = true);
-    // Set to the fetched path's parent (the daemon's per-request `<uuid>`
-    // subdir) when we fetch, so we can clean it up in `finally`. `null` for
-    // the local-path branch where we do not own the file.
-    String? fetchedParent;
     final name = nameFor(file.path);
     try {
-      var path = _localPath;
-      if (path == null) {
-        // Not present locally: fetch the bytes to a daemon-owned temp file.
-        // The daemon materializes it with the correct basename, so we can
-        // share the fetched path in place — no renaming, no extra staging.
-        path = await _repository.fetchFile(
-          fileId: widget.fileId,
-          expectedHash: file.contentHash,
-        );
-        fetchedParent = File(path).parent.path;
-      }
+      // A local sync-dir copy is shared in place; otherwise fetch (or reuse a
+      // cached fetch of) the bytes. The fetched path is owned by the
+      // repository's fetched-file cache and reused elsewhere, so we share it
+      // read-only — we neither move nor delete it.
+      final path =
+          _localPath ??
+          await _repository.fetchFileCached(
+            fileId: widget.fileId,
+            expectedHash: file.contentHash,
+          );
       await Share.shareXFiles([XFile(path, name: name)]);
     } catch (error) {
       final message = error is tagsy.ApiError_ContentUnavailable
@@ -396,16 +390,6 @@ class _FileDetailScreenState extends State<FileDetailScreen> {
           : 'Failed to share file: $error';
       _snack(message);
     } finally {
-      // Clean up the daemon-owned per-request subdir (move semantics on the
-      // fetched path). Best-effort — the daemon bulk-wipes `fetch_temp_dir`
-      // on its next start regardless.
-      if (fetchedParent != null) {
-        try {
-          await Directory(fetchedParent).delete(recursive: true);
-        } catch (_) {
-          // Nothing to do.
-        }
-      }
       if (mounted) setState(() => _sharing = false);
     }
   }
@@ -415,50 +399,31 @@ class _FileDetailScreenState extends State<FileDetailScreen> {
   ///
   /// A locally-held copy is copied out (the original stays in its sync
   /// directory). A file not present locally is fetched to a daemon-owned temp
-  /// file (from a peer if needed) and *moved* into Downloads. The destination
-  /// keeps the file's logical name, de-duplicated (`name (2).ext`) if a file by
-  /// that name already exists in Downloads.
+  /// file (from a peer if needed, or reused from the fetched-file cache) and
+  /// *copied* into Downloads — the cache keeps the fetched original for reuse,
+  /// so we never move it out. The destination keeps the file's logical name,
+  /// de-duplicated (`name (2).ext`) if a file by that name already exists.
   Future<void> _downloadFile() async {
     final file = _file;
     final downloadsDir = widget.session.downloadsDir;
     if (file == null || downloadsDir == null) return;
     setState(() => _downloading = true);
-    // The daemon-owned per-request subdir (parent of a fetched path). We
-    // clean it up in `finally` regardless of whether the file inside was
-    // moved out or not — a successful rename leaves the subdir empty; a
-    // failed copy leaves both the subdir and the temp behind.
-    String? fetchedParent;
     try {
-      final localPath = _localPath;
-      final String source;
-      if (localPath != null) {
-        source = localPath;
-      } else {
-        source = await _repository.fetchFile(
-          fileId: widget.fileId,
-          expectedHash: file.contentHash,
-        );
-        fetchedParent = File(source).parent.path;
-      }
+      // Local sync-dir copy, or a fetched (possibly cache-reused) temp. Either
+      // way it's a read-only source: local files stay in their sync dir, fetched
+      // files stay in the repository cache — we always copy out, never move.
+      final source =
+          _localPath ??
+          await _repository.fetchFileCached(
+            fileId: widget.fileId,
+            expectedHash: file.contentHash,
+          );
 
       final name = nameFor(file.path);
       final dir = Directory(downloadsDir);
       await dir.create(recursive: true);
       final dest = uniqueDestination(downloadsDir, name);
-
-      if (localPath != null) {
-        // Local file: copy out, leaving the synced original in place.
-        await File(source).copy(dest);
-      } else {
-        // Fetched temp file (move semantics): relink into Downloads, falling
-        // back to copy+delete across filesystems.
-        final fetched = File(source);
-        try {
-          await fetched.rename(dest);
-        } on FileSystemException {
-          await fetched.copy(dest);
-        }
-      }
+      await File(source).copy(dest);
       _snack('Saved "${nameFor(dest)}" to Downloads.');
     } catch (error) {
       final message = error is tagsy.ApiError_ContentUnavailable
@@ -467,15 +432,6 @@ class _FileDetailScreenState extends State<FileDetailScreen> {
           : 'Failed to download file: $error';
       _snack(message);
     } finally {
-      // Clean up the daemon-owned per-request subdir. Best-effort — the
-      // daemon bulk-wipes `fetch_temp_dir` on next start regardless.
-      if (fetchedParent != null) {
-        try {
-          await Directory(fetchedParent).delete(recursive: true);
-        } catch (_) {
-          // Nothing to do; it lives in a temp dir.
-        }
-      }
       if (mounted) setState(() => _downloading = false);
     }
   }
@@ -621,20 +577,6 @@ class _FileDetailScreenState extends State<FileDetailScreen> {
               tooltip: 'Download file',
               onPressed: _downloadFile,
             ),
-          // Open in an external editor. Gated on the session carrying an
-          // EditorLauncher — currently non-null on both Android (ACTION_EDIT
-          // via FileProvider) and Linux ($EDITOR or a daemon-configured tag
-          // rule). Only for live files, and disabled while an edit is in
-          // flight so a second tap does not overlap.
-          if (file != null &&
-              !file.deleted &&
-              widget.session.editorLauncher != null)
-            BusyIconButton(
-              busy: _editing,
-              icon: Icons.edit_note_outlined,
-              tooltip: 'Edit file',
-              onPressed: _editFile,
-            ),
           // Share to the OS share sheet, to the right of delete/restore.
           // Mobile-only (gated on the session's public-key hint, which is
           // non-null only on Android), and only for live files. Disabled while
@@ -664,6 +606,26 @@ class _FileDetailScreenState extends State<FileDetailScreen> {
       padding: const EdgeInsets.symmetric(vertical: 8),
       children: [
         _buildPreview(context, file),
+        // Open in an external editor, directly below the preview. Gated on the
+        // session carrying an EditorLauncher — currently non-null on both
+        // Android (ACTION_EDIT via FileProvider) and Linux ($EDITOR or a
+        // daemon-configured tag rule). Only for live files, and disabled while
+        // an edit is in flight so a second tap does not overlap.
+        if (!file.deleted && widget.session.editorLauncher != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: OutlinedButton.icon(
+              icon: _editing
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.edit_note_outlined),
+              label: const Text('Edit'),
+              onPressed: _editing ? null : _editFile,
+            ),
+          ),
         PropertyTile(
           label: 'Path',
           value: file.path,
@@ -731,39 +693,28 @@ class _FileDetailScreenState extends State<FileDetailScreen> {
 
   /// The file's inline preview.
   ///
-  /// Two sources, picked by local presence:
-  /// - The bytes are on disk (`_localPath != null`): render the full-fidelity
-  ///   [FilePreview] straight from disk (full-res image, more text).
-  /// - Not present locally: peers can advertise files whose content we haven't
-  ///   fetched. Fall back to the daemon's small cacheable preview
-  ///   ([RemotePreview]) — a low-res thumbnail or short snippet fetched from a
-  ///   peer — so there's still something to show without pulling the whole file.
-  ///
-  /// Preview height is bounded so it never crowds out the tags/properties.
+  /// The unified [Preview] widget decides everything from the file's type: it
+  /// renders local/cached/fetched bytes at full fidelity when it can, shows the
+  /// daemon thumbnail for pdf/video, and a typed empty state otherwise. Here we
+  /// only supply the height bound (shorter for text/markdown — a wall of text
+  /// doesn't need the full image height) and stretch it to full width.
   Widget _buildPreview(BuildContext context, tagsy.FileEntry file) {
-    final path = _localPath;
-    final header = SectionHeader(
-      path == null ? 'Remote preview' : 'Preview',
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-    );
-    final body = ConstrainedBox(
-      constraints: const BoxConstraints(maxHeight: 360),
-      child: path == null
-          // Keyed by content hash so a content change refetches (the
-          // RemotePreview widget also guards this via didUpdateWidget).
-          ? RemotePreview(
-              key: ValueKey(
-                'remote-preview-${file.fileId}-${file.contentHash}',
-              ),
-              repository: _repository,
-              fileId: file.fileId,
-              contentHash: file.contentHash,
-            )
-          : FilePreview(path: path),
-    );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [header, body],
+    final isText = const {
+      tagsy.FileKindEntry.text,
+      tagsy.FileKindEntry.markdown,
+    }.contains(file.kind);
+    final maxHeight = isText
+        ? FilePreview.maxTextPreviewHeight
+        : FilePreview.maxPreviewHeight;
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxHeight: maxHeight),
+      child: Preview(
+        key: ValueKey('preview-${file.fileId}-${file.contentHash}'),
+        repository: _repository,
+        file: file,
+        sizeToAspect: true,
+        allowTextScroll: true,
+      ),
     );
   }
 

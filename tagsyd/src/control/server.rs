@@ -359,6 +359,10 @@ async fn dispatch(
             Ok(file) => ControlResponse::File(file),
             Err(error) => ControlResponse::Error(error),
         },
+        ControlRequest::Classify { name } => match api.classify(&name) {
+            Ok(kind) => ControlResponse::FileKind(kind),
+            Err(error) => ControlResponse::Error(error),
+        },
         ControlRequest::GetTag {
             tag_id,
             deleted_rule,

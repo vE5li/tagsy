@@ -46,7 +46,7 @@ use std::path::PathBuf;
 pub use tagsy_api::{
     Backend, ConnectionStream, ConnectionUpdate, EventStream, OperationStream, OperationUpdate,
 };
-use tagsy_core::{FileId, FileInfo, Preview, TagId, TagStyle};
+use tagsy_core::{FileId, FileInfo, FileKind, Preview, TagId, TagStyle};
 
 use crate::configuration::{EditorRule, HomeSection};
 use crate::connections::ConnectedPeer;
@@ -118,6 +118,10 @@ impl Backend for InProcessBackend {
         deleted_rule: DeletedRule,
     ) -> Result<FileInfo, ApiError> {
         self.api.get_file(file_id, deleted_rule)
+    }
+
+    async fn classify(&self, name: String) -> Result<FileKind, ApiError> {
+        self.api.classify(&name)
     }
 
     async fn get_tag(&self, tag_id: TagId, deleted_rule: DeletedRule) -> Result<Tag, ApiError> {
@@ -389,6 +393,13 @@ impl Backend for AnyBackend {
         match self {
             AnyBackend::InProcess(backend) => backend.get_file(file_id, deleted_rule).await,
             AnyBackend::Ipc(backend) => backend.get_file(file_id, deleted_rule).await,
+        }
+    }
+
+    async fn classify(&self, name: String) -> Result<FileKind, ApiError> {
+        match self {
+            AnyBackend::InProcess(backend) => backend.classify(name).await,
+            AnyBackend::Ipc(backend) => backend.classify(name).await,
         }
     }
 

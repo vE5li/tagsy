@@ -64,6 +64,7 @@ enum _MenuAction {
   viewModeList,
   viewModeTile,
   viewModeLarge,
+  viewModeFull,
   purgePreviews,
   copyPublicKey,
 }
@@ -205,6 +206,8 @@ class _OverflowMenuState extends State<OverflowMenu> {
         widget.onSelectViewMode(FileViewMode.tile);
       case _MenuAction.viewModeLarge:
         widget.onSelectViewMode(FileViewMode.large);
+      case _MenuAction.viewModeFull:
+        widget.onSelectViewMode(FileViewMode.full);
       case _MenuAction.purgePreviews:
         _purgePreviews();
       case _MenuAction.copyPublicKey:
@@ -271,6 +274,17 @@ class _OverflowMenuState extends State<OverflowMenu> {
             leading: const Icon(Icons.view_agenda_outlined),
             title: const Text('View as large tiles'),
             trailing: widget.fileViewMode == FileViewMode.large
+                ? const Icon(Icons.check)
+                : null,
+          ),
+        ),
+        PopupMenuItem<_MenuAction>(
+          value: _MenuAction.viewModeFull,
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.fullscreen),
+            title: const Text('View as full tiles'),
+            trailing: widget.fileViewMode == FileViewMode.full
                 ? const Icon(Icons.check)
                 : null,
           ),

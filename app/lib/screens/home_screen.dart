@@ -86,7 +86,7 @@ class _HomeScreenState extends State<HomeScreen> {
   /// ([SectionsView], which always renders rows). Ephemeral (resets on
   /// restart), mirroring [_showDeleted]. Cycled by a horizontal swipe over the
   /// results and set directly from the overflow menu.
-  FileViewMode _fileViewMode = FileViewMode.list;
+  FileViewMode _fileViewMode = FileViewMode.full;
 
   /// Change-stream watcher: re-runs the *current* query whenever the underlying
   /// data changes so the results stay accurate. Deliberately does nothing when
@@ -429,7 +429,7 @@ class _HomeScreenState extends State<HomeScreen> {
     // reads the fling velocity so it doesn't fight vertical scrolling.
     return switch (_fileViewMode) {
       FileViewMode.list => _buildListResults(results, hasTags, hasFiles),
-      FileViewMode.tile || FileViewMode.large =>
+      FileViewMode.tile || FileViewMode.large || FileViewMode.full =>
         _buildTileResults(results, hasTags, hasFiles),
     };
   }
@@ -486,13 +486,14 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// The tile result surfaces (shared by [FileViewMode.tile] and
-  /// [FileViewMode.large]): tags stay as rows at the top, files render below as
-  /// either a grid of small thumbnails ([FileTile]) or one full-width tile per
-  /// file with tags ([FileLargeTile]). Composed as a [CustomScrollView] since
-  /// the two sections have different layouts. Tiles are tappable but not part of
-  /// the roving arrow-key navigation, so `restoreRow` doesn't apply here —
-  /// passing index 0 just parks focus back near the top on return.
+  /// The tile result surfaces (shared by [FileViewMode.tile], [.large] and
+  /// [.full]): tags stay as rows at the top, files render below as either a grid
+  /// of small thumbnails ([FileTile]), one full-width tile per file with tags
+  /// ([FileLargeTile]), or one very large tap-to-load-inline tile per file
+  /// ([FileFullTile]). Composed as a [CustomScrollView] since the sections have
+  /// different layouts. Tiles are tappable but not part of the roving arrow-key
+  /// navigation, so `restoreRow` doesn't apply here — passing index 0 just parks
+  /// focus back near the top on return.
   Widget _buildTileResults(
     tagsy.QueryEntries results,
     bool hasTags,
@@ -516,24 +517,37 @@ class _HomeScreenState extends State<HomeScreen> {
       slivers.add(
         const SliverToBoxAdapter(child: SectionHeader('Files')),
       );
-      if (_fileViewMode == FileViewMode.large) {
+      if (_fileViewMode == FileViewMode.large ||
+          _fileViewMode == FileViewMode.full) {
         // One full-width tile per file, stacked; each shows a large preview,
-        // the name, and the file's tags.
+        // the name, and the file's tags. The `full` mode uses a taller,
+        // tap-to-load-inline preview ([FileFullTile]); `large` uses the
+        // fixed-height thumbnail tile ([FileLargeTile]).
+        final full = _fileViewMode == FileViewMode.full;
         slivers.add(
           SliverPadding(
             padding: const EdgeInsets.all(8),
             sliver: SliverList(
               delegate: SliverChildBuilderDelegate((context, i) {
                 final file = results.files[i];
+                final key = ValueKey('${file.fileId}:${file.contentHash}');
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 8),
-                  child: FileLargeTile(
-                    key: ValueKey('${file.fileId}:${file.contentHash}'),
-                    file: file,
-                    repository: session.repository,
-                    onActivate: () => _openFile(file, restoreIndex: 0),
-                    onOpenTag: _openTagById,
-                  ),
+                  child: full
+                      ? FileFullTile(
+                          key: key,
+                          file: file,
+                          repository: session.repository,
+                          onActivate: () => _openFile(file, restoreIndex: 0),
+                          onOpenTag: _openTagById,
+                        )
+                      : FileLargeTile(
+                          key: key,
+                          file: file,
+                          repository: session.repository,
+                          onActivate: () => _openFile(file, restoreIndex: 0),
+                          onOpenTag: _openTagById,
+                        ),
                 );
               }, childCount: results.files.length),
             ),

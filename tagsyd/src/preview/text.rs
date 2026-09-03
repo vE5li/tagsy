@@ -26,14 +26,14 @@ pub(super) fn generate_text(bytes: &[u8]) -> Preview {
 
 #[cfg(test)]
 mod tests {
-    use tagsy_core::Preview;
+    use tagsy_core::{FileKind, Preview};
 
     use super::super::tests::from_bytes;
     use super::super::{MAX_TEXT_BYTES, generate};
 
     #[test]
-    fn plain_text_becomes_text_preview() {
-        let preview = generate(&from_bytes(b"hello world\nsecond line"), None);
+    fn text_kind_becomes_text_preview() {
+        let preview = generate(&from_bytes(b"hello world\nsecond line"), FileKind::Text);
         match preview {
             Some(Preview::Text(text)) => {
                 assert!(text.starts_with("hello world"));
@@ -44,11 +44,22 @@ mod tests {
     }
 
     #[test]
+    fn markdown_kind_also_previews_as_text() {
+        // The daemon previews markdown as a plain text snippet; clients render
+        // it richly.
+        let preview = generate(&from_bytes(b"# Title\n\nbody"), FileKind::Markdown);
+        match preview {
+            Some(Preview::Text(text)) => assert!(text.starts_with("# Title")),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn text_is_truncated_on_char_boundary() {
         // A long multi-byte string; ensure we never panic and stay within the
         // byte cap.
         let source = "é".repeat(1000);
-        let preview = generate(&from_bytes(source.as_bytes()), None);
+        let preview = generate(&from_bytes(source.as_bytes()), FileKind::Text);
         match preview {
             Some(Preview::Text(text)) => assert!(text.len() <= MAX_TEXT_BYTES),
             other => panic!("expected text, got {other:?}"),
@@ -56,15 +67,34 @@ mod tests {
     }
 
     #[test]
-    fn binary_with_nul_has_no_preview() {
-        let bytes = [0u8, 1, 2, 3, 255, 254, 0, 42];
-        assert_eq!(generate(&from_bytes(&bytes), None), Some(Preview::None));
+    fn text_kind_sanitizes_embedded_control_bytes() {
+        // A file routed as text still previews as text; NUL/control bytes are
+        // stripped by the snippet builder rather than rejecting the preview.
+        let bytes = b"ok\x00text\x01here";
+        match generate(&from_bytes(bytes), FileKind::Text) {
+            Some(Preview::Text(text)) => {
+                assert!(!text.contains('\0'));
+                assert!(text.contains("oktexthere"));
+            }
+            other => panic!("expected text, got {other:?}"),
+        }
     }
 
     #[test]
-    fn empty_input_is_empty_text() {
+    fn other_kind_has_no_preview() {
+        // An unrecognized / extension-less file is `Other`, never routed to a
+        // text snippet — the authoritative, byte-free decision.
+        let bytes = [0u8, 1, 2, 3, 255, 254, 0, 42];
         assert_eq!(
-            generate(&from_bytes(b""), None),
+            generate(&from_bytes(&bytes), FileKind::Other),
+            Some(Preview::None)
+        );
+    }
+
+    #[test]
+    fn empty_text_input_is_empty_text() {
+        assert_eq!(
+            generate(&from_bytes(b""), FileKind::Text),
             Some(Preview::Text(String::new()))
         );
     }

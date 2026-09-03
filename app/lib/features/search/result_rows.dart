@@ -11,7 +11,8 @@ import 'package:flutter/material.dart';
 
 import '../../data/repository.dart';
 import '../../rust/api.dart' as tagsy;
-import '../../widgets/remote_preview.dart';
+import '../../widgets/file_preview.dart';
+import '../../widgets/preview.dart';
 import '../../widgets/tag_chip.dart';
 // SectionHeader moved to a shared widget (it's used well beyond search now);
 // re-exported so existing `result_rows.dart` importers keep resolving it.
@@ -134,9 +135,9 @@ class FileRow extends StatelessWidget {
 /// on the home screen's search results uses these in a [GridView] in place of
 /// [FileRow]s.
 ///
-/// The thumbnail reuses [RemotePreview], which self-manages the per-file fetch
-/// (image/text/none/loading/retry) keyed by `fileId` + `contentHash`. Tiles are
-/// tappable but are not part of the list's roving arrow-key navigation.
+/// The preview reuses [Preview], which decides from the file's type how to
+/// render it and self-manages the per-file lookup/fetch. Tiles are tappable but
+/// are not part of the list's roving arrow-key navigation.
 class FileTile extends StatelessWidget {
   const FileTile({
     super.key,
@@ -147,7 +148,7 @@ class FileTile extends StatelessWidget {
 
   final tagsy.FileEntry file;
 
-  /// The repository the embedded [RemotePreview] fetches the thumbnail through.
+  /// The repository the embedded [Preview] renders through.
   final TagsyRepository repository;
 
   /// Invoked on tap; the home screen wires this to open the file detail.
@@ -172,11 +173,7 @@ class FileTile extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Expanded(
-              child: RemotePreview(
-                repository: repository,
-                fileId: file.fileId,
-                contentHash: file.contentHash,
-              ),
+              child: Preview(repository: repository, file: file),
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -197,11 +194,11 @@ class FileTile extends StatelessWidget {
 }
 
 /// A single file result rendered as a large, full-width tile: a tall preview
-/// thumbnail on top, the logical name, and the file's tags below it. Used by the
-/// large view mode ([FileViewMode.large]) on the home screen's search results,
-/// one per row. Like [FileTile], the thumbnail reuses [RemotePreview]; the tag
-/// strip is fetched per-file by [FileTagStrip]. Tappable but outside the roving
-/// arrow-key navigation.
+/// on top, the logical name, and the file's tags below it. Used by the large
+/// view mode ([FileViewMode.large]) on the home screen's search results, one per
+/// row. Like [FileTile], the preview reuses [Preview]; the tag strip is fetched
+/// per-file by [FileTagStrip]. Tappable but outside the roving arrow-key
+/// navigation.
 class FileLargeTile extends StatelessWidget {
   const FileLargeTile({
     super.key,
@@ -213,7 +210,7 @@ class FileLargeTile extends StatelessWidget {
 
   final tagsy.FileEntry file;
 
-  /// The repository the embedded [RemotePreview] / [FileTagStrip] fetch through.
+  /// The repository the embedded [Preview] / [FileTagStrip] render through.
   final TagsyRepository repository;
 
   /// Invoked on tap; the home screen wires this to open the file detail.
@@ -244,11 +241,7 @@ class FileLargeTile extends StatelessWidget {
             // proportions consistent regardless of the thumbnail's aspect.
             SizedBox(
               height: 220,
-              child: RemotePreview(
-                repository: repository,
-                fileId: file.fileId,
-                contentHash: file.contentHash,
-              ),
+              child: Preview(repository: repository, file: file),
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
@@ -274,6 +267,103 @@ class FileLargeTile extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// A single file result rendered as a very large, full-width tile: a tall
+/// preview on top, the logical name, and the file's tags below. Used by the
+/// full view mode ([FileViewMode.full]) on the home screen's search results,
+/// one per row.
+///
+/// Unlike [FileLargeTile], the preview here is tall and (for locally-renderable
+/// types) tappable to load the *full* file inline: the first tap fetches and
+/// swaps in a full-fidelity render, a second tap opens the detail screen. The
+/// name and tags below open the detail screen ([onActivate]) or a tag
+/// ([onOpenTag]). Outside the roving arrow-key navigation.
+class FileFullTile extends StatelessWidget {
+  const FileFullTile({
+    super.key,
+    required this.file,
+    required this.repository,
+    required this.onActivate,
+    required this.onOpenTag,
+  });
+
+  final tagsy.FileEntry file;
+
+  /// The repository the embedded [Preview] / [FileTagStrip] render through.
+  final TagsyRepository repository;
+
+  /// Invoked when the name is tapped; the home screen wires this to open the
+  /// file detail. Not fired from the preview area, which loads the file inline.
+  final VoidCallback onActivate;
+
+  /// See [FileLargeTile.onOpenTag].
+  final ValueChanged<String> onOpenTag;
+
+  /// The preview's maximum height — much taller than [FileLargeTile]'s so the
+  /// inline full-file preview has room to be genuinely useful. Shared with the
+  /// file detail screen (via [FilePreview.maxPreviewHeight]) so a tapped-open
+  /// preview is the same size in both.
+  static const double previewMaxHeight = FilePreview.maxPreviewHeight;
+
+  @override
+  Widget build(BuildContext context) {
+    // See [TagRow] for why we strike deleted rows through.
+    final titleStyle = file.deleted
+        ? const TextStyle(decoration: TextDecoration.lineThrough)
+        : null;
+    final theme = Theme.of(context);
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      margin: EdgeInsets.zero,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Aspect-sized preview, capped so a tall image can't dominate the
+          // list. Wrapped in the navigation [InkWell]: [Preview] intercepts the
+          // first tap to load the full file inline, then stops intercepting so a
+          // second tap falls through here to open the detail screen.
+          InkWell(
+            onTap: onActivate,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: previewMaxHeight),
+              child: Preview(
+                repository: repository,
+                file: file,
+                sizeToAspect: true,
+              ),
+            ),
+          ),
+          // The name + tags below also open the detail screen / a tag.
+          InkWell(
+            onTap: onActivate,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    file.path,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: (theme.textTheme.titleMedium ?? const TextStyle())
+                        .merge(titleStyle),
+                  ),
+                  const SizedBox(height: 8),
+                  FileTagStrip(
+                    repository: repository,
+                    fileId: file.fileId,
+                    contentHash: file.contentHash,
+                    onOpenTag: onOpenTag,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -311,8 +401,17 @@ class FileTagStrip extends StatefulWidget {
   State<FileTagStrip> createState() => _FileTagStripState();
 }
 
+/// Process-wide cache of a file's resolved tags, keyed by file id. Lets a
+/// [FileTagStrip] render at its final height synchronously on (re)build, so a
+/// scrolled-away tile doesn't reflow from the loading placeholder and shove the
+/// [SliverList]. Kept fresh by the change-stream reload below.
+final Map<String, List<tagsy.TagEntry>> _fileTagsCache = {};
+
 class _FileTagStripState extends State<FileTagStrip> {
-  late Future<List<tagsy.TagEntry>> _future;
+  /// The tags to render, or null until the first load resolves. Seeded
+  /// synchronously from [_fileTagsCache] so a re-created tile doesn't flash the
+  /// loading placeholder (and reflow) on every scroll pass.
+  List<tagsy.TagEntry>? _tags;
 
   /// Guards the change-stream loop so it stops when the widget is disposed.
   bool _watching = false;
@@ -320,7 +419,8 @@ class _FileTagStripState extends State<FileTagStrip> {
   @override
   void initState() {
     super.initState();
-    _future = widget.repository.tagsForFile(fileId: widget.fileId);
+    _tags = _fileTagsCache[widget.fileId];
+    _load();
     _subscribeToChanges();
   }
 
@@ -329,7 +429,8 @@ class _FileTagStripState extends State<FileTagStrip> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.fileId != widget.fileId ||
         oldWidget.contentHash != widget.contentHash) {
-      _reload();
+      _tags = _fileTagsCache[widget.fileId];
+      _load();
     }
   }
 
@@ -339,12 +440,18 @@ class _FileTagStripState extends State<FileTagStrip> {
     super.dispose();
   }
 
-  /// Re-fetch this file's tags and rebuild. Used both on a fileId/hash change
-  /// and when the change stream reports a relevant mutation.
-  void _reload() {
-    setState(() {
-      _future = widget.repository.tagsForFile(fileId: widget.fileId);
-    });
+  /// Fetch this file's tags, cache them, and rebuild. Used on first build, on a
+  /// fileId/hash change, and when the change stream reports a relevant mutation.
+  Future<void> _load() async {
+    try {
+      final tags = await widget.repository.tagsForFile(fileId: widget.fileId);
+      if (!mounted) return;
+      _fileTagsCache[widget.fileId] = tags;
+      setState(() => _tags = tags);
+    } catch (_) {
+      // A tag lookup failure is not worth surfacing on a result tile; keep
+      // whatever (possibly cached) tags we already have.
+    }
   }
 
   /// Subscribe to the live change stream and re-fetch when a mutation could
@@ -359,7 +466,7 @@ class _FileTagStripState extends State<FileTagStrip> {
         final event = await events.next();
         if (event == null) break;
         if (!mounted || !_watching) break;
-        if (_affectsThisFile(event)) _reload();
+        if (_affectsThisFile(event)) _load();
       }
     } catch (_) {
       // Transient stream hiccups are surfaced elsewhere; don't let one kill
@@ -387,29 +494,19 @@ class _FileTagStripState extends State<FileTagStrip> {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<List<tagsy.TagEntry>>(
-      future: _future,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState != ConnectionState.done) {
-          // Reserve a little height so the tile doesn't jump when tags land.
-          return const SizedBox(height: 24);
-        }
-        // A tag lookup failure is not worth surfacing on a result tile; just
-        // show nothing (the detail screen is authoritative for tags).
-        final tags = snapshot.data ?? const <tagsy.TagEntry>[];
-        if (tags.isEmpty) return const SizedBox.shrink();
-        return Wrap(
-          spacing: 6,
-          runSpacing: 6,
-          children: [
-            for (final tag in tags)
-              TagChip(
-                tag: tag,
-                onPressed: () => widget.onOpenTag(tag.tagId),
-              ),
-          ],
-        );
-      },
+    final tags = _tags;
+    // Unresolved and uncached: reserve a little height so the tile doesn't jump
+    // when tags first land. Once resolved (or seeded from cache) we render the
+    // final height immediately.
+    if (tags == null) return const SizedBox(height: 24);
+    if (tags.isEmpty) return const SizedBox.shrink();
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [
+        for (final tag in tags)
+          TagChip(tag: tag, onPressed: () => widget.onOpenTag(tag.tagId)),
+      ],
     );
   }
 }

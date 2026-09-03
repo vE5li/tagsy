@@ -627,6 +627,70 @@ pub enum Preview {
     None,
 }
 
+/// What a file *is*, decided purely from its logical name's extension.
+///
+/// This is the one authoritative file-type classification in the system, shared
+/// by every consumer: the daemon routes preview generation on it, the CLI and
+/// Flutter UIs pick icons / labels / render strategy on it. Because it is a
+/// total function of the extension alone — no byte sniffing, no I/O — a client
+/// can decide *without the file's bytes* whether a preview is even worth
+/// requesting, and the daemon is guaranteed to agree (it never generates a
+/// preview a client wouldn't ask about).
+///
+/// It is derived, never stored: see [`FileInfo::kind`] and
+/// [`classify_extension`]. An unrecognized or absent extension is [`Other`],
+/// and both sides treat that identically — no fallback ever second-guesses it
+/// from the content.
+///
+/// [`Other`]: FileKind::Other
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileKind {
+    /// A raster image the daemon can decode and downscale (png/jpeg/gif/…).
+    Image,
+    /// An SVG. Kept distinct from [`Image`](FileKind::Image) because it needs a
+    /// vector rasterizer on the daemon and dedicated handling in the UI.
+    Svg,
+    /// A PDF; the daemon renders its first page to a thumbnail.
+    Pdf,
+    /// A video container the daemon can pull a frame from.
+    Video,
+    /// Markdown. A first-class refinement of [`Text`](FileKind::Text): the
+    /// daemon still previews it as a text snippet, but clients render it
+    /// richly.
+    Markdown,
+    /// Plain text / code / markup the daemon can snippet and clients render as
+    /// text.
+    Text,
+    /// Anything else: unrecognized or extension-less. Not previewable.
+    Other,
+}
+
+/// Classify a lowercase, dot-less file extension into a [`FileKind`].
+///
+/// The single source of truth for the extension → kind mapping. `Markdown` is
+/// matched ahead of the general text set so its extensions resolve to
+/// [`FileKind::Markdown`], not [`FileKind::Text`]; every other arm is disjoint.
+/// An unrecognized (or empty) extension is [`FileKind::Other`].
+pub fn classify_extension(extension: &str) -> FileKind {
+    match extension {
+        // Raster images the daemon's `image` crate can decode.
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "ico" => FileKind::Image,
+        "svg" => FileKind::Svg,
+        "pdf" => FileKind::Pdf,
+        // Containers ffmpeg can pull a frame from.
+        "mp4" | "m4v" | "mov" | "mkv" | "webm" | "avi" | "wmv" | "flv" | "mpg" | "mpeg" | "3gp"
+        | "ogv" => FileKind::Video,
+        // Markdown: a first-class refinement of text, matched before it.
+        "md" | "markdown" => FileKind::Markdown,
+        // Common text / code / markup.
+        "txt" | "log" | "json" | "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf" | "csv"
+        | "tsv" | "xml" | "html" | "htm" | "css" | "rs" | "py" | "js" | "ts" | "tsx" | "jsx"
+        | "c" | "h" | "cpp" | "hpp" | "cc" | "java" | "kt" | "go" | "rb" | "php" | "sh"
+        | "bash" | "zsh" | "sql" | "swift" | "dart" | "lua" | "pl" => FileKind::Text,
+        _ => FileKind::Other,
+    }
+}
+
 /// A file as presented to the UI: its id, managed relative path, and the
 /// content hash + number of its latest recorded version.
 ///
@@ -665,6 +729,17 @@ pub struct FileInfo {
     /// observed — i.e. its "latest change". Taken from the `observed_at` of the
     /// version with the highest `version_number`.
     pub latest_change_at: i64,
+}
+
+impl FileInfo {
+    /// This file's [`FileKind`], derived on demand from its logical name's
+    /// extension. Not stored: it is a pure function of [`logical_path`] and is
+    /// recomputed wherever it is needed (see [`classify_extension`]).
+    ///
+    /// [`logical_path`]: FileInfo::logical_path
+    pub fn kind(&self) -> FileKind {
+        classify_extension(&self.logical_path.extension())
+    }
 }
 
 macro_rules! make_id_type {
@@ -963,6 +1038,19 @@ impl LogicalPath {
             .find(|segment| !segment.is_empty())
             .unwrap_or("")
     }
+
+    /// The lowercase extension of the [`basename`](Self::basename), without the
+    /// dot, or `""` if the name has none. A leading-dot name (`.gitignore`) has
+    /// no extension. This is the sole input to file-type classification (see
+    /// [`FileInfo::kind`]).
+    pub fn extension(&self) -> String {
+        let name = self.basename();
+        match name.rfind('.') {
+            // A leading dot (dotfile) is not an extension separator.
+            Some(dot) if dot > 0 => name[dot + 1..].to_ascii_lowercase(),
+            _ => String::new(),
+        }
+    }
 }
 
 impl PhysicalPath {
@@ -1157,5 +1245,64 @@ mod relative_path_tests {
             PhysicalPath::try_new("/abs"),
             Err(RelativePathError::Absolute)
         );
+    }
+}
+
+#[cfg(test)]
+mod file_kind_tests {
+    use super::*;
+
+    fn kind_of(path: &str) -> FileKind {
+        FileInfo {
+            file_id: FileId::new(),
+            logical_path: LogicalPath::new(path),
+            content_hash: String::new(),
+            version_number: 1,
+            size: 0,
+            short_id_length: 1,
+            deleted: false,
+            first_recorded_at: 0,
+            latest_change_at: 0,
+        }
+        .kind()
+    }
+
+    #[test]
+    fn classifies_representative_extensions() {
+        assert_eq!(classify_extension("png"), FileKind::Image);
+        assert_eq!(classify_extension("svg"), FileKind::Svg);
+        assert_eq!(classify_extension("pdf"), FileKind::Pdf);
+        assert_eq!(classify_extension("mp4"), FileKind::Video);
+        assert_eq!(classify_extension("md"), FileKind::Markdown);
+        assert_eq!(classify_extension("markdown"), FileKind::Markdown);
+        assert_eq!(classify_extension("rs"), FileKind::Text);
+        assert_eq!(classify_extension("txt"), FileKind::Text);
+        assert_eq!(classify_extension("bin"), FileKind::Other);
+        assert_eq!(classify_extension(""), FileKind::Other);
+    }
+
+    #[test]
+    fn markdown_wins_over_text() {
+        // `md`/`markdown` must resolve to Markdown, never the general text arm.
+        assert_ne!(classify_extension("md"), FileKind::Text);
+        assert_ne!(classify_extension("markdown"), FileKind::Text);
+    }
+
+    #[test]
+    fn kind_derives_from_logical_name() {
+        assert_eq!(kind_of("photos/cat.JPG"), FileKind::Image);
+        assert_eq!(kind_of("notes/todo.md"), FileKind::Markdown);
+        assert_eq!(kind_of("deeply/nested/movie.MKV"), FileKind::Video);
+    }
+
+    #[test]
+    fn extension_edge_cases() {
+        // Dotfiles have no extension; an extension-less name is Other.
+        assert_eq!(LogicalPath::new(".gitignore").extension(), "");
+        assert_eq!(kind_of(".gitignore"), FileKind::Other);
+        assert_eq!(kind_of("README"), FileKind::Other);
+        // Trailing-dot and multi-dot names use the final segment.
+        assert_eq!(LogicalPath::new("archive.tar.gz").extension(), "gz");
+        assert_eq!(kind_of("archive.tar.gz"), FileKind::Other);
     }
 }

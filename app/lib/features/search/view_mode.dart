@@ -16,7 +16,12 @@ enum FileViewMode {
 
   /// One full-width tile per file: a large preview thumbnail, the name, and the
   /// file's tags below it.
-  large;
+  large,
+
+  /// One full-width tile per file with a much taller preview. Tapping the
+  /// preview fetches and shows the full-fidelity file inline (rather than the
+  /// small daemon thumbnail); tapping the name opens the file detail screen.
+  full;
 
   /// The next mode in cycle order, wrapping around (for a left swipe).
   FileViewMode get next =>

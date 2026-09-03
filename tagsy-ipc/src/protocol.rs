@@ -14,7 +14,7 @@ use tagsy_api::{
     ApiError, ApiEvent, BackupOutcome, DeletedRule, EditorRule, HomeSection, RetagSummary,
     SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,
 };
-use tagsy_core::{FileId, FileInfo, Preview, TagId, TagStyle};
+use tagsy_core::{FileId, FileInfo, FileKind, Preview, TagId, TagStyle};
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 /// A UI-facing API call, sent by a control client to the daemon.
@@ -54,6 +54,11 @@ pub enum ControlRequest {
     GetFile {
         file_id: FileId,
         deleted_rule: DeletedRule,
+    },
+    /// Classify a file's logical name into its `FileKind` from the extension
+    /// alone. Answered with [`ControlResponse::FileKind`].
+    Classify {
+        name: String,
     },
     /// Get a single tag by id. Answered with [`ControlResponse::Tag`] (or
     /// `Error(UnknownId)`).
@@ -229,6 +234,8 @@ pub enum ControlRequest {
 pub enum ControlResponse {
     /// A single file's info (answer to [`ControlRequest::GetFile`]).
     File(FileInfo),
+    /// A file's classified kind (answer to [`ControlRequest::Classify`]).
+    FileKind(FileKind),
     /// A single tag (answer to [`ControlRequest::GetTag`]).
     Tag(Tag),
     TagIds(Vec<TagId>),

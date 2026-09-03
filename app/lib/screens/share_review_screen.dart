@@ -18,6 +18,7 @@ import '../format/format.dart';
 import '../rust/api.dart' as tagsy;
 import '../session/session.dart';
 import '../widgets/file_preview.dart';
+import '../widgets/preview.dart';
 import '../widgets/section_header.dart';
 import '../widgets/tag_picker_sheet.dart';
 import '../widgets/tags_section.dart';
@@ -46,7 +47,16 @@ class _ShareReviewScreenState extends State<ShareReviewScreen> {
   /// so we can render chips and de-dupe against the picker.
   final Map<String, tagsy.TagEntry> _selected = {};
 
+  /// The daemon's classification of each shared file, keyed by path. Cached so
+  /// the `FutureBuilder` in [_buildPreview] doesn't re-ask on every rebuild.
+  /// These files aren't in the catalog yet (no `FileEntry.kind`), so the daemon
+  /// classifies their bare name.
+  final Map<String, Future<tagsy.FileKindEntry>> _kinds = {};
+
   bool _uploading = false;
+
+  Future<tagsy.FileKindEntry> _kindFor(String path) =>
+      _kinds[path] ??= _repository.classify(name: nameFor(path));
 
   Future<void> _addTag() async {
     final chosen = await TagPickerSheet.show(
@@ -152,7 +162,29 @@ class _ShareReviewScreenState extends State<ShareReviewScreen> {
     final body = File(path).existsSync()
         ? ConstrainedBox(
             constraints: const BoxConstraints(maxHeight: 360),
-            child: FilePreview(path: path),
+            child: PreviewFrame(
+              child: FutureBuilder<tagsy.FileKindEntry>(
+                future: _kindFor(path),
+                builder: (context, snapshot) {
+                  // Until the daemon answers, reserve the frame without a
+                  // renderer (the classification is a fast local round-trip).
+                  final kind = snapshot.data;
+                  if (kind == null) {
+                    return const SizedBox(
+                      height: 120,
+                      child: Center(
+                        child: SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      ),
+                    );
+                  }
+                  return FilePreview(path: path, kind: kind, scrollable: true);
+                },
+              ),
+            ),
           )
         : const ListTile(
             leading: Icon(Icons.error_outline),

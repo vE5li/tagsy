@@ -6,9 +6,12 @@
 //! invalidation, and peer fetch live elsewhere (`store/previews.rs`,
 //! `peer/relay/previews.rs`).
 //!
-//! This module owns the shared plumbing — the byte caps, the source reader, and
-//! the [`classify`] type-detector — and dispatches to one backend per kind,
-//! each in its own submodule with no shared state:
+//! This module owns the shared plumbing — the byte caps and the source reader —
+//! and dispatches to one backend per kind based on the file's authoritative
+//! [`FileKind`] (decided upstream from its extension by the shared
+//! [`tagsy_core::classify_extension`], the same classifier every client
+//! consults — there is no byte sniffing here). Each backend lives in its own
+//! submodule with no shared state:
 //!
 //! - [`image`] — raster images, via the `image` crate.
 //! - [`svg`] — vector images, rasterized via resvg then re-encoded as a raster
@@ -48,7 +51,7 @@ use image::generate_image;
 use pdf::generate_pdf;
 pub use pdf::render_pdf_to_png;
 use svg::generate_svg;
-use tagsy_core::Preview;
+use tagsy_core::{FileKind, Preview};
 use text::generate_text;
 use video::generate_video;
 
@@ -67,10 +70,6 @@ pub(super) const MAX_IMAGE_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum length, in bytes, of a text preview snippet. Truncated on a UTF-8
 /// character boundary, so the emitted `String` may be slightly shorter.
 pub(super) const MAX_TEXT_BYTES: usize = 2048;
-
-/// How many leading bytes of an unknown file we sniff to decide "is this
-/// text?". Enough to catch binary content early without reading whole files.
-const TEXT_SNIFF_BYTES: usize = 1024;
 
 /// Generate a preview from a file's content, described by `source`.
 ///
@@ -102,22 +101,18 @@ const TEXT_SNIFF_BYTES: usize = 1024;
 /// preview a peer (or a later retry) could still produce.
 ///
 /// Synchronous and CPU-bound — invoke via `spawn_blocking`.
-pub fn generate(source: &FileBytes, extension: Option<&str>) -> Option<Preview> {
-    // A small leading window is enough for magic-byte sniffing and the text
-    // heuristic; read only that to classify, so a huge video is not pulled into
-    // memory just to decide it is a video.
-    let header = match read_source_bounded(source, TEXT_SNIFF_BYTES) {
-        Ok(header) => header,
-        Err(error) => {
-            log::debug!("preview: could not read source header: {error}");
-            return None;
-        }
-    };
-
-    let preview = match classify(&header, extension) {
-        // Image, SVG, and PDF need the whole (bounded) content in memory to
-        // decode.
-        Kind::Image | Kind::Svg | Kind::Pdf => {
+///
+/// `kind` is the file's authoritative [`FileKind`], decided upstream from its
+/// logical name's extension by the shared [`classify_extension`] — the same
+/// classifier every client consults. There is no byte sniffing here: the daemon
+/// generates exactly the previews a client would ask about, and both agree from
+/// the extension alone.
+pub fn generate(source: &FileBytes, kind: FileKind) -> Option<Preview> {
+    let preview = match kind {
+        // Rasterizable content needs the whole (bounded) buffer in memory to
+        // decode. The `kind` already disambiguates image vs. SVG vs. PDF, so
+        // there is no re-classification pass.
+        FileKind::Image | FileKind::Svg | FileKind::Pdf => {
             let bytes = match read_source_bounded(source, MAX_IMAGE_SOURCE_BYTES) {
                 Ok(bytes) => bytes,
                 Err(error) => {
@@ -126,21 +121,28 @@ pub fn generate(source: &FileBytes, extension: Option<&str>) -> Option<Preview> 
                 }
             };
 
-            // Re-classify on the full buffer to disambiguate the three: a
-            // larger read cannot turn any of them into a non-visual kind, but
-            // the header sniff alone can misjudge PDF vs. image vs. SVG.
-            match classify(&bytes, extension) {
-                Kind::Pdf => generate_pdf(&bytes).unwrap_or(Preview::None),
-                Kind::Svg => generate_svg(&bytes).unwrap_or(Preview::None),
+            match kind {
+                FileKind::Pdf => generate_pdf(&bytes).unwrap_or(Preview::None),
+                FileKind::Svg => generate_svg(&bytes).unwrap_or(Preview::None),
                 _ => generate_image(&bytes).unwrap_or(Preview::None),
             }
         }
         // Video prefers the source's own on-disk path (no copy); only an
         // in-memory source is spilled to a temp file inside `generate_video`.
-        Kind::Video => generate_video(source).unwrap_or(Preview::None),
-        // The text snippet only ever needs the leading window we already read.
-        Kind::Text => generate_text(&header),
-        Kind::Other => Preview::None,
+        FileKind::Video => generate_video(source).unwrap_or(Preview::None),
+        // Text (and markdown, which the daemon previews as plain text) needs
+        // only a bounded leading window for the snippet.
+        FileKind::Text | FileKind::Markdown => {
+            let header = match read_source_bounded(source, MAX_TEXT_BYTES) {
+                Ok(header) => header,
+                Err(error) => {
+                    log::debug!("preview: could not read source header: {error}");
+                    return None;
+                }
+            };
+            generate_text(&header)
+        }
+        FileKind::Other => Preview::None,
     };
 
     Some(preview)
@@ -171,199 +173,15 @@ fn read_source_bounded(source: &FileBytes, max_len: usize) -> std::io::Result<Ve
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum Kind {
-    Image,
-    Svg,
-    Pdf,
-    Video,
-    Text,
-    Other,
-}
-
-/// Decide what kind of preview `bytes` warrant.
-///
-/// Magic-byte sniffing (`infer`) is tried first; on a hit its verdict wins. If
-/// it does not recognize the content, we fall back to the file's `extension`
-/// (from its logical name), then to a text heuristic. The extension fallback is
-/// what makes previews work for the content-addressed on-disk store (files are
-/// named by id, with no extension) when magic detection is inconclusive.
-pub(super) fn classify(bytes: &[u8], extension: Option<&str>) -> Kind {
-    if let Some(kind) = infer::get(bytes) {
-        if kind.matcher_type() == infer::MatcherType::Image {
-            return Kind::Image;
-        }
-        if kind.matcher_type() == infer::MatcherType::Video {
-            return Kind::Video;
-        }
-        if kind.mime_type() == "application/pdf" {
-            return Kind::Pdf;
-        }
-        // `infer` recognizes an XML prologue (`<?xml …?>`) as `text/xml`, and an
-        // SVG that opens with one lands here — so the SVG sniff must run before
-        // we give up on a recognized-but-un-previewable type. (An SVG *without*
-        // a prologue isn't recognized by `infer` at all and is caught by the
-        // fallback sniff further down.)
-        if looks_like_svg(bytes) {
-            return Kind::Svg;
-        }
-        // A recognized non-image, non-video, non-PDF, non-SVG type (archive,
-        // other document, ...). We don't preview these yet.
-        return Kind::Other;
-    }
-
-    // Magic detection was inconclusive. Try the extension.
-    if let Some(kind) = classify_by_extension(extension) {
-        return kind;
-    }
-
-    // SVG is XML text, so `infer` often does not flag it (no prologue) and it
-    // would otherwise be caught by the text heuristic below and turned into a
-    // snippet. Sniff its markup explicitly — this is what makes an
-    // extension-less SVG (the content-addressed on-disk store has no extension)
-    // render as an image rather than degrade to a text preview.
-    if looks_like_svg(bytes) {
-        return Kind::Svg;
-    }
-
-    // Last resort: treat it as text if a leading window is valid, mostly-
-    // printable UTF-8; otherwise give up.
-    if looks_like_text(bytes) {
-        Kind::Text
-    } else {
-        Kind::Other
-    }
-}
-
-/// SVG is XML, so it has no magic bytes; we look for an opening `<svg` tag in
-/// the sniff window, tolerating a leading XML declaration, a byte-order mark, a
-/// doctype, comments, and leading whitespace by simply scanning for the tag
-/// rather than requiring it first. The check is case-insensitive (`<SVG` is
-/// valid XML for the SVG namespace's conventional lowercase name is standard,
-/// but tools vary) and ASCII-only, which is safe because SVG's structural
-/// markup is ASCII regardless of any UTF-8 text content.
-fn looks_like_svg(bytes: &[u8]) -> bool {
-    let window = &bytes[..bytes.len().min(TEXT_SNIFF_BYTES)];
-
-    // Must be text-ish first: a NUL byte rules out XML.
-    if window.contains(&0) {
-        return false;
-    }
-
-    let needle = b"<svg";
-    window
-        .windows(needle.len())
-        .any(|slice| slice.eq_ignore_ascii_case(needle))
-}
-
-/// Map a lowercase file extension to a preview [`Kind`], or `None` for an
-/// unknown/absent extension.
-fn classify_by_extension(extension: Option<&str>) -> Option<Kind> {
-    let extension = extension?;
-    let kind = match extension {
-        // Raster images the `image` crate can decode.
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "ico" => Kind::Image,
-        "svg" => Kind::Svg,
-        "pdf" => Kind::Pdf,
-        // Containers ffmpeg can pull a frame from.
-        "mp4" | "m4v" | "mov" | "mkv" | "webm" | "avi" | "wmv" | "flv" | "mpg" | "mpeg" | "3gp"
-        | "ogv" => Kind::Video,
-        // Common text / code / markup.
-        "txt" | "md" | "markdown" | "log" | "json" | "yaml" | "yml" | "toml" | "ini" | "cfg"
-        | "conf" | "csv" | "tsv" | "xml" | "html" | "htm" | "css" | "rs" | "py" | "js" | "ts"
-        | "tsx" | "jsx" | "c" | "h" | "cpp" | "hpp" | "cc" | "java" | "kt" | "go" | "rb"
-        | "php" | "sh" | "bash" | "zsh" | "sql" | "swift" | "dart" | "lua" | "pl" => Kind::Text,
-        _ => return None,
-    };
-    Some(kind)
-}
-
-/// Heuristic: is the leading window of `bytes` valid UTF-8 with no NUL bytes
-/// and few control characters? Empty input counts as text (an empty snippet).
-fn looks_like_text(bytes: &[u8]) -> bool {
-    if bytes.is_empty() {
-        return true;
-    }
-
-    let window = &bytes[..bytes.len().min(TEXT_SNIFF_BYTES)];
-
-    // A NUL byte is the classic binary tell.
-    if window.contains(&0) {
-        return false;
-    }
-
-    // Decode as UTF-8 up to the last complete character in the window (the
-    // window may split a multi-byte char at its tail; that's fine).
-    let text = match std::str::from_utf8(window) {
-        Ok(text) => text,
-        Err(error) => match std::str::from_utf8(&window[..error.valid_up_to()]) {
-            Ok(text) if error.valid_up_to() > 0 => text,
-            _ => return false,
-        },
-    };
-
-    // Reject if too many control characters (excluding common whitespace).
-    let control = text
-        .chars()
-        .filter(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
-        .count();
-    let total = text.chars().count().max(1);
-    (control * 100 / total) < 5
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Wrap raw bytes as an in-memory [`FileBytes`] source for the tests, which
-    /// exercise the byte-decoding paths (image/PDF/text/classification). The
-    /// file-backed path differs only in *where* the bytes come from, which is
-    /// covered by the read helper. Shared by the backend submodules' tests.
+    /// exercise the byte-decoding paths (image/PDF/text). The file-backed path
+    /// differs only in *where* the bytes come from, which is covered by the
+    /// read helper. Shared by the backend submodules' tests.
     pub(super) fn from_bytes(bytes: &[u8]) -> FileBytes {
         FileBytes::InMemory(bytes.to_vec())
-    }
-
-    #[test]
-    fn extension_classifies_when_magic_bytes_are_inconclusive() {
-        // Bytes that `infer` does not recognize, but whose extension does.
-        let bytes = b"\x01\x02\x03not a known magic\x04\x05";
-        assert!(matches!(classify(bytes, Some("mp4")), Kind::Video));
-        assert!(matches!(classify(bytes, Some("pdf")), Kind::Pdf));
-        assert!(matches!(classify(bytes, Some("jpg")), Kind::Image));
-        assert!(matches!(classify(bytes, Some("svg")), Kind::Svg));
-        assert!(matches!(classify(bytes, Some("json")), Kind::Text));
-        // Unknown extension + unknown bytes → Other (not text, since NUL-free
-        // but not clearly text either; falls through to the text heuristic).
-        assert!(matches!(classify(bytes, Some("bin")), Kind::Other));
-    }
-
-    #[test]
-    fn magic_bytes_win_over_extension() {
-        // A real PNG whose extension lies ("txt"); magic detection must win so
-        // we still produce an image preview, not a text snippet.
-        let mut png = Vec::new();
-        ::image::DynamicImage::ImageRgb8(::image::RgbImage::from_pixel(
-            10,
-            10,
-            ::image::Rgb([1, 2, 3]),
-        ))
-        .write_to(
-            &mut std::io::Cursor::new(&mut png),
-            ::image::ImageFormat::Png,
-        )
-        .unwrap();
-        assert!(matches!(classify(&png, Some("txt")), Kind::Image));
-    }
-
-    #[test]
-    fn extension_is_case_insensitive_via_caller() {
-        // `classify` expects a lowercase extension; the helper that extracts it
-        // lowercases. Verify the table matches lowercase.
-        assert!(matches!(
-            classify_by_extension(Some("jpeg")),
-            Some(Kind::Image)
-        ));
-        assert!(classify_by_extension(Some("JPEG")).is_none());
-        assert!(classify_by_extension(None).is_none());
     }
 }

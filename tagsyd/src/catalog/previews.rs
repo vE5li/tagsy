@@ -195,17 +195,22 @@ pub(crate) async fn resolve_preview(
 /// Only compiled with the `preview-generation` feature; all call sites are
 /// guarded by `can_generate`, which is `false` without it.
 /// Look up a file's lowercase extension (no dot, e.g. `"jpg"`) from its logical
-/// name in the main DB, for use as a preview type-detection hint.
+/// name in the main DB — the sole input to preview-type classification.
 ///
 /// Returns `None` if the file is unknown, has no extension, or the DB read
-/// fails — the generator then relies on magic-byte sniffing alone.
+/// fails. Classification then sees an empty extension and yields
+/// [`FileKind::Other`](tagsy_core::FileKind::Other) (no preview) — the same
+/// answer a client reaches from the same name.
 #[cfg(feature = "preview-generation")]
 pub(crate) fn preview_extension_for(database: &CatalogStore, file_id: FileId) -> Option<String> {
     let logical_path = database.logical_path_for_file_id(file_id).ok()?;
 
-    std::path::Path::new(logical_path.as_str())
-        .extension()
-        .map(|extension| extension.to_string_lossy().to_lowercase())
+    let extension = logical_path.extension();
+    if extension.is_empty() {
+        None
+    } else {
+        Some(extension)
+    }
 }
 
 #[cfg(feature = "preview-generation")]
@@ -214,17 +219,15 @@ async fn generate_preview_from_local(
     file_bytes: FileBytes,
     extension: Option<String>,
 ) -> Option<Preview> {
-    // `preview::generate` reads its own source: it pulls a bounded prefix into
-    // memory for classification and image/PDF/text, and hands ffmpeg the
-    // file-backed source's path directly for video (no read-through). So we no
-    // longer read the bytes here — we move the `FileBytes` into the blocking
-    // task. The read + decode/resize/encode all happen on the blocking pool.
+    // Classify from the logical extension alone — the same authoritative,
+    // byte-free decision every client makes (see `tagsy_core::classify_extension`).
+    // `preview::generate` then reads its own source: a bounded prefix for
+    // image/PDF/text, or ffmpeg reading the file-backed source's path directly
+    // for video (no read-through). So we no longer read the bytes here — we move
+    // the `FileBytes` into the blocking task.
+    let kind = tagsy_core::classify_extension(extension.as_deref().unwrap_or(""));
     let blocking_start = std::time::Instant::now();
-    match tokio::task::spawn_blocking(move || {
-        crate::preview::generate(&file_bytes, extension.as_deref())
-    })
-    .await
-    {
+    match tokio::task::spawn_blocking(move || crate::preview::generate(&file_bytes, kind)).await {
         // An authoritative result (including `Some(Preview::None)` for
         // un-previewable content).
         Ok(Some(preview)) => {

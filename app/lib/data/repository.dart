@@ -12,6 +12,10 @@
 // data classes the UI reads directly, so re-wrapping them would buy nothing.
 // The one thing it hides is the handle itself.
 
+import 'dart:async';
+import 'dart:collection';
+import 'dart:io';
+
 import '../rust/api.dart' as tagsy;
 
 /// A connected backend as a set of named operations.
@@ -156,12 +160,85 @@ class TagsyRepository {
   Future<void> restoreFile({required String fileId}) =>
       _client.restoreFile(fileId: fileId);
 
-  /// Fetch a file's content on demand and return the path to a daemon-owned
-  /// temp file holding the bytes (move semantics — the caller must consume it).
-  Future<String> fetchFile({
+  /// Most-recently-fetched full files, keyed by content hash (which pins the
+  /// exact bytes), most-recent last. Fetching is a peer round-trip, so we keep
+  /// the [_fetchedCacheLimit] most recent and reuse them across previews,
+  /// share, and download. Evicted entries have their temp dir deleted; the
+  /// daemon also bulk-wipes the temp dir on its next start.
+  final LinkedHashMap<String, String> _fetchedCache = LinkedHashMap();
+
+  /// How many fetched full files to keep on disk for reuse before evicting the
+  /// least-recently-used one.
+  static const int _fetchedCacheLimit = 20;
+
+  /// Broadcasts the content hash of a file whose full bytes just landed in
+  /// [_fetchedCache], so previews already on screen can swap from the thumbnail
+  /// to the full render without being reopened.
+  final StreamController<String> _fetchedController =
+      StreamController<String>.broadcast();
+
+  /// See [_fetchedController]. Listeners should filter to the content hash they
+  /// care about and then re-read [cachedFetchedPath].
+  Stream<String> get fetchedFiles => _fetchedController.stream;
+
+  /// The already-fetched local path for [contentHash], if one is cached and
+  /// still on disk, else `null`. Synchronous so a widget can reuse a fetched
+  /// full-res file immediately on build without awaiting. A hit is *not* moved
+  /// to most-recent — that only happens on an explicit [fetchFileCached].
+  String? cachedFetchedPath(String contentHash) {
+    final path = _fetchedCache[contentHash];
+    if (path == null) return null;
+    if (!File(path).existsSync()) {
+      // Vanished underneath us (daemon restart wiped the temp dir); forget it.
+      _fetchedCache.remove(contentHash);
+      return null;
+    }
+    return path;
+  }
+
+  /// Fetch a file's full content to a daemon-owned temp path and return it,
+  /// reusing a previously-fetched copy for the same content hash when available.
+  ///
+  /// The returned path is owned by the cache (kept for reuse, deleted on LRU
+  /// eviction) — callers must **copy**, never move, the file. On a miss this
+  /// pulls the bytes (from a peer if needed) and records them, evicting and
+  /// deleting the least-recently-used entry once past [_fetchedCacheLimit].
+  Future<String> fetchFileCached({
     required String fileId,
     required String expectedHash,
-  }) => _client.fetchFile(fileId: fileId, expectedHash: expectedHash);
+  }) async {
+    final cached = cachedFetchedPath(expectedHash);
+    if (cached != null) {
+      // Move to most-recent.
+      _fetchedCache.remove(expectedHash);
+      _fetchedCache[expectedHash] = cached;
+      return cached;
+    }
+    final path = await _client.fetchFile(
+      fileId: fileId,
+      expectedHash: expectedHash,
+    );
+    _fetchedCache[expectedHash] = path;
+    _evictFetchedOverLimit();
+    // Let any other preview of this content swap to the full render now.
+    if (_fetchedController.hasListener) _fetchedController.add(expectedHash);
+    return path;
+  }
+
+  /// Delete and forget least-recently-used fetched files past the cache limit.
+  void _evictFetchedOverLimit() {
+    while (_fetchedCache.length > _fetchedCacheLimit) {
+      final oldestHash = _fetchedCache.keys.first;
+      final oldestPath = _fetchedCache.remove(oldestHash);
+      if (oldestPath == null) continue;
+      try {
+        // Delete the per-request `<uuid>` parent dir, not just the file.
+        File(oldestPath).parent.deleteSync(recursive: true);
+      } catch (_) {
+        // Best-effort; the daemon bulk-wipes the temp dir on next start.
+      }
+    }
+  }
 
   // --- Editing --------------------------------------------------------------
 
@@ -190,6 +267,12 @@ class TagsyRepository {
   /// The preview for a file's current content.
   Future<tagsy.PreviewEntry> getPreview({required String fileId}) =>
       _client.getPreview(fileId: fileId);
+
+  /// Classify a file's logical [name] into its [tagsy.FileKindEntry] — the
+  /// daemon's authoritative, byte-free decision. For files not yet in the
+  /// catalog (share-review candidates); catalog files carry `FileEntry.kind`.
+  Future<tagsy.FileKindEntry> classify({required String name}) =>
+      _client.classify(name: name);
 
   /// Purge the daemon's cached previews; returns how many were removed.
   Future<BigInt> purgePreviews() => _client.purgePreviews();

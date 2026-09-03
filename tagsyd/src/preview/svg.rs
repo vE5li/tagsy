@@ -99,7 +99,7 @@ pub(super) fn generate_svg(bytes: &[u8]) -> Option<Preview> {
 
 #[cfg(test)]
 mod tests {
-    use tagsy_core::Preview;
+    use tagsy_core::{FileKind, Preview};
 
     use super::super::tests::from_bytes;
     use super::super::{MAX_IMAGE_EDGE, generate};
@@ -111,8 +111,8 @@ mod tests {
     </svg>"#;
 
     #[test]
-    fn svg_with_extension_becomes_image_preview() {
-        match generate(&from_bytes(WIDE_SVG), Some("svg")) {
+    fn svg_kind_becomes_image_preview() {
+        match generate(&from_bytes(WIDE_SVG), FileKind::Svg) {
             Some(Preview::Image {
                 bytes,
                 width,
@@ -127,41 +127,27 @@ mod tests {
         }
     }
 
-    /// The content-addressed store names files by id, so the SVG often arrives
-    /// with no extension. The `<svg` content sniff must still route it to the
-    /// SVG backend rather than letting it degrade to a text-snippet preview.
-    #[test]
-    fn svg_without_extension_is_detected_by_content() {
-        match generate(&from_bytes(WIDE_SVG), None) {
-            Some(Preview::Image { width, height, .. }) => {
-                assert!(width <= MAX_IMAGE_EDGE && height <= MAX_IMAGE_EDGE);
-            }
-            other => panic!("expected image preview from content sniff, got {other:?}"),
-        }
-    }
-
     /// An SVG preceded by an XML declaration (the common real-world shape) must
-    /// still be recognized — the sniff scans the window rather than requiring
-    /// `<svg` at byte zero.
+    /// still render, routed by its `.svg` extension.
     #[test]
-    fn svg_with_xml_declaration_is_detected() {
+    fn svg_with_xml_declaration_renders() {
         let with_decl = br#"<?xml version="1.0" encoding="UTF-8"?>
             <svg xmlns="http://www.w3.org/2000/svg" width="60" height="60">
                 <circle cx="30" cy="30" r="30" fill="red"/>
             </svg>"#;
         assert!(matches!(
-            generate(&from_bytes(with_decl), None),
+            generate(&from_bytes(with_decl), FileKind::Svg),
             Some(Preview::Image { .. })
         ));
     }
 
-    /// Malformed SVG-ish bytes that pass the sniff but fail to parse must yield
-    /// an authoritative "no preview", not a panic or a spurious image.
+    /// Malformed SVG-ish bytes that fail to parse must yield an authoritative
+    /// "no preview", not a panic or a spurious image.
     #[test]
     fn broken_svg_yields_no_preview() {
         let broken = b"<svg this is not valid xml at all <<< >>>";
         assert!(matches!(
-            generate(&from_bytes(broken), Some("svg")),
+            generate(&from_bytes(broken), FileKind::Svg),
             Some(Preview::None)
         ));
     }

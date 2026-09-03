@@ -10,7 +10,7 @@ use std::future::Future;
 use std::path::PathBuf;
 
 use tagsy_core::state::Change;
-use tagsy_core::{FileId, FileInfo, Preview, TagId, TagStyle};
+use tagsy_core::{FileId, FileInfo, FileKind, Preview, TagId, TagStyle};
 use tokio::sync::broadcast;
 
 use crate::connections::{ConnectedPeer, ConnectionEvent};
@@ -74,6 +74,12 @@ pub trait Backend {
         file_id: FileId,
         deleted_rule: DeletedRule,
     ) -> impl Future<Output = Result<FileInfo, ApiError>> + Send;
+
+    /// Classify a file's logical `name` into its [`FileKind`], from the
+    /// extension alone. The authoritative, byte-free classification the daemon
+    /// applies everywhere — clients call this for a file not (yet) in the
+    /// catalog, where no [`FileInfo::kind`] is available.
+    fn classify(&self, name: String) -> impl Future<Output = Result<FileKind, ApiError>> + Send;
 
     /// Get a single tag by id (`UnknownId` if unknown). See [`Self::get_file`]
     /// for the `deleted_rule` semantics.

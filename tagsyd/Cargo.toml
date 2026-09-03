@@ -12,18 +12,22 @@ name = "tagsyd"
 path = "src/main.rs"
 
 [features]
-# The local preview *generation* stack: image decode/resize (`image`), content
-# sniffing (`infer`), and PDF first-page rasterization (`pdfium-render`, which
-# statically links libpdfium). A build without this feature cannot generate
-# previews and must run with `preview_generation_policy = "Never"` (enforced at
-# startup); it can still cache, serve, and relay previews obtained from peers.
+# The local preview *generation* stack: image decode/resize (`image`) and PDF
+# first-page rasterization (`pdfium-render`, which statically links libpdfium).
+# A build without this feature cannot generate previews and must run with
+# `preview_generation_policy = "Never"` (enforced at startup); it can still
+# cache, serve, and relay previews obtained from peers.
+#
+# File-type classification (which preview backend, if any) is decided by the
+# shared `tagsy_core::classify_extension` from the file's extension alone — no
+# byte sniffing — so no dependency is needed for it.
 #
 # Enabled by default so the desktop/server build gets previews out of the box.
 # A minimal client (e.g. the Android bridge) can build with
 # `--no-default-features` to drop the `image`/`pdfium`/`resvg` dependencies
 # entirely.
 default = ["preview-generation"]
-preview-generation = ["dep:image", "dep:infer", "dep:pdfium-render", "dep:resvg"]
+preview-generation = ["dep:image", "dep:pdfium-render", "dep:resvg"]
 
 [dependencies]
 base64 = { workspace = true }
@@ -52,7 +56,6 @@ log = { workspace = true }
 walkdir = { workspace = true }
 zstd = { workspace = true }
 image = { workspace = true, optional = true }
-infer = { workspace = true, optional = true }
 pdfium-render = { workspace = true, optional = true }
 resvg = { workspace = true, optional = true }
 

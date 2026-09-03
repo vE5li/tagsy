@@ -202,21 +202,10 @@ impl Drop for TempVideo {
 
 #[cfg(test)]
 mod tests {
-    use tagsy_core::Preview;
+    use tagsy_core::{FileKind, Preview};
 
+    use super::super::generate;
     use super::super::tests::from_bytes;
-    use super::super::{Kind, classify, generate};
-
-    #[test]
-    fn mp4_is_classified_as_video() {
-        // Minimal MP4 `ftyp` box (isom brand) — enough for `infer`'s magic
-        // detection, which is all `classify` relies on.
-        let mp4: &[u8] = &[
-            0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0x00, 0x00,
-            0x02, 0x00, b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
-        ];
-        assert!(matches!(classify(mp4, None), Kind::Video));
-    }
 
     #[test]
     fn video_preview_degrades_gracefully_without_ffmpeg() {
@@ -229,7 +218,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0x00, 0x00,
             0x02, 0x00, b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
         ];
-        match generate(&from_bytes(mp4), None) {
+        match generate(&from_bytes(mp4), FileKind::Video) {
             Some(Preview::None) => {}
             Some(Preview::Image { .. }) => {} // real ffmpeg somehow decoded it — fine
             other => panic!("unexpected preview kind for video: {other:?}"),

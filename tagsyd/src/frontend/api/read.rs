@@ -4,7 +4,7 @@
 //! handle (see [`ApiService::open_read`]) and drops it before returning; a
 //! `&CatalogStore` is never held across an `.await`.
 
-use tagsy_core::{FileId, FileInfo, TagId};
+use tagsy_core::{FileId, FileInfo, FileKind, LogicalPath, TagId, classify_extension};
 use tokio::sync::oneshot;
 
 use super::{
@@ -26,6 +26,15 @@ impl ApiService {
     pub fn resolve_file_id(&self, prefix: &str) -> Result<FileId, ApiError> {
         let database = self.open_read()?;
         Ok(database.resolve_file_id_prefix(prefix)?)
+    }
+
+    /// Classify a file's logical `name` into its [`FileKind`] from the
+    /// extension alone — the shared, authoritative, byte-free
+    /// classification. Pure: no DB handle, no I/O. Used for files not yet
+    /// in the catalog (where no [`tagsy_core::FileInfo::kind`] exists), so
+    /// both agree from the same name.
+    pub fn classify(&self, name: &str) -> Result<FileKind, ApiError> {
+        Ok(classify_extension(&LogicalPath::new(name).extension()))
     }
 
     /// Resolve a full-or-short tag id `prefix` (as displayed by `list_tags`'s

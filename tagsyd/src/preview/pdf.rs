@@ -250,17 +250,10 @@ pub fn render_pdf_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use tagsy_core::Preview;
+    use tagsy_core::{FileKind, Preview};
 
     use super::super::tests::from_bytes;
-    use super::super::{Kind, MAX_IMAGE_EDGE, classify, generate};
-
-    #[test]
-    fn pdf_is_classified_as_pdf() {
-        // Minimal but valid-enough PDF header; classification is by magic bytes.
-        let pdf = b"%PDF-1.4\n1 0 obj<<>>endobj\n";
-        assert!(matches!(classify(pdf, None), Kind::Pdf));
-    }
+    use super::super::{MAX_IMAGE_EDGE, generate};
 
     #[test]
     fn pdf_preview_renders_or_degrades_gracefully() {
@@ -275,7 +268,7 @@ mod tests {
 3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\n\
 trailer<</Root 1 0 R>>\n%%EOF";
 
-        match generate(&from_bytes(ONE_PAGE_PDF), None) {
+        match generate(&from_bytes(ONE_PAGE_PDF), FileKind::Pdf) {
             Some(Preview::Image {
                 bytes,
                 width,
