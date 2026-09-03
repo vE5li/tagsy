@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../rust/api.dart' show FileKindEntry;
 
@@ -9,12 +10,12 @@ import '../rust/api.dart' show FileKindEntry;
 ///
 /// This is the leaf renderer of the preview system: given a path to bytes on
 /// disk and the daemon-decided [FileKindEntry], it draws them according to that
-/// kind (image / text / markdown). It performs no fetching, and — crucially —
-/// no classification: the kind is decided by the daemon and handed in. It knows
-/// nothing about the catalog — the [Preview] widget decides *when* local bytes
-/// are available and hands them here. Types with no local renderer (pdf / video
-/// / svg / other) render a typed empty state rather than a broken view; those
-/// types are shown as daemon thumbnails by [Preview], not here.
+/// kind (image / svg / text / markdown). It performs no fetching, and —
+/// crucially — no classification: the kind is decided by the daemon and handed
+/// in. It knows nothing about the catalog — the [Preview] widget decides *when*
+/// local bytes are available and hands them here. Types with no local renderer
+/// (pdf / video / other) render a typed empty state rather than a broken view;
+/// those types are shown as daemon thumbnails by [Preview], not here.
 class FilePreview extends StatelessWidget {
   /// The shared maximum height for a bounded inline preview — used by the file
   /// detail screen and the full-tile search view so a tapped-open preview is
@@ -78,6 +79,14 @@ class FilePreview extends StatelessWidget {
           ),
         );
 
+      case FileKindEntry.svg:
+        // Full width, contained to preserve aspect — the vector counterpart of
+        // the image arm. `flutter_svg` decodes and rasterizes at display size.
+        return SizedBox(
+          width: double.infinity,
+          child: SvgPicture.file(file, fit: BoxFit.contain),
+        );
+
       case FileKindEntry.markdown:
         return _AsyncText(
           loadKey: path,
@@ -113,9 +122,8 @@ class FilePreview extends StatelessWidget {
                 ),
         );
 
-      // No local renderer; `Preview` shows pdf/video/svg as daemon thumbnails
-      // and doesn't route them here (this is the share-review / defensive path).
-      case FileKindEntry.svg:
+      // No local renderer; `Preview` shows pdf/video as daemon thumbnails and
+      // doesn't route them here (this is the share-review / defensive path).
       case FileKindEntry.pdf:
       case FileKindEntry.video:
       case FileKindEntry.other:

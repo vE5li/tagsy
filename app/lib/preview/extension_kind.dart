@@ -34,15 +34,15 @@ enum PreviewStrategy {
 
 /// The [PreviewStrategy] for a file [kind].
 ///
-/// SVG is rendered by the daemon into an image thumbnail (the app has no vector
-/// renderer of its own), so it takes the [PreviewStrategy.thumbnailOnly] path
-/// alongside pdf and video.
+/// SVG renders locally (via `flutter_svg`) once its bytes are fetched, exactly
+/// like a raster image; the daemon's resvg thumbnail is the placeholder shown
+/// until then. Pdf and video have no local renderer, so they stay
+/// thumbnail-only.
 PreviewStrategy previewStrategyFor(FileKindEntry kind) => switch (kind) {
   FileKindEntry.image ||
+  FileKindEntry.svg ||
   FileKindEntry.text ||
   FileKindEntry.markdown => PreviewStrategy.renderLocally,
-  FileKindEntry.svg ||
-  FileKindEntry.pdf ||
-  FileKindEntry.video => PreviewStrategy.thumbnailOnly,
+  FileKindEntry.pdf || FileKindEntry.video => PreviewStrategy.thumbnailOnly,
   FileKindEntry.other => PreviewStrategy.none,
 };

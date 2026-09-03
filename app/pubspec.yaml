@@ -56,6 +56,13 @@ dependencies:
   # manual <provider> is needed here.
   share_plus: ^10.1.4
   flutter_markdown_plus: ^1.0.3
+  # Renders the real bytes of an SVG file inline once tap-to-fetch has pulled
+  # them (SvgPicture.file), the vector counterpart to Image.file for rasters.
+  # The daemon still generates the small SVG *thumbnail* (via resvg) shown until
+  # the full file arrives; this renders the fetched file at full fidelity. The
+  # two rasterizers can differ on exotic SVG features, same trade-off as
+  # markdown (daemon snippet vs. rich local render).
+  flutter_svg: ^2.0.10+1
   # HSV color wheel + alpha slider + hex input for the tag style editor's color
   # fields. Purely a UI convenience: it works in `Color`, which we round-trip
   # through the `#RRGGBBAA` strings the core stores (parseTagColor / the editor's
