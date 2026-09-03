@@ -66,7 +66,7 @@ pub(super) const MAX_IMAGE_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Maximum length, in bytes, of a text preview snippet. Truncated on a UTF-8
 /// character boundary, so the emitted `String` may be slightly shorter.
-pub(super) const MAX_TEXT_BYTES: usize = 256;
+pub(super) const MAX_TEXT_BYTES: usize = 2048;
 
 /// How many leading bytes of an unknown file we sniff to decide "is this
 /// text?". Enough to catch binary content early without reading whole files.
