@@ -389,6 +389,17 @@ pub(crate) async fn apply_change(
             // per-sync-directory row is already gone) and re-broadcast the
             // change, causing tombstones to pile up across the mesh on
             // every reconnect.
+            //
+            // A `None` state means the file is genuinely unknown to us. A live
+            // `Change::FileDeleted` carries only `file_id`/`deleted_at` — no
+            // path or version — so we cannot reconstruct a faithful tombstoned
+            // row from it here (that needs the manifest's fuller data, handled
+            // by `catalog_tombstone`). This happens when a delete races ahead of
+            // its create over the wire, or a relay forwards a delete for a file
+            // the middle node never cataloged. Don't fabricate a partial row and
+            // don't silently conflate it with the LWW-superseded case below: log
+            // it and let it converge on the next manifest exchange, which does
+            // carry the path/version needed to reconstruct the tombstone.
             match database.file_deletion_state(*file_id) {
                 Ok(Some(state)) if state.deleted => {
                     log::debug!(
@@ -397,7 +408,15 @@ pub(crate) async fn apply_change(
                     );
                     return Some(false);
                 }
-                Ok(_) => {}
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    log::debug!(
+                        "FileDeleted for unknown file {}; cannot reconstruct a row from the wire \
+                         delete alone — will converge via the next manifest exchange",
+                        file_id.to_string()
+                    );
+                    return Some(false);
+                }
                 Err(error) => {
                     log::error!(
                         "FileDeleted: failed to read deletion state for {}: {:?}; skipping",
@@ -648,6 +667,80 @@ pub(crate) async fn catalog_file(
             content_hash,
             size,
         }
+    };
+    super::forward::forward_to_peers(configuration, runtime_configuration, &change, &origin).await;
+}
+
+/// `CatalogCommand::CatalogTombstone`: reconstruct a tombstoned file (row +
+/// latest version, both already deleted) for a file this device has never seen
+/// but a peer advertises as deleted, then forward the delete onward.
+///
+/// The sibling of [`catalog_file`] for the delete case: a file created *and*
+/// deleted on another device while we were offline arrives only as a tombstone
+/// in the manifest, with no preceding create for the live-delete path to build
+/// on. Without this the tombstone is dropped and our catalog stays permanently
+/// unaware of a file the rest of the mesh knows about (surfacing as a recurring
+/// `MissingFile` placement-sweep line on every reconnect).
+///
+/// No bytes are pulled (a deleted file needs none) and no sync-directory
+/// placement runs (there is nothing live to place). We only record the catalog
+/// row and forward.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn catalog_tombstone(
+    configuration: &Configuration,
+    runtime_configuration: &Arc<RwLock<RuntimeConfiguration>>,
+    database: &mut CatalogStore,
+    file_id: tagsy_core::FileId,
+    logical_path: tagsy_core::LogicalPath,
+    logical_path_modified_at: i64,
+    content_hash: String,
+    size: u64,
+    observed_at: i64,
+    deleted_at: i64,
+    restored_at: i64,
+    origin: ChangeOrigin,
+) {
+    match database.add_tombstoned_file(
+        file_id,
+        &logical_path,
+        logical_path_modified_at,
+        &content_hash,
+        size as i64,
+        observed_at,
+        super::forward::version_origin(&origin),
+        deleted_at,
+        restored_at,
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            // The file already had a row (a create raced ahead of this
+            // reconstruction, or a duplicate manifest frame). The existing
+            // delete/LWW paths own it; nothing to do and nothing to forward.
+            log::debug!(
+                "CatalogTombstone: file {} already known; skipping reconstruction",
+                file_id.to_string()
+            );
+            return;
+        }
+        Err(error) => {
+            log::error!(
+                "CatalogTombstone: failed to reconstruct tombstone for {} ({}): {:?}",
+                file_id.to_string(),
+                logical_path,
+                error
+            );
+            return;
+        }
+    }
+
+    // Forward the delete onward so the tombstone propagates transitively across
+    // the peer tree (mirroring `catalog_file`'s forward): a hub that catches up
+    // an offline-created-then-deleted file from one peer must relay the delete
+    // to its other peers, which never saw a live `FileDeleted` for it. The
+    // `deleted_at` carries the LWW clock unchanged.
+    let change = Change::FileDeleted {
+        file_id,
+        deleted_at,
     };
     super::forward::forward_to_peers(configuration, runtime_configuration, &change, &origin).await;
 }

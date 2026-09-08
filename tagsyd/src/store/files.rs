@@ -132,6 +132,104 @@ impl CatalogStore {
         Ok(())
     }
 
+    /// Insert a file that arrives already **tombstoned**, together with its
+    /// latest known version — the "peer announced a delete for a file we never
+    /// saw" case (a file created *and* deleted on another device while this one
+    /// was offline). Reconstructs a complete row so every catalog holds every
+    /// file, deleted or not, rather than silently dropping the tombstone.
+    ///
+    /// Unlike [`add_file`](Self::add_file) +
+    /// [`record_version`](Self::record_version), this does **not** stamp
+    /// the version's `observed_at` with `now()`: it uses the manifest's
+    /// `observed_at` verbatim, so the reconstructed row keeps the
+    /// same three-way last-writer-wins ordering it has on the announcing peer
+    /// (`deleted_at > observed_at`). Stamping `now()` here would make the
+    /// delete lose LWW and resurrect the file locally.
+    ///
+    /// Idempotent: a no-op (`Ok(false)`) if the file already has a row — the
+    /// live delete path / manifest LWW handle an *existing* file. Only the
+    /// genuinely-unknown file is created here. `deleted` is forced to 1
+    /// regardless of clock comparison: the caller has already established (via
+    /// `plan_file_sync`) that this is a delete to adopt, and a brand-new row
+    /// has no local edit to out-vote it.
+    ///
+    /// Tolerates an **orphaned version**: a `file_versions_v1` row that exists
+    /// without its `files_v2` row (legacy debris from the very bug this
+    /// reconstruction repairs — an earlier code path recorded a version for a
+    /// peer-deleted unknown file but never created the file row). The version
+    /// number is computed as `MAX(version_number) + 1` (like
+    /// [`record_version`](Self::record_version)) rather than hardcoded to 1, so
+    /// an orphaned version does not collide, and the insert is `OR IGNORE` so a
+    /// bit-identical duplicate is a harmless no-op instead of aborting the
+    /// transaction.
+    ///
+    /// Returns `true` if a new tombstoned row was created, `false` if the file
+    /// already existed (nothing written).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_tombstoned_file(
+        &mut self,
+        file_id: FileId,
+        logical_path: &LogicalPath,
+        logical_path_modified_at: i64,
+        content_hash: &str,
+        size: i64,
+        observed_at: i64,
+        origin: &str,
+        deleted_at: i64,
+        restored_at: i64,
+    ) -> Result<bool, DatabaseError> {
+        if self.file_exists(file_id)? {
+            return Ok(false);
+        }
+
+        let transaction = self.connection.transaction()?;
+
+        transaction.execute(
+            "INSERT INTO files_v2 (id, logical_path, logical_path_modified_at, deleted, \
+             deleted_at, restored_at)
+                 VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+            (
+                file_id,
+                logical_path,
+                logical_path_modified_at,
+                deleted_at,
+                restored_at,
+            ),
+        )?;
+
+        // Record only the latest version (by design): enough to key future
+        // reconciliation and keep the manifest we re-announce correct, without
+        // replaying dead intermediate versions. Compute the next version number
+        // rather than assume 1 — an orphaned `file_versions_v1` row (a version
+        // left behind without its file row by the bug this repairs) would
+        // otherwise collide on `(file_id, version_number)` and roll back the
+        // whole reconstruction. `MAX(version_number)` is NULL when no rows
+        // exist, so default to 0 and start at 1 in the clean case.
+        let current_max: Option<i64> = transaction.query_row(
+            "SELECT MAX(version_number) FROM file_versions_v1 WHERE file_id = ?1",
+            [file_id],
+            |row| row.get(0),
+        )?;
+        let next_version_number = current_max.unwrap_or(0) + 1;
+        transaction.execute(
+            "INSERT OR IGNORE INTO file_versions_v1
+                    (file_id, content_hash, observed_at, version_number, origin, size)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (
+                file_id,
+                content_hash,
+                observed_at,
+                next_version_number,
+                origin,
+                size,
+            ),
+        )?;
+
+        transaction.commit()?;
+
+        Ok(true)
+    }
+
     /// Clear a file's soft-delete tombstone when a **newer content edit**
     /// supersedes the delete (restore-after-edit). Called by the
     /// version-arrival paths after recording a version: if the file's
@@ -706,6 +804,137 @@ mod tests {
             database.logical_path_for_file_id(missing),
             Err(DatabaseError::MissingFile)
         ));
+    }
+
+    #[test]
+    fn add_tombstoned_file_creates_a_deleted_row_that_stays_deleted() {
+        let mut database = memory_db();
+        let file_id = FileId::new();
+
+        // A file created and deleted on a peer while we were offline: we never
+        // saw the create, only learn of it as a tombstone in the manifest.
+        // observed_at (100) precedes deleted_at (200), matching the peer's own
+        // ordering.
+        let created = database
+            .add_tombstoned_file(
+                file_id,
+                &LogicalPath::new("gone.txt"),
+                50,
+                "hash-latest",
+                42,
+                100,
+                "peerkey",
+                200,
+                0,
+            )
+            .unwrap();
+        assert!(created, "a previously-unknown file must be created");
+
+        // The row exists and is tombstoned...
+        let state = database.file_deletion_state(file_id).unwrap().unwrap();
+        assert!(state.deleted, "the reconstructed row must be tombstoned");
+        assert_eq!(state.deleted_at, 200);
+
+        // ...and it does not appear in the live view, but does in the deleted
+        // view (so the catalog is aware of it, per the invariant).
+        assert!(
+            database
+                .get_all_files(DeletedRule::Exclude)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            database.get_all_files(DeletedRule::Include).unwrap().len(),
+            1
+        );
+
+        // The latest version was recorded verbatim (observed_at not restamped
+        // to now()), so the delete keeps winning three-way LWW.
+        let version = database.latest_version(file_id).unwrap().unwrap();
+        assert_eq!(version.content_hash, "hash-latest");
+        assert_eq!(version.observed_at, 100);
+    }
+
+    #[test]
+    fn add_tombstoned_file_is_idempotent_for_a_known_file() {
+        let mut database = memory_db();
+        let file_id = FileId::new();
+        database
+            .add_file(file_id, &LogicalPath::new("live.txt"), 0)
+            .unwrap();
+        database.record_version(file_id, "v1", "local", 1).unwrap();
+
+        // The file already has a row: reconstructing a tombstone must be a
+        // no-op (an existing file is handled by the live delete / LWW paths).
+        let created = database
+            .add_tombstoned_file(
+                file_id,
+                &LogicalPath::new("live.txt"),
+                0,
+                "v1",
+                1,
+                10,
+                "peerkey",
+                999,
+                0,
+            )
+            .unwrap();
+        assert!(!created, "an existing file must not be overwritten");
+
+        // The file is still live and untouched.
+        let state = database.file_deletion_state(file_id).unwrap().unwrap();
+        assert!(!state.deleted);
+    }
+
+    /// Regression: an *orphaned* version row (a `file_versions_v1` entry with
+    /// no `files_v2` row — legacy debris from the bug this reconstruction
+    /// repairs) must not abort the reconstruction with a UNIQUE violation on
+    /// `(file_id, version_number)`. The new version number is computed past the
+    /// orphan, so the tombstone is created successfully.
+    #[test]
+    fn add_tombstoned_file_tolerates_an_orphaned_version() {
+        let mut database = memory_db();
+        let file_id = FileId::new();
+
+        // Create the orphaned state: a version row exists (version_number 1)
+        // but no files_v2 row. `record_version` inserts into file_versions_v1
+        // without requiring a file row, exactly as the old buggy path left it.
+        database
+            .record_version(file_id, "orphan-hash", "peerkey", 5)
+            .unwrap();
+        assert!(!database.file_exists(file_id).unwrap());
+
+        // Reconstructing the tombstone must succeed despite the orphan (this
+        // used to fail: UNIQUE constraint on version_number 1).
+        let created = database
+            .add_tombstoned_file(
+                file_id,
+                &LogicalPath::new("buy.md"),
+                50,
+                "latest-hash",
+                9,
+                100,
+                "peerkey",
+                200,
+                0,
+            )
+            .unwrap();
+        assert!(
+            created,
+            "reconstruction must succeed past the orphaned version"
+        );
+
+        // The file is now known and tombstoned.
+        let state = database.file_deletion_state(file_id).unwrap().unwrap();
+        assert!(state.deleted);
+        assert_eq!(state.deleted_at, 200);
+
+        // The reconstructed version was recorded past the orphan (version 2),
+        // and it is the latest — so the manifest we re-announce is correct.
+        let version = database.latest_version(file_id).unwrap().unwrap();
+        assert_eq!(version.content_hash, "latest-hash");
+        assert_eq!(version.observed_at, 100);
+        assert_eq!(version.version_number, 2);
     }
 
     #[test]

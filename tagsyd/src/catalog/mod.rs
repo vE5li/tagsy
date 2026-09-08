@@ -822,6 +822,34 @@ impl CatalogWriter {
                     .await;
                     continue;
                 }
+                CatalogCommand::CatalogTombstone {
+                    file_id,
+                    logical_path,
+                    logical_path_modified_at,
+                    content_hash,
+                    size,
+                    observed_at,
+                    deleted_at,
+                    restored_at,
+                    origin,
+                } => {
+                    files::catalog_tombstone(
+                        &configuration,
+                        &runtime_configuration,
+                        &mut database,
+                        file_id,
+                        logical_path,
+                        logical_path_modified_at,
+                        content_hash,
+                        size,
+                        observed_at,
+                        deleted_at,
+                        restored_at,
+                        origin,
+                    )
+                    .await;
+                    continue;
+                }
                 CatalogCommand::Materialize {
                     file_id,
                     content,

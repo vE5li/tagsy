@@ -101,6 +101,34 @@ pub struct PeerDeletion {
     pub deleted_at: i64,
 }
 
+/// A deletion of a file we have **never seen** learned from a peer's manifest.
+/// The peer advertises a tombstone for a `file_id` we hold no row for — a file
+/// created *and* deleted on another device while we were offline, so we never
+/// caught the create, only the delete. Rather than drop it (which would leave
+/// our catalog unaware of a file the mesh knows about), we reconstruct a
+/// complete tombstoned row from the manifest entry.
+///
+/// Distinct from [`PeerDeletion`], which tombstones a file we *already* know:
+/// that path only flips an existing row's `deleted` flag and cannot carry the
+/// path/version needed to create a row from nothing. This carries everything
+/// [`crate::store::CatalogStore::add_tombstoned_file`] needs.
+#[derive(Debug, Clone)]
+pub struct CreateTombstone {
+    pub file_id: FileId,
+    pub logical_path: LogicalPath,
+    pub logical_path_modified_at: i64,
+    /// The peer's latest content hash and size (from the manifest history),
+    /// recorded as the reconstructed row's single version.
+    pub content_hash: String,
+    pub size: i64,
+    /// The peer's latest-version `observed_at`, recorded verbatim (not
+    /// restamped to now) so `deleted_at > observed_at` still holds locally and
+    /// the delete keeps winning three-way last-writer-wins.
+    pub observed_at: i64,
+    pub deleted_at: i64,
+    pub restored_at: i64,
+}
+
 /// A file restore learned from a peer's manifest that wins last-writer-wins
 /// against our local delete (the peer advertises the file as live and its
 /// `restored_at` is newer than our `deleted_at`). Applied by enqueuing a
@@ -138,6 +166,7 @@ pub struct PeerMove {
 pub struct SyncPlan {
     pub pulls: Vec<MissingContent>,
     pub deletions: Vec<PeerDeletion>,
+    pub create_tombstones: Vec<CreateTombstone>,
     pub restores: Vec<PeerRestore>,
     pub moves: Vec<PeerMove>,
 }
@@ -189,6 +218,52 @@ pub fn plan_file_sync(
         // than the delete keeps the file live (the content path below handles
         // bytes).
         if entry.deleted {
+            // A file we have never seen, advertised as deleted: it was created
+            // *and* deleted on another device while we were offline, so we
+            // caught neither the create nor the live delete — only this
+            // tombstone in the manifest. Reconstruct a complete tombstoned row
+            // from the entry so our catalog is aware of every file the mesh
+            // knows about, deleted or not, instead of silently dropping it (the
+            // bug that produced a perpetual `MissingFile` placement-sweep line
+            // for it on every reconnect). `PeerDeletion` cannot be used here —
+            // it only flips an *existing* row's flag and carries no path/version
+            // to create one from.
+            let ours = database.file_deletion_state(entry.file_id).ok().flatten();
+            if ours.is_none() {
+                if let Some((_, hash, size)) = entry.history.last() {
+                    log::debug!(
+                        "Reconstructing tombstone for unseen file {} from {peer_name} \
+                         (deleted_at={})",
+                        entry.file_id.to_string(),
+                        entry.deleted_at,
+                    );
+                    plan.create_tombstones.push(CreateTombstone {
+                        file_id: entry.file_id,
+                        logical_path: entry.logical_path.clone(),
+                        logical_path_modified_at: entry.logical_path_modified_at,
+                        content_hash: hash.clone(),
+                        size: *size,
+                        // The manifest gives us the latest version's observed_at
+                        // directly; recording it verbatim keeps the delete
+                        // winning LWW (`deleted_at > observed_at`).
+                        observed_at: entry.latest_observed_at,
+                        deleted_at: entry.deleted_at,
+                        restored_at: entry.restored_at,
+                    });
+                } else {
+                    // A tombstone with no version history carries nothing to
+                    // record; there is no faithful row to build. This should not
+                    // happen (every file has at least one version), so surface
+                    // it rather than dropping it silently.
+                    log::warn!(
+                        "Peer {peer_name} advertised a delete for unseen file {} with no version \
+                         history; cannot reconstruct its tombstone",
+                        entry.file_id.to_string(),
+                    );
+                }
+                continue;
+            }
+
             // If we already hold a tombstone for this file, we are in the same
             // terminal state as the peer and there is nothing to do — regardless
             // of whose `deleted_at` is larger. Skipping here prevents pointless
@@ -196,7 +271,6 @@ pub fn plan_file_sync(
             // which would otherwise re-run the fan-out (`RemoveFile` per sync
             // directory, forward-to-peers) for a delete that has already fully
             // converged.
-            let ours = database.file_deletion_state(entry.file_id).ok().flatten();
             if ours.as_ref().is_some_and(|state| state.deleted) {
                 continue;
             }
@@ -650,6 +724,87 @@ mod tests {
         assert!(
             plan.moves.is_empty(),
             "an unknown file adopts the path via Create, not a move"
+        );
+    }
+
+    /// A peer's delete tombstone for a file we have **never seen** is
+    /// reconstructed as a `CreateTombstone` (not a `PeerDeletion`, which can
+    /// only flip an existing row): the file was created *and* deleted elsewhere
+    /// while we were offline, and our catalog must still become aware of it.
+    /// It carries the manifest's path/version and does not request bytes.
+    #[test]
+    fn peer_delete_for_unseen_file_is_reconstructed_as_tombstone() {
+        let database = memory_db();
+        let file_id = FileId::new();
+        let entry = ManifestEntry {
+            file_id,
+            history: vec![(1, "aaaa".to_owned(), 7), (2, "bbbb".to_owned(), 9)],
+            latest_observed_at: 100,
+            logical_path: LogicalPath::new("gone.txt"),
+            logical_path_modified_at: 42,
+            deleted: true,
+            deleted_at: 200,
+            restored_at: 0,
+        };
+
+        let plan = plan_file_sync("peer", vec![entry], &database);
+        assert!(
+            plan.pulls.is_empty(),
+            "a tombstoned file must not be pulled"
+        );
+        assert!(
+            plan.deletions.is_empty(),
+            "an unseen file cannot use PeerDeletion (no row to flip)"
+        );
+        assert_eq!(plan.create_tombstones.len(), 1);
+        let reconstructed = &plan.create_tombstones[0];
+        assert_eq!(reconstructed.file_id, file_id);
+        assert_eq!(reconstructed.logical_path, LogicalPath::new("gone.txt"));
+        assert_eq!(reconstructed.logical_path_modified_at, 42);
+        // The latest version from the history is used.
+        assert_eq!(reconstructed.content_hash, "bbbb");
+        assert_eq!(reconstructed.size, 9);
+        assert_eq!(reconstructed.observed_at, 100);
+        assert_eq!(reconstructed.deleted_at, 200);
+    }
+
+    /// The reconstruction only fires for a genuinely-unknown file: a file we
+    /// already hold (here, already tombstoned) must NOT produce a
+    /// `CreateTombstone`, so we don't re-create or re-forward a converged
+    /// delete on every reconnect.
+    #[test]
+    fn peer_delete_for_known_file_is_not_reconstructed() {
+        let mut database = memory_db();
+        let file_id = FileId::new();
+        database
+            .add_file(file_id, &LogicalPath::new("f.txt"), 0)
+            .unwrap();
+        database.record_version(file_id, "v1", "local", 1).unwrap();
+        assert!(
+            database
+                .remove_file(file_id, clock::now_millis() + 5_000)
+                .unwrap()
+        );
+
+        let entry = ManifestEntry {
+            file_id,
+            history: vec![(1, "v1".to_owned(), 1)],
+            latest_observed_at: 0,
+            logical_path: LogicalPath::new("f.txt"),
+            logical_path_modified_at: 0,
+            deleted: true,
+            deleted_at: 100,
+            restored_at: 0,
+        };
+
+        let plan = plan_file_sync("peer", vec![entry], &database);
+        assert!(
+            plan.create_tombstones.is_empty(),
+            "a file we already hold must not be reconstructed"
+        );
+        assert!(
+            plan.deletions.is_empty(),
+            "already-tombstoned: nothing to do"
         );
     }
 

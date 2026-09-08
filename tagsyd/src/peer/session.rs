@@ -25,7 +25,7 @@ use crate::configuration::RuntimeConfiguration;
 use crate::operations;
 use crate::peer::fetch::{answer_local_chunk, spawn_content_receive};
 use crate::peer::plan::{
-    MissingContent, PeerDeletion, PeerMove, PeerRestore, SyncPlan, batch_manifest,
+    CreateTombstone, MissingContent, PeerDeletion, PeerMove, PeerRestore, SyncPlan, batch_manifest,
     build_local_manifest, plan_file_sync,
 };
 use crate::peer::plan_tags::{
@@ -639,6 +639,7 @@ pub async fn run_peer_session<S>(
                         let SyncPlan {
                             pulls,
                             deletions,
+                            create_tombstones,
                             restores,
                             moves,
                         } = plan_file_sync(peer_name, entries, &database);
@@ -665,6 +666,49 @@ pub async fn run_peer_session<S>(
                                 log::error!(
                                     "Reconciliation: failed to enqueue delete for {} \
                                      announced by {peer_name}: {error}",
+                                    file_id.to_string()
+                                );
+                            }
+                        }
+
+                        // Reconstruct tombstones for files we have never seen
+                        // that the peer advertises as deleted (created *and*
+                        // deleted elsewhere while we were offline). These need a
+                        // dedicated command, not `Change::FileDeleted`: the wire
+                        // delete carries only `file_id`/`deleted_at`, but
+                        // creating a row from nothing needs the manifest's path
+                        // and latest version too. Handled by the sole DB writer,
+                        // which lands a tombstoned row and forwards the delete
+                        // transitively.
+                        for CreateTombstone {
+                            file_id,
+                            logical_path,
+                            logical_path_modified_at,
+                            content_hash,
+                            size,
+                            observed_at,
+                            deleted_at,
+                            restored_at,
+                        } in create_tombstones
+                        {
+                            if let Err(error) =
+                                change_sender.send(CatalogCommand::CatalogTombstone {
+                                    file_id,
+                                    logical_path,
+                                    logical_path_modified_at,
+                                    content_hash,
+                                    size: size as u64,
+                                    observed_at,
+                                    deleted_at,
+                                    restored_at,
+                                    origin: ChangeOrigin::Peer {
+                                        public_key: peer_public_key.to_owned(),
+                                    },
+                                })
+                            {
+                                log::error!(
+                                    "Reconciliation: failed to enqueue tombstone reconstruction \
+                                     for {} announced by {peer_name}: {error}",
                                     file_id.to_string()
                                 );
                             }

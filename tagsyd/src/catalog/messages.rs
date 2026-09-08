@@ -179,6 +179,30 @@ pub enum CatalogCommand {
         /// The announcing peer (stored in `file_versions.origin`).
         origin: ChangeOrigin,
     },
+    /// Reconstruct a **tombstoned** file (`files` + one version, both already
+    /// deleted) on behalf of a peer session's `Manifest` reconciliation. Used
+    /// for a file this device has never seen that the peer advertises as
+    /// deleted — created *and* deleted elsewhere while we were offline. Mirrors
+    /// [`CatalogCommand::CatalogFile`] (the session decides *what*; the sole DB
+    /// writer performs the write), but lands the row in a deleted state and
+    /// forwards a `FileDeleted` so the tombstone propagates transitively across
+    /// the mesh. Idempotent: a no-op if the file already has a row.
+    /// Fire-and-forget.
+    CatalogTombstone {
+        file_id: FileId,
+        logical_path: LogicalPath,
+        logical_path_modified_at: i64,
+        content_hash: String,
+        /// The version's content size in bytes (from the manifest history).
+        size: u64,
+        /// The peer's latest-version `observed_at`, recorded verbatim so the
+        /// delete keeps winning last-writer-wins (`deleted_at > observed_at`).
+        observed_at: i64,
+        deleted_at: i64,
+        restored_at: i64,
+        /// The announcing peer (stored in `file_versions.origin`).
+        origin: ChangeOrigin,
+    },
     /// A locally-provided upload/edit: the client (CLI) holds the bytes and
     /// serves them on demand (a temporary provider), so there is nothing to
     /// place in a local sync directory. `handle_changes` records the file (for

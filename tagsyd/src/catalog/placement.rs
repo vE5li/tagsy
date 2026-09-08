@@ -132,9 +132,17 @@ pub(crate) fn plan_placement(
 ) -> Option<DeferredPlacement> {
     let logical_path = match database.logical_path_for_file_id(file_id) {
         Ok(logical_path) => logical_path,
+        // A tombstoned or unknown file has no live logical path to place into.
+        // This is the expected, benign outcome for every deleted file the
+        // connect-time sweep iterates (the sweep deliberately covers deleted
+        // files too, so the catalog stays aware of them), so it is silent —
+        // logging one line per dead file on every reconnect was pure noise
+        // scaling with lifetime deletions.
+        Err(store::DatabaseError::MissingFile) => return None,
+        // A genuine read failure is not expected here; keep it visible.
         Err(error) => {
-            log::debug!(
-                "plan_placement: no logical path for {} ({:?}); skipping",
+            log::error!(
+                "plan_placement: failed to read logical path for {}: {:?}; skipping",
                 file_id.to_string(),
                 error
             );
