@@ -1,5 +1,12 @@
-//! Short ids: the shortest unique prefix of an id, and the inverse lookup that
-//! turns a prefix a user typed back into a full id.
+//! Short ids: the shortest unique prefix of an id, shown in listings so a user
+//! knows the fewest characters that uniquely identify a file or tag *right
+//! now*.
+//!
+//! This is a **display** concern only. Resolution (turning a term a user typed
+//! back into an id) lives in `frontend/api/read.rs` and treats *any* id prefix
+//! uniformly — the shortest-unique length computed here has no special
+//! standing there. See [`normalize_id_prefix`] for the shared hex-normalization
+//! the id-prefix matchers use.
 //!
 //! Generic over `(table, column)` so files and tags share one implementation.
 
@@ -14,56 +21,6 @@ use super::types::DatabaseError;
 /// Operates on `char`s; ids are ASCII hex so this is equivalent to bytes.
 pub(super) fn common_prefix_length(a: &str, b: &str) -> usize {
     a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
-}
-
-/// Outcome of resolving a short-id prefix against an id column.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PrefixResolution {
-    /// Exactly one id starts with the prefix.
-    Unique(String),
-    /// No id starts with the prefix.
-    NotFound,
-    /// More than one id starts with the prefix; resolution is ambiguous.
-    Ambiguous,
-}
-
-/// Resolve a short-id `prefix` against `column` of `table`, returning whether
-/// it identifies exactly one row.
-///
-/// This is the generic counterpart to shortening: given the fewest leading hex
-/// characters a user typed, find the full id — or report that the prefix is
-/// unknown or ambiguous. It backs every "accept a short id" command, so it is
-/// deliberately id-type-agnostic (callers wrap it with a typed helper such as
-/// [`CatalogStore::resolve_file_id_prefix`]).
-///
-/// Ids are stored in canonical simple-hex form, so a prefix match is a plain
-/// string-prefix test. We fetch up to two matches: zero → not found, one →
-/// `Unique`, two → `Ambiguous`. With the primary-key index on the id column
-/// this is a bounded index range scan (`LIMIT 2`), not a full-table scan.
-///
-/// `prefix` **must** be validated as lowercase hex by the caller (see
-/// [`normalize_id_prefix`]); this keeps the `LIKE` pattern free of `%`/`_`
-/// wildcards and the query injection-safe (the prefix is still bound as a
-/// parameter; `table`/`column` are internal constants, never user input).
-fn resolve_id_prefix(
-    connection: &Connection,
-    table: &str,
-    column: &str,
-    prefix: &str,
-) -> Result<PrefixResolution, DatabaseError> {
-    let pattern = format!("{prefix}%");
-    let mut statement = connection.prepare(&format!(
-        "SELECT {column} FROM {table} WHERE {column} LIKE ?1 ORDER BY {column} LIMIT 2"
-    ))?;
-    let matches: Vec<String> = statement
-        .query_map([&pattern], |row| row.get::<_, String>(0))?
-        .collect::<Result<_, _>>()?;
-
-    match matches.as_slice() {
-        [] => Ok(PrefixResolution::NotFound),
-        [only] => Ok(PrefixResolution::Unique(only.clone())),
-        _ => Ok(PrefixResolution::Ambiguous),
-    }
 }
 
 /// Normalize a user-supplied id or short-id into the canonical lowercase-hex
@@ -166,27 +123,6 @@ impl CatalogStore {
         shortest_unique_prefix_length(&self.connection, "files_v2", "id", &file_id.to_string())
     }
 
-    /// Resolve a full-or-short file id `prefix` to a single [`FileId`].
-    ///
-    /// The inverse of [`shorten_file_id`](Self::shorten_file_id): given the
-    /// characters a user typed (a short id from a listing, or a full id pasted
-    /// in either hyphenated or hex form), find the one file it identifies.
-    ///
-    /// Errors:
-    /// - [`DatabaseError::MissingFile`] if no file matches the prefix.
-    /// - [`DatabaseError::AmbiguousIdPrefix`] if more than one file matches
-    ///   (e.g. a colliding file was added since the short id was displayed).
-    pub fn resolve_file_id_prefix(&self, prefix: &str) -> Result<FileId, DatabaseError> {
-        let normalized = normalize_id_prefix(prefix).ok_or(DatabaseError::MissingFile)?;
-        match resolve_id_prefix(&self.connection, "files_v2", "id", &normalized)? {
-            PrefixResolution::Unique(id) => {
-                FileId::from_string(&id).ok_or(DatabaseError::MissingFile)
-            }
-            PrefixResolution::NotFound => Err(DatabaseError::MissingFile),
-            PrefixResolution::Ambiguous => Err(DatabaseError::AmbiguousIdPrefix(normalized)),
-        }
-    }
-
     /// Compute the shortest unique prefix of `tag_id` among **all** tags — the
     /// "short id" shown in listings. The tag counterpart of
     /// [`shorten_file_id`](Self::shorten_file_id); see it for the
@@ -200,23 +136,6 @@ impl CatalogStore {
         }
 
         shortest_unique_prefix_length(&self.connection, "tags_v2", "id", &tag_id.to_string())
-    }
-
-    /// Resolve a full-or-short tag id `prefix` to a single [`TagId`]. The tag
-    /// counterpart of [`resolve_file_id_prefix`](Self::resolve_file_id_prefix).
-    ///
-    /// Errors:
-    /// - [`DatabaseError::MissingTag`] if no tag matches the prefix.
-    /// - [`DatabaseError::AmbiguousIdPrefix`] if more than one tag matches.
-    pub fn resolve_tag_id_prefix(&self, prefix: &str) -> Result<TagId, DatabaseError> {
-        let normalized = normalize_id_prefix(prefix).ok_or(DatabaseError::MissingTag)?;
-        match resolve_id_prefix(&self.connection, "tags_v2", "id", &normalized)? {
-            PrefixResolution::Unique(id) => {
-                TagId::from_string(&id).ok_or(DatabaseError::MissingTag)
-            }
-            PrefixResolution::NotFound => Err(DatabaseError::MissingTag),
-            PrefixResolution::Ambiguous => Err(DatabaseError::AmbiguousIdPrefix(normalized)),
-        }
     }
 }
 
@@ -293,158 +212,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_file_id_prefix_unique_short_prefix() {
-        let database = memory_db();
-        let far_a = file_id_from_hex("aaaa000000000000000000000000000a");
-        let far_b = file_id_from_hex("bbbb000000000000000000000000000b");
-        database.add_file(far_a, &LogicalPath::new("a"), 0).unwrap();
-        database.add_file(far_b, &LogicalPath::new("b"), 0).unwrap();
-
-        // A single leading char is enough to pick each out.
-        assert_eq!(database.resolve_file_id_prefix("a").unwrap(), far_a);
-        assert_eq!(database.resolve_file_id_prefix("b").unwrap(), far_b);
-    }
-
-    #[test]
-    fn resolve_file_id_prefix_accepts_full_and_hyphenated_forms() {
-        let database = memory_db();
-        let id = file_id_from_hex("7f3a1b2c4d5e6f708192a3b4c5d6e7f8");
-        database.add_file(id, &LogicalPath::new("a"), 0).unwrap();
-
-        // Full hex form.
-        assert_eq!(
-            database
-                .resolve_file_id_prefix("7f3a1b2c4d5e6f708192a3b4c5d6e7f8")
-                .unwrap(),
-            id
-        );
-        // Hyphenated form (hyphens are stripped before matching).
-        assert_eq!(
-            database
-                .resolve_file_id_prefix("7f3a1b2c-4d5e-6f70-8192-a3b4c5d6e7f8")
-                .unwrap(),
-            id
-        );
-    }
-
-    #[test]
-    fn resolve_file_id_prefix_ambiguous_is_reported() {
-        let database = memory_db();
-        let shared_a = file_id_from_hex("abcd000000000000000000000000000a");
-        let shared_b = file_id_from_hex("abcd000000000000000000000000000b");
-        database
-            .add_file(shared_a, &LogicalPath::new("a"), 0)
-            .unwrap();
-        database
-            .add_file(shared_b, &LogicalPath::new("b"), 0)
-            .unwrap();
-
-        // `abcd` matches both.
-        assert!(matches!(
-            database.resolve_file_id_prefix("abcd"),
-            Err(DatabaseError::AmbiguousIdPrefix(prefix)) if prefix == "abcd"
-        ));
-    }
-
-    #[test]
-    fn resolve_file_id_prefix_unknown_is_missing() {
-        let database = memory_db();
-        database
-            .add_file(
-                file_id_from_hex("aaaa000000000000000000000000000a"),
-                &LogicalPath::new("a"),
-                0,
-            )
-            .unwrap();
-
-        assert!(matches!(
-            database.resolve_file_id_prefix("ffff"),
-            Err(DatabaseError::MissingFile)
-        ));
-    }
-
-    #[test]
-    fn resolve_file_id_prefix_rejects_non_hex() {
-        let database = memory_db();
-        // `zzzz` is not hex; normalization fails and it resolves to nothing.
-        assert!(matches!(
-            database.resolve_file_id_prefix("zzzz"),
-            Err(DatabaseError::MissingFile)
-        ));
-    }
-
-    #[test]
-    fn shorten_then_resolve_roundtrips() {
-        let mut database = memory_db();
-        let shared_a = file_id_from_hex("abcd000000000000000000000000000a");
-        let shared_b = file_id_from_hex("abcd000000000000000000000000000b");
-        let far = file_id_from_hex("ffff000000000000000000000000000f");
-        for (id, name) in [(shared_a, "a"), (shared_b, "b"), (far, "c")] {
-            database.add_file(id, &LogicalPath::new(name), 0).unwrap();
-            database.record_version(id, "hash", "local", 1).unwrap();
-        }
-
-        // Each file's displayed short id must resolve back to exactly itself.
-        for info in database.get_all_files(DeletedRule::Exclude).unwrap() {
-            let full = info.file_id.to_string();
-            let short = &full[..info.short_id_length];
-            assert_eq!(
-                database.resolve_file_id_prefix(short).unwrap(),
-                info.file_id,
-                "short id {short} should resolve to its own file"
-            );
-        }
-    }
-
-    #[test]
-    fn resolve_tag_id_prefix_unique_short_prefix() {
-        let database = memory_db();
-        let far_a = tag_id_from_hex("aaaa000000000000000000000000000a");
-        let far_b = tag_id_from_hex("bbbb000000000000000000000000000b");
-        database.add_tag(far_a, "a", &dot_style("red"), 1).unwrap();
-        database.add_tag(far_b, "b", &dot_style("red"), 1).unwrap();
-
-        assert_eq!(database.resolve_tag_id_prefix("a").unwrap(), far_a);
-        assert_eq!(database.resolve_tag_id_prefix("b").unwrap(), far_b);
-    }
-
-    #[test]
-    fn resolve_tag_id_prefix_ambiguous_is_reported() {
-        let database = memory_db();
-        let shared_a = tag_id_from_hex("abcd000000000000000000000000000a");
-        let shared_b = tag_id_from_hex("abcd000000000000000000000000000b");
-        database
-            .add_tag(shared_a, "a", &dot_style("red"), 1)
-            .unwrap();
-        database
-            .add_tag(shared_b, "b", &dot_style("red"), 1)
-            .unwrap();
-
-        assert!(matches!(
-            database.resolve_tag_id_prefix("abcd"),
-            Err(DatabaseError::AmbiguousIdPrefix(prefix)) if prefix == "abcd"
-        ));
-    }
-
-    #[test]
-    fn resolve_tag_id_prefix_unknown_is_missing() {
-        let database = memory_db();
-        database
-            .add_tag(
-                tag_id_from_hex("aaaa000000000000000000000000000a"),
-                "a",
-                &dot_style("red"),
-                1,
-            )
-            .unwrap();
-
-        assert!(matches!(
-            database.resolve_tag_id_prefix("ffff"),
-            Err(DatabaseError::MissingTag)
-        ));
-    }
-
-    #[test]
     fn shorten_then_resolve_tag_roundtrips() {
         let database = memory_db();
         let shared_a = tag_id_from_hex("abcd000000000000000000000000000a");
@@ -454,16 +221,11 @@ mod tests {
             database.add_tag(id, name, &dot_style("red"), 1).unwrap();
         }
 
-        // Each tag's displayed short id must resolve back to exactly itself.
-        for tag in database.get_all_tags(DeletedRule::Exclude).unwrap() {
-            let full = tag.id.to_string();
-            let length = database.shorten_tag_id(tag.id).unwrap();
-            let short = &full[..length];
-            assert_eq!(
-                database.resolve_tag_id_prefix(short).unwrap(),
-                tag.id,
-                "short id {short} should resolve to its own tag"
-            );
-        }
+        // Each tag's displayed short id length is at least enough to be unique;
+        // the shared pair need the full length, the far tag needs one char.
+        assert_eq!(database.shorten_tag_id(far).unwrap(), 1);
+        let full_a = shared_a.to_string();
+        let len_a = database.shorten_tag_id(shared_a).unwrap();
+        assert!(!shared_b.to_string().starts_with(&full_a[..len_a]));
     }
 }

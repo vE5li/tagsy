@@ -17,15 +17,35 @@ use crate::store::{
 use crate::sync_directories::SyncDirectoryCommand;
 
 impl ApiService {
-    /// Resolve a full-or-short file id `prefix` (as displayed by `list_files`'s
-    /// short ids, or a pasted full id) to a single [`FileId`]. Backed by
-    /// `CatalogStore::resolve_file_id_prefix`.
+    /// Resolve a user-supplied `term` to a single [`FileId`].
+    ///
+    /// `term` may be a full id, any id **prefix** (of any length — the short id
+    /// shown in listings is only a *display* hint, it has no special standing
+    /// in resolution), or a name/path. Resolution mirrors the `/e` entity
+    /// query axis: a file matches if its logical path contains `term` as a
+    /// substring **or** its id starts with `term`, never by tag membership.
+    ///
+    /// Two tiers, exact first:
+    /// 1. **Exact path**: if `term` equals one file's logical path exactly,
+    ///    that file wins even when it is also a substring of others (so
+    ///    `report.txt` resolves cleanly next to `report.txt.bak`).
+    /// 2. **`/e` union**: otherwise the path-substring ∪ id-prefix set must
+    ///    contain **exactly one** file.
     ///
     /// Returns [`ApiError::UnknownId`] if nothing matches and
-    /// [`ApiError::AmbiguousId`] if more than one file matches.
-    pub fn resolve_file_id(&self, prefix: &str) -> Result<FileId, ApiError> {
+    /// [`ApiError::AmbiguousId`] (carrying the original `term`) if more than
+    /// one file matches.
+    ///
+    /// `deleted_rule` governs whether tombstoned files participate; operational
+    /// lookups pass [`DeletedRule::Exclude`], while the restore path passes
+    /// [`DeletedRule::Include`] so a deleted file can still be named.
+    pub fn resolve_file_id(
+        &self,
+        term: &str,
+        deleted_rule: DeletedRule,
+    ) -> Result<FileId, ApiError> {
         let database = self.open_read()?;
-        Ok(database.resolve_file_id_prefix(prefix)?)
+        resolve_file_id(&database, term, deleted_rule)
     }
 
     /// Classify a file's logical `name` into its [`FileKind`] from the
@@ -37,16 +57,28 @@ impl ApiService {
         Ok(classify_extension(&LogicalPath::new(name).extension()))
     }
 
-    /// Resolve a full-or-short tag id `prefix` (as displayed by `list_tags`'s
-    /// short ids, or a pasted full id) to a single [`TagId`]. The tag
-    /// counterpart of [`resolve_file_id`](Self::resolve_file_id). Backed by
-    /// `CatalogStore::resolve_tag_id_prefix`.
+    /// Resolve a user-supplied `term` to a single [`TagId`]. The tag
+    /// counterpart of [`resolve_file_id`](Self::resolve_file_id).
+    ///
+    /// `term` may be a full id, any id **prefix** (of any length — the short id
+    /// is a display hint only), or a tag name. Resolution mirrors the `/e`
+    /// entity query axis: a tag matches if its name contains `term` as a
+    /// substring **or** its id starts with `term`, never by subtag membership.
+    ///
+    /// Two tiers, exact first:
+    /// 1. **Exact name**: if `term` equals one tag's name exactly, that tag
+    ///    wins even when it is a substring of others (so `photo` resolves
+    ///    cleanly next to `photography`).
+    /// 2. **`/e` union**: otherwise the name-substring ∪ id-prefix set must
+    ///    contain **exactly one** tag.
     ///
     /// Returns [`ApiError::UnknownId`] if nothing matches and
-    /// [`ApiError::AmbiguousId`] if more than one tag matches.
-    pub fn resolve_tag_id(&self, prefix: &str) -> Result<TagId, ApiError> {
+    /// [`ApiError::AmbiguousId`] (carrying the original `term`) if more than
+    /// one tag matches. See [`resolve_file_id`](Self::resolve_file_id) for the
+    /// `deleted_rule` semantics.
+    pub fn resolve_tag_id(&self, term: &str, deleted_rule: DeletedRule) -> Result<TagId, ApiError> {
         let database = self.open_read()?;
-        Ok(database.resolve_tag_id_prefix(prefix)?)
+        resolve_tag_id(&database, term, deleted_rule)
     }
 
     /// List the tags applied to `file_id`. `subtag_rule` controls whether the
@@ -193,10 +225,10 @@ impl ApiService {
     /// (pure, no DB access — see the [`token`] module docs for the grammar and
     /// error-recovery contract), then this function resolves each token into
     /// one [`QueryTerm`], expanding tag references via
-    /// [`CatalogStore::tag_ids_matching_pattern`] (name-or-id, for `/t` and a
-    /// bare token), [`CatalogStore::tag_ids_matching_id_prefix`] (id only, for
-    /// `/T`), [`CatalogStore::file_ids_matching_id_prefix`] (id only, for `/i`
-    /// and the id half of a bare token), and
+    /// [`CatalogStore::tag_ids_matching_pattern`] (name-or-id, for `/t`, `/e`,
+    /// and a bare token), [`CatalogStore::tag_ids_matching_id_prefix`] (id
+    /// only, for `/T`), [`CatalogStore::file_ids_matching_id_prefix`] (id only,
+    /// for `/i`, `/e`, and the id half of a bare token), and
     /// [`CatalogStore::file_ids_matching_content_hash_prefix`] (for `/h`).
     ///
     /// The lexer stage is forgiving: it silently drops malformed tokens (see
@@ -237,7 +269,12 @@ impl ApiService {
             // are opaque hex — so it is skipped for a regex payload (a `%...%`
             // token then has empty id sets, and only its text side stands).
             let tag_ids = match token.kind {
-                TokenKind::Tag | TokenKind::Any => {
+                // `/e` resolves tags the same way a bare token does — name
+                // substring **or** id prefix — because on the tag side "the
+                // entity's own identity" *is* its name-or-id. The difference
+                // from `Any` is only in how the resolved set is used
+                // downstream (no subtag expansion).
+                TokenKind::Tag | TokenKind::Any | TokenKind::Entity => {
                     database.tag_ids_matching_pattern(&pattern, deleted_rule)?
                 }
                 TokenKind::TagId => match &pattern {
@@ -249,10 +286,11 @@ impl ApiService {
                 _ => Vec::new(),
             };
             // File-id resolution serves `/i` (by id), `/h` (by content hash),
-            // and the id half of a bare token. All three resolve a *set of file
-            // ids* and never a regex — ids and hashes are opaque hex.
+            // the id half of a bare token, and the id half of `/e`. All resolve
+            // a *set of file ids* and never a regex — ids and hashes are opaque
+            // hex.
             let file_ids = match (token.kind, &pattern) {
-                (TokenKind::FileId | TokenKind::Any, TextPattern::Substring(text)) => {
+                (TokenKind::FileId | TokenKind::Any | TokenKind::Entity, TextPattern::Substring(text)) => {
                     database.file_ids_matching_id_prefix(text, deleted_rule)?
                 }
                 (TokenKind::ContentHash, TextPattern::Substring(text)) => {
@@ -281,6 +319,15 @@ impl ApiService {
                 (TokenKind::Logical, true) => QueryTerm::NotLogicalMatches(pattern),
                 (TokenKind::Any, false) => QueryTerm::AnyMatch(pattern, tag_ids, file_ids),
                 (TokenKind::Any, true) => QueryTerm::NotAnyMatch(pattern, tag_ids, file_ids),
+                // `/e`: name/path **or** id, never tag membership. The
+                // resolved sets are the same as a bare token's; the
+                // membership-free semantics live in the evaluator.
+                (TokenKind::Entity, false) => {
+                    QueryTerm::EntityMatches(pattern, tag_ids, file_ids)
+                }
+                (TokenKind::Entity, true) => {
+                    QueryTerm::NotEntityMatches(pattern, tag_ids, file_ids)
+                }
             };
             terms.push(term);
         }
@@ -509,5 +556,288 @@ impl ApiService {
         response
             .await
             .map_err(|_| ApiError::Internal("runtime is shutting down".to_owned()))
+    }
+}
+
+/// Resolve a `term` to a single [`FileId`] against `database`. The core of
+/// [`ApiService::resolve_file_id`] — a free function so it is testable against
+/// a bare [`CatalogStore`] without standing up the full actor system. See the
+/// method for the tiering and error semantics.
+fn resolve_file_id(
+    database: &CatalogStore,
+    term: &str,
+    deleted_rule: DeletedRule,
+) -> Result<FileId, ApiError> {
+    // Tier 1: exact logical-path match (live-only). A deleted file cannot be
+    // found here, but the union tier below still catches it by exact
+    // name-as-substring when `deleted_rule` is `Include`.
+    if deleted_rule == DeletedRule::Exclude
+        && let Ok(file_id) = database.file_id_from_logical_path(&LogicalPath::new(term))
+    {
+        return Ok(file_id);
+    }
+
+    // Tier 2: the `/e` union — path substring ∪ id prefix, no tag membership.
+    // Build the same term `parse_query` would for `/e <term>`.
+    let file_ids = database.file_ids_matching_id_prefix(term, deleted_rule)?;
+    let terms = [QueryTerm::EntityMatches(
+        TextPattern::Substring(term.to_owned()),
+        Vec::new(),
+        file_ids,
+    )];
+    let mut matches = database
+        .file_ids_for_query(&terms, SubtagRule::Exclude, deleted_rule)?
+        .into_iter();
+    match (matches.next(), matches.next()) {
+        (None, _) => Err(ApiError::UnknownId),
+        (Some(file_id), None) => Ok(file_id),
+        (Some(_), Some(_)) => Err(ApiError::AmbiguousId(term.to_owned())),
+    }
+}
+
+/// Resolve a `term` to a single [`TagId`] against `database`. The tag
+/// counterpart of [`resolve_file_id`]; the core of
+/// [`ApiService::resolve_tag_id`].
+fn resolve_tag_id(
+    database: &CatalogStore,
+    term: &str,
+    deleted_rule: DeletedRule,
+) -> Result<TagId, ApiError> {
+    // Tier 1: exact name (live-only), for the same reason as the file side.
+    if deleted_rule == DeletedRule::Exclude
+        && let Ok(tag_id) = database.tag_id_from_name(term)
+    {
+        return Ok(tag_id);
+    }
+
+    // Tier 2: the `/e` union — name substring ∪ id prefix, no subtags.
+    // `tag_ids_matching_pattern` already unions name-substring with id-prefix,
+    // exactly the resolved set `parse_query` builds for `/e`.
+    let tag_ids =
+        database.tag_ids_matching_pattern(&TextPattern::Substring(term.to_owned()), deleted_rule)?;
+    let terms = [QueryTerm::EntityMatches(
+        TextPattern::Substring(term.to_owned()),
+        tag_ids,
+        Vec::new(),
+    )];
+    let mut matches = database
+        .tag_ids_for_query(&terms, SubtagRule::Exclude, deleted_rule)?
+        .into_iter();
+    match (matches.next(), matches.next()) {
+        (None, _) => Err(ApiError::UnknownId),
+        (Some(tag_id), None) => Ok(tag_id),
+        (Some(_), Some(_)) => Err(ApiError::AmbiguousId(term.to_owned())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tagsy_core::{FileId, LogicalPath, TagId, TagStyle};
+
+    use super::{ApiError, resolve_file_id, resolve_tag_id};
+    use crate::clock::now_millis;
+    use crate::store::{CatalogStore, DeletedRule};
+
+    fn memory_db() -> CatalogStore {
+        CatalogStore::initialize(":memory:").expect("open in-memory db")
+    }
+
+    fn dot_style(color: &str) -> TagStyle {
+        TagStyle {
+            dot_color: color.to_owned(),
+            ..TagStyle::default()
+        }
+    }
+
+    fn file_id_from_hex(hex: &str) -> FileId {
+        FileId::from_string(hex).expect("valid hex uuid")
+    }
+
+    fn tag_id_from_hex(hex: &str) -> TagId {
+        TagId::from_string(hex).expect("valid hex uuid")
+    }
+
+    fn add_file(database: &mut CatalogStore, id: FileId, path: &str) {
+        database.add_file(id, &LogicalPath::new(path), 0).unwrap();
+        database.record_version(id, "hash", "local", 1).unwrap();
+    }
+
+    /// Any id prefix resolves, of any length — the short id has no special
+    /// standing. `1`, a mid-length prefix, and the full id all pick the same
+    /// file as long as they stay unique.
+    #[test]
+    fn resolve_file_by_id_prefix_of_any_length() {
+        let mut database = memory_db();
+        let id = file_id_from_hex("1234abcd00000000000000000000000f");
+        add_file(&mut database, id, "some/file.txt");
+
+        for prefix in ["1", "1234", "1234abcd", "1234abcd00000000000000000000000f"] {
+            assert_eq!(
+                resolve_file_id(&database, prefix, DeletedRule::Exclude).unwrap(),
+                id,
+                "prefix {prefix} should resolve"
+            );
+        }
+    }
+
+    /// A hyphenated full id resolves (hyphens are stripped by
+    /// `normalize_id_prefix`).
+    #[test]
+    fn resolve_file_by_hyphenated_id() {
+        let mut database = memory_db();
+        let id = file_id_from_hex("7f3a1b2c4d5e6f708192a3b4c5d6e7f8");
+        add_file(&mut database, id, "a.txt");
+
+        assert_eq!(
+            resolve_file_id(
+                &database,
+                "7f3a1b2c-4d5e-6f70-8192-a3b4c5d6e7f8",
+                DeletedRule::Exclude
+            )
+            .unwrap(),
+            id
+        );
+    }
+
+    /// A file resolves by a substring of its logical path.
+    #[test]
+    fn resolve_file_by_name_substring() {
+        let mut database = memory_db();
+        let id = file_id_from_hex("ffff000000000000000000000000000f");
+        add_file(&mut database, id, "photos/holiday.jpg");
+
+        assert_eq!(
+            resolve_file_id(&database, "holiday", DeletedRule::Exclude).unwrap(),
+            id
+        );
+    }
+
+    /// An id prefix short enough to hit two files is ambiguous — expected once
+    /// the catalog grows, and reported with the original term.
+    #[test]
+    fn resolve_file_ambiguous_prefix_reports_term() {
+        let mut database = memory_db();
+        add_file(
+            &mut database,
+            file_id_from_hex("abcd000000000000000000000000000a"),
+            "a.txt",
+        );
+        add_file(
+            &mut database,
+            file_id_from_hex("abcd000000000000000000000000000b"),
+            "b.txt",
+        );
+
+        assert!(matches!(
+            resolve_file_id(&database, "abcd", DeletedRule::Exclude),
+            Err(ApiError::AmbiguousId(term)) if term == "abcd"
+        ));
+    }
+
+    #[test]
+    fn resolve_file_no_match_is_unknown() {
+        let mut database = memory_db();
+        add_file(
+            &mut database,
+            file_id_from_hex("aaaa000000000000000000000000000a"),
+            "a.txt",
+        );
+
+        assert!(matches!(
+            resolve_file_id(&database, "no-such-thing", DeletedRule::Exclude),
+            Err(ApiError::UnknownId)
+        ));
+    }
+
+    /// The exact-path tier wins over a substring: `report.txt` resolves to the
+    /// file with that exact path even though `report.txt.bak` also contains it.
+    #[test]
+    fn resolve_file_exact_path_beats_substring() {
+        let mut database = memory_db();
+        let exact = file_id_from_hex("1111000000000000000000000000001a");
+        let superstring = file_id_from_hex("2222000000000000000000000000002b");
+        add_file(&mut database, exact, "report.txt");
+        add_file(&mut database, superstring, "report.txt.bak");
+
+        assert_eq!(
+            resolve_file_id(&database, "report.txt", DeletedRule::Exclude).unwrap(),
+            exact,
+            "the exact path must win over the substring superstring"
+        );
+    }
+
+    /// A deleted file cannot be resolved under `Exclude`, but is found under
+    /// `Include` (the restore path).
+    #[test]
+    fn resolve_file_deleted_only_under_include() {
+        let mut database = memory_db();
+        let id = file_id_from_hex("dead000000000000000000000000000d");
+        add_file(&mut database, id, "gone.txt");
+        assert!(database.remove_file(id, now_millis() + 10_000).unwrap());
+
+        assert!(matches!(
+            resolve_file_id(&database, "gone.txt", DeletedRule::Exclude),
+            Err(ApiError::UnknownId)
+        ));
+        assert_eq!(
+            resolve_file_id(&database, "gone.txt", DeletedRule::Include).unwrap(),
+            id
+        );
+    }
+
+    /// The tag exact-name tier wins over a substring: `photo` resolves to the
+    /// tag named exactly `photo`, not the ambiguous {photo, photography} set.
+    #[test]
+    fn resolve_tag_exact_name_beats_substring() {
+        let database = memory_db();
+        let photo = tag_id_from_hex("1111000000000000000000000000001a");
+        let photography = tag_id_from_hex("2222000000000000000000000000002b");
+        database
+            .add_tag(photo, "photo", &dot_style("red"), 1)
+            .unwrap();
+        database
+            .add_tag(photography, "photography", &dot_style("red"), 1)
+            .unwrap();
+
+        assert_eq!(
+            resolve_tag_id(&database, "photo", DeletedRule::Exclude).unwrap(),
+            photo
+        );
+    }
+
+    /// A tag resolves by id prefix of any length, and by name substring.
+    #[test]
+    fn resolve_tag_by_id_prefix_and_name() {
+        let database = memory_db();
+        let id = tag_id_from_hex("1234abcd00000000000000000000000f");
+        database
+            .add_tag(id, "important", &dot_style("red"), 1)
+            .unwrap();
+
+        assert_eq!(
+            resolve_tag_id(&database, "12", DeletedRule::Exclude).unwrap(),
+            id
+        );
+        assert_eq!(
+            resolve_tag_id(&database, "portan", DeletedRule::Exclude).unwrap(),
+            id
+        );
+    }
+
+    /// A name substring matching two tags (neither exactly) is ambiguous.
+    #[test]
+    fn resolve_tag_ambiguous_substring_reports_term() {
+        let database = memory_db();
+        database
+            .add_tag(TagId::new(), "draft-a", &dot_style("red"), 1)
+            .unwrap();
+        database
+            .add_tag(TagId::new(), "draft-b", &dot_style("red"), 1)
+            .unwrap();
+
+        assert!(matches!(
+            resolve_tag_id(&database, "draft", DeletedRule::Exclude),
+            Err(ApiError::AmbiguousId(term)) if term == "draft"
+        ));
     }
 }

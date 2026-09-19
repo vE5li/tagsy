@@ -24,15 +24,18 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 /// may be in flight on one connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlRequest {
-    /// Resolve a full-or-short file id prefix to a single `FileId`. Answered
-    /// with [`ControlResponse::FileId`] (or an `Error`).
+    /// Resolve a user-supplied term (id, id prefix, or name/path) to a single
+    /// `FileId`. `deleted_rule` governs whether a tombstoned file can be named.
+    /// Answered with [`ControlResponse::FileId`] (or an `Error`).
     ResolveFileId {
-        prefix: String,
+        term: String,
+        deleted_rule: DeletedRule,
     },
-    /// Resolve a full-or-short tag id prefix to a single `TagId`. Answered with
-    /// [`ControlResponse::TagId`] (or an `Error`).
+    /// Resolve a user-supplied term (id, id prefix, or name) to a single
+    /// `TagId`. Answered with [`ControlResponse::TagId`] (or an `Error`).
     ResolveTagId {
-        prefix: String,
+        term: String,
+        deleted_rule: DeletedRule,
     },
     TagsForFile {
         file_id: FileId,

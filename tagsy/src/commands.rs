@@ -74,8 +74,8 @@ pub enum Commands {
         /// walked recursively.
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-        /// Tags to apply to every uploaded file, each a full id or any
-        /// unambiguous short-id prefix of it.
+        /// Tags to apply to every uploaded file, each an id, id prefix, or
+        /// name that resolves to a single tag.
         #[arg(long = "tag", value_name = "TAG_ID")]
         tags: Vec<String>,
         /// Keep the local files after uploading (by default each is deleted
@@ -112,6 +112,10 @@ pub enum Commands {
     /// - `/i foo` — require the file(s) whose id starts with `foo`
     /// - `/h foo` — require the file(s) whose content hash starts with `foo`
     /// - `/l foo` — logical-path substring
+    /// - `/e foo` — match an entity by its *own* identity: a file by
+    ///   logical-path substring OR id prefix, a tag by name OR id prefix —
+    ///   never by tag membership (the axis `tagsy` uses to resolve a name/id
+    ///   argument to one file/tag)
     /// - `!` — invert the following chunk (e.g. `! /t foo`)
     /// - no prefix — match `foo` as a logical-path substring, a tag, OR the
     ///   file/tag's own id prefix
@@ -146,69 +150,69 @@ pub enum Commands {
     /// present locally, and writing back any changes.
     #[command(visible_alias = "e")]
     Edit {
-        /// The file to edit, given as a full id or any unambiguous short-id
-        /// prefix of it.
+        /// The file to edit, given as an id, any id prefix, or a name/path
+        /// that resolves to a single file.
         id: String,
     },
     /// Download a file into the current directory, fetching it from a peer
     /// first if it is not present locally.
     #[command(visible_alias = "d")]
     Download {
-        /// The file to download, given as a full id or any unambiguous
-        /// short-id prefix of it.
+        /// The file to download, given as an id, any id prefix, or a name/path
+        /// that resolves to a single file.
         id: String,
     },
     /// Delete a file.
     DeleteFile {
-        /// The file to delete, given as a full id or any unambiguous short-id
-        /// prefix of it.
+        /// The file to delete, given as an id, any id prefix, or a name/path
+        /// that resolves to a single file.
         id: String,
     },
     /// Restore a soft-deleted file (best-effort; fails if no source still holds
     /// its bytes).
     RestoreFile {
-        /// The deleted file to restore, given as a full id or any unambiguous
-        /// short-id prefix of it.
+        /// The deleted file to restore, given as an id, any id prefix, or a
+        /// name/path that resolves to a single deleted file.
         id: String,
     },
     /// Delete a tag.
     DeleteTag {
-        /// The tag to delete (a full id or any unambiguous short-id prefix of
-        /// it.
+        /// The tag to delete, given as an id, any id prefix, or a name that
+        /// resolves to a single tag.
         tag_id: String,
     },
     /// Restore a soft-deleted tag.
     RestoreTag {
-        /// The deleted tag to restore (a full id or any unambiguous short-id
-        /// prefix of it.
+        /// The deleted tag to restore, given as an id, any id prefix, or a name
+        /// that resolves to a single deleted tag.
         tag_id: String,
     },
     /// Apply one or more tags to an existing file.
     #[command(visible_alias = "t")]
     Tag {
-        /// The file to tag, given as a full id or any unambiguous short-id
-        /// prefix of it.
+        /// The file to tag, given as an id, any id prefix, or a name/path that
+        /// resolves to a single file.
         id: String,
-        /// One or more tags to apply, each a full id or any unambiguous
-        /// short-id prefix of it.
+        /// One or more tags to apply, each an id, id prefix, or name that
+        /// resolves to a single tag.
         #[arg(required = true)]
         tag_ids: Vec<String>,
     },
     /// Remove one or more tags from a file.
     #[command(visible_alias = "ut")]
     Untag {
-        /// The file to untag, given as a full id or any unambiguous short-id
-        /// prefix of it.
+        /// The file to untag, given as an id, any id prefix, or a name/path
+        /// that resolves to a single file.
         id: String,
-        /// One or more tags to remove, each a full id or any unambiguous
-        /// short-id prefix of it.
+        /// One or more tags to remove, each an id, id prefix, or name that
+        /// resolves to a single tag.
         #[arg(required = true)]
         tag_ids: Vec<String>,
     },
     /// List the tags applied to a file.
     TagsForFile {
-        /// The file to inspect, given as a full id or any unambiguous short-id
-        /// prefix of it.
+        /// The file to inspect, given as an id, any id prefix, or a name/path
+        /// that resolves to a single file.
         id: String,
         /// Also include tags reached through the tag hierarchy (the tags this
         /// file's tags are subtags of), walking transitively.
@@ -217,8 +221,8 @@ pub enum Commands {
     },
     /// Rename a tag.
     RenameTag {
-        /// The tag to rename (a full id or any unambiguous short-id prefix of
-        /// it.
+        /// The tag to rename, given as an id, any id prefix, or a name that
+        /// resolves to a single tag.
         tag_id: String,
         /// The tag's new name.
         name: String,
@@ -228,8 +232,8 @@ pub enum Commands {
     /// just the border and leaves the dot color, shape, etc. untouched. Dot
     /// color is one property (`--dot-color`), so this is also how you recolor.
     SetTagStyle {
-        /// The tag to restyle (a full id or any unambiguous short-id prefix of
-        /// it).
+        /// The tag to restyle, given as an id, any id prefix, or a name that
+        /// resolves to a single tag.
         tag_id: String,
         #[command(flatten)]
         style: StyleArgs,
@@ -237,8 +241,8 @@ pub enum Commands {
     /// Move (rename) a file to a new logical path.
     #[command(visible_alias = "mv")]
     Move {
-        /// The file to move, given as a full id or any unambiguous short-id
-        /// prefix of it.
+        /// The file to move, given as an id, any id prefix, or a name/path
+        /// that resolves to a single file.
         id: String,
         /// The file's new logical path.
         path: String,
@@ -246,29 +250,29 @@ pub enum Commands {
     /// Make a tag a subtag of one or more parent tags.
     #[command(visible_alias = "tt")]
     TagTag {
-        /// The child tag, given as a full id or any unambiguous short-id prefix
-        /// of it.
+        /// The child tag, given as an id, any id prefix, or a name that
+        /// resolves to a single tag.
         child: String,
-        /// One or more parent tags to nest the child under, each a full id or
-        /// any unambiguous short-id prefix of it.
+        /// One or more parent tags to nest the child under, each an id, id
+        /// prefix, or name that resolves to a single tag.
         #[arg(required = true)]
         parents: Vec<String>,
     },
     /// Remove a tag as a subtag of one or more parent tags.
     #[command(visible_alias = "utt")]
     UntagTag {
-        /// The child tag, given as a full id or any unambiguous short-id prefix
-        /// of it.
+        /// The child tag, given as an id, any id prefix, or a name that
+        /// resolves to a single tag.
         child: String,
-        /// One or more parent tags to detach the child from, each a full id or
-        /// any unambiguous short-id prefix of it.
+        /// One or more parent tags to detach the child from, each an id, id
+        /// prefix, or name that resolves to a single tag.
         #[arg(required = true)]
         parents: Vec<String>,
     },
     /// List the subtags (children) of a tag.
     Subtags {
-        /// The parent tag, given as a full id or any unambiguous short-id
-        /// prefix of it.
+        /// The parent tag, given as an id, any id prefix, or a name that
+        /// resolves to a single tag.
         tag_id: String,
         /// Walk the hierarchy transitively (include subtags of subtags).
         #[arg(long)]

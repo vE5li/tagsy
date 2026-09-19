@@ -324,15 +324,29 @@ fn unexpected(response: ControlResponse) -> ApiError {
 // and pattern-matches the expected `ControlResponse`, treating anything else
 // (including `ControlResponse::Error`) via `unexpected`.
 impl Backend for IpcBackend {
-    async fn resolve_file_id(&self, prefix: String) -> Result<FileId, ApiError> {
-        match self.call(ControlRequest::ResolveFileId { prefix }).await? {
+    async fn resolve_file_id(
+        &self,
+        term: String,
+        deleted_rule: DeletedRule,
+    ) -> Result<FileId, ApiError> {
+        match self
+            .call(ControlRequest::ResolveFileId { term, deleted_rule })
+            .await?
+        {
             ControlResponse::FileId(file_id) => Ok(file_id),
             other => Err(unexpected(other)),
         }
     }
 
-    async fn resolve_tag_id(&self, prefix: String) -> Result<TagId, ApiError> {
-        match self.call(ControlRequest::ResolveTagId { prefix }).await? {
+    async fn resolve_tag_id(
+        &self,
+        term: String,
+        deleted_rule: DeletedRule,
+    ) -> Result<TagId, ApiError> {
+        match self
+            .call(ControlRequest::ResolveTagId { term, deleted_rule })
+            .await?
+        {
             ControlResponse::TagId(tag_id) => Ok(tag_id),
             other => Err(unexpected(other)),
         }

@@ -86,10 +86,6 @@ pub enum DatabaseError {
     InvalidColor,
     #[error("a tag cannot be its own subtag")]
     CantTagItself,
-    /// A short-id prefix matched more than one row, so it cannot be resolved to
-    /// a single id. Carries the ambiguous prefix that was queried.
-    #[error("ambiguous id prefix '{0}': matches multiple rows")]
-    AmbiguousIdPrefix(String),
     /// A raw failure from the underlying SQLite driver.
     ///
     /// `message` is the rendered `rusqlite::Error` and is the only part that

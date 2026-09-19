@@ -84,7 +84,7 @@ pub async fn run(
             // tag-id command. Resolved once and applied to every file.
             let mut resolved_tags = Vec::with_capacity(tags.len());
             for tag in &tags {
-                resolved_tags.push(common::resolve_tag_id(backend, tag).await?);
+                resolved_tags.push(common::resolve_tag_id(backend, tag, DeletedRule::Exclude).await?);
             }
 
             let mut name_cache = common::NameCache::new();
@@ -213,7 +213,7 @@ pub async fn run(
         // A crash between (1) and (3) only leaks a temp file, which the daemon
         // bulk-wipes on next start.
         Commands::Edit { id } => {
-            let file_id = common::resolve_file_id(backend, &id).await?;
+            let file_id = common::resolve_file_id(backend, &id, DeletedRule::Exclude).await?;
 
             let path = match backend.begin_edit(file_id).await {
                 Ok(path) => path,
@@ -250,7 +250,7 @@ pub async fn run(
         // them from a peer — then, instead of editing, copy them into the current
         // directory.
         Commands::Download { id } => {
-            let file_id = common::resolve_file_id(backend, &id).await?;
+            let file_id = common::resolve_file_id(backend, &id, DeletedRule::Exclude).await?;
 
             // Pull the file's metadata once (a single by-id lookup): we need its content
             // hash to fetch (if it isn't local) and its logical path to pick a sensible
@@ -342,7 +342,7 @@ pub async fn run(
             );
         }
         Commands::DeleteFile { id } => {
-            let file_id = common::resolve_file_id(backend, &id).await?;
+            let file_id = common::resolve_file_id(backend, &id, DeletedRule::Exclude).await?;
 
             backend
                 .delete_file(file_id)
@@ -356,7 +356,10 @@ pub async fn run(
             );
         }
         Commands::RestoreFile { id } => {
-            let file_id = common::resolve_file_id(backend, &id).await?;
+            // The restore path names a *deleted* file, so resolution must see
+            // tombstoned rows.
+            let file_id =
+                common::resolve_file_id(backend, &id, DeletedRule::Include).await?;
 
             backend
                 .restore_file(file_id)
@@ -370,7 +373,7 @@ pub async fn run(
             );
         }
         Commands::DeleteTag { tag_id } => {
-            let tag_id = common::resolve_tag_id(backend, &tag_id).await?;
+            let tag_id = common::resolve_tag_id(backend, &tag_id, DeletedRule::Exclude).await?;
 
             backend
                 .delete_tag(tag_id)
@@ -384,7 +387,9 @@ pub async fn run(
             );
         }
         Commands::RestoreTag { tag_id } => {
-            let tag_id = common::resolve_tag_id(backend, &tag_id).await?;
+            // Same as RestoreFile: a deleted tag must be resolvable.
+            let tag_id =
+                common::resolve_tag_id(backend, &tag_id, DeletedRule::Include).await?;
 
             backend
                 .restore_tag(tag_id)
@@ -398,11 +403,11 @@ pub async fn run(
             );
         }
         Commands::Tag { id, tag_ids } => {
-            let file_id = common::resolve_file_id(backend, &id).await?;
+            let file_id = common::resolve_file_id(backend, &id, DeletedRule::Exclude).await?;
 
             let mut applied = Vec::new();
             for tag in &tag_ids {
-                let tag_id = common::resolve_tag_id(backend, tag).await?;
+                let tag_id = common::resolve_tag_id(backend, tag, DeletedRule::Exclude).await?;
 
                 backend
                     .tag_file(tag_id, file_id)
@@ -425,11 +430,11 @@ pub async fn run(
             }
         }
         Commands::Untag { id, tag_ids } => {
-            let file_id = common::resolve_file_id(backend, &id).await?;
+            let file_id = common::resolve_file_id(backend, &id, DeletedRule::Exclude).await?;
 
             let mut removed = Vec::new();
             for tag in &tag_ids {
-                let tag_id = common::resolve_tag_id(backend, tag).await?;
+                let tag_id = common::resolve_tag_id(backend, tag, DeletedRule::Exclude).await?;
 
                 backend
                     .untag_file(tag_id, file_id)
@@ -455,7 +460,7 @@ pub async fn run(
             id,
             include_subtags,
         } => {
-            let file_id = common::resolve_file_id(backend, &id).await?;
+            let file_id = common::resolve_file_id(backend, &id, DeletedRule::Exclude).await?;
             let tag_ids = backend
                 .tags_for_file(file_id, common::subtag_rule(include_subtags))
                 .await
@@ -470,7 +475,7 @@ pub async fn run(
             emit_tags(output_mode, &tags, &tag_tags);
         }
         Commands::RenameTag { tag_id, name } => {
-            let tag_id = common::resolve_tag_id(backend, &tag_id).await?;
+            let tag_id = common::resolve_tag_id(backend, &tag_id, DeletedRule::Exclude).await?;
 
             backend
                 .rename_tag(tag_id, name.clone())
@@ -484,7 +489,7 @@ pub async fn run(
             );
         }
         Commands::SetTagStyle { tag_id, style } => {
-            let tag_id = common::resolve_tag_id(backend, &tag_id).await?;
+            let tag_id = common::resolve_tag_id(backend, &tag_id, DeletedRule::Exclude).await?;
 
             // Fetch the current style so unspecified flags are preserved — a
             // restyle replaces the whole style, so we must send the merged value.
@@ -506,7 +511,7 @@ pub async fn run(
             );
         }
         Commands::Move { id, path } => {
-            let file_id = common::resolve_file_id(backend, &id).await?;
+            let file_id = common::resolve_file_id(backend, &id, DeletedRule::Exclude).await?;
 
             backend
                 .move_file(file_id, path.clone())
@@ -520,11 +525,11 @@ pub async fn run(
             );
         }
         Commands::TagTag { child, parents } => {
-            let child_id = common::resolve_tag_id(backend, &child).await?;
+            let child_id = common::resolve_tag_id(backend, &child, DeletedRule::Exclude).await?;
 
             let mut applied = Vec::new();
             for parent in &parents {
-                let parent_id = common::resolve_tag_id(backend, parent).await?;
+                let parent_id = common::resolve_tag_id(backend, parent, DeletedRule::Exclude).await?;
 
                 backend
                     .tag_tag(parent_id, child_id)
@@ -547,11 +552,11 @@ pub async fn run(
             }
         }
         Commands::UntagTag { child, parents } => {
-            let child_id = common::resolve_tag_id(backend, &child).await?;
+            let child_id = common::resolve_tag_id(backend, &child, DeletedRule::Exclude).await?;
 
             let mut removed = Vec::new();
             for parent in &parents {
-                let parent_id = common::resolve_tag_id(backend, parent).await?;
+                let parent_id = common::resolve_tag_id(backend, parent, DeletedRule::Exclude).await?;
 
                 backend
                     .untag_tag(parent_id, child_id)
@@ -574,7 +579,7 @@ pub async fn run(
             }
         }
         Commands::Subtags { tag_id, recursive } => {
-            let tag_id = common::resolve_tag_id(backend, &tag_id).await?;
+            let tag_id = common::resolve_tag_id(backend, &tag_id, DeletedRule::Exclude).await?;
             let subtag_ids = backend
                 .subtags_for_tag(tag_id, common::subtag_rule(recursive))
                 .await

@@ -16,7 +16,6 @@ impl From<DatabaseError> for ApiError {
     fn from(error: DatabaseError) -> Self {
         match error {
             DatabaseError::MissingFile | DatabaseError::MissingTag => ApiError::UnknownId,
-            DatabaseError::AmbiguousIdPrefix(prefix) => ApiError::AmbiguousId(prefix),
             DatabaseError::InvalidTagName => {
                 ApiError::InvalidArgument("invalid tag name".to_owned())
             }

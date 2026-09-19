@@ -269,7 +269,7 @@ pub enum _ApiError {
     /// The entity exists but no reachable device holds its bytes. Transient —
     /// worth retrying once a holder comes online.
     ContentUnavailable,
-    /// A short-id prefix matched more than one row. Carries the prefix.
+    /// A term (id prefix or name) matched more than one row. Carries the term.
     AmbiguousId(String),
     InvalidArgument(String),
     Transport(String),
@@ -585,9 +585,10 @@ impl From<ConnectedPeer> for ConnectedPeerDto {
 /// # The string-id convention
 ///
 /// **Every id crossing this boundary is a `String`**, never an opaque
-/// `FileId`/`TagId` handle. Ids are accepted as full-or-short prefixes and
-/// resolved daemon-side; they are returned as full UUID strings, matching what
-/// the DTOs (`FileEntry::file_id`, `TagEntry::tag_id`) already carry.
+/// `FileId`/`TagId` handle. A term is accepted as a full id, any id prefix, or
+/// a name/path, and resolved daemon-side to a single entity; ids are returned
+/// as full UUID strings, matching what the DTOs (`FileEntry::file_id`,
+/// `TagEntry::tag_id`) already carry.
 ///
 /// This is not a convenience layer over a "real" handle-based API — it is the
 /// only workable shape. An opaque handle is *consumed* when it crosses the
@@ -674,7 +675,7 @@ impl Tagsy {
         subtag_rule: SubtagRule,
     ) -> Result<Vec<String>, ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id).await?;
+        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
         Ok(backend
             .tags_for_file(file_id, subtag_rule)
             .await?
@@ -692,7 +693,7 @@ impl Tagsy {
         subtag_rule: SubtagRule,
     ) -> Result<Vec<String>, ApiError> {
         let backend = self.try_backend()?;
-        let tag_id = backend.resolve_tag_id(tag_id).await?;
+        let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Exclude).await?;
         Ok(backend
             .tags_for_tag(tag_id, subtag_rule)
             .await?
@@ -709,7 +710,7 @@ impl Tagsy {
         subtag_rule: SubtagRule,
     ) -> Result<Vec<String>, ApiError> {
         let backend = self.try_backend()?;
-        let tag_id = backend.resolve_tag_id(tag_id).await?;
+        let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Exclude).await?;
         Ok(backend
             .subtags_for_tag(tag_id, subtag_rule)
             .await?
@@ -722,8 +723,8 @@ impl Tagsy {
     /// String-id variant of the underlying `tag_tag` call.
     pub async fn tag_tag(&self, parent_id: String, subtag_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let parent_id = backend.resolve_tag_id(parent_id).await?;
-        let subtag_id = backend.resolve_tag_id(subtag_id).await?;
+        let parent_id = backend.resolve_tag_id(parent_id, DeletedRule::Exclude).await?;
+        let subtag_id = backend.resolve_tag_id(subtag_id, DeletedRule::Exclude).await?;
         backend.tag_tag(parent_id, subtag_id).await
     }
 
@@ -731,8 +732,8 @@ impl Tagsy {
     /// the underlying `untag_tag` call.
     pub async fn untag_tag(&self, parent_id: String, subtag_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let parent_id = backend.resolve_tag_id(parent_id).await?;
-        let subtag_id = backend.resolve_tag_id(subtag_id).await?;
+        let parent_id = backend.resolve_tag_id(parent_id, DeletedRule::Exclude).await?;
+        let subtag_id = backend.resolve_tag_id(subtag_id, DeletedRule::Exclude).await?;
         backend.untag_tag(parent_id, subtag_id).await
     }
 
@@ -759,22 +760,23 @@ impl Tagsy {
         })
     }
 
-    /// Get a single file's flattened [`FileEntry`] by id string (a full or
-    /// short id prefix). Errors `UnknownId` if unknown.
+    /// Get a single file's flattened [`FileEntry`] by term (a full id, id
+    /// prefix, or name/path). Errors `UnknownId` if unknown.
     ///
     /// `deleted_rule` mirrors [`Self::run_query`]: under
     /// [`DeletedRule::Exclude`] a tombstoned file reads as `UnknownId` (the
     /// default for pickers and operational lookups); under
     /// [`DeletedRule::Include`] it comes back with `FileEntry::deleted =
     /// true`, so a detail screen opened from the "show deleted" search can
-    /// render its metadata.
+    /// render its metadata. The same `deleted_rule` governs resolution, so a
+    /// deleted file can be named when `Include` is requested.
     pub async fn get_file_entry(
         &self,
         file_id: String,
         deleted_rule: DeletedRule,
     ) -> Result<FileEntry, ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id).await?;
+        let file_id = backend.resolve_file_id(file_id, deleted_rule).await?;
         Ok(FileEntry::from(
             backend.get_file(file_id, deleted_rule).await?,
         ))
@@ -798,7 +800,7 @@ impl Tagsy {
     /// bytes across the bridge. Errors `UnknownId` if the id itself is unknown.
     pub async fn local_path_for_file(&self, file_id: String) -> Result<Option<String>, ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id).await?;
+        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
         Ok(backend
             .local_path_for_file(file_id)
             .await?
@@ -815,7 +817,7 @@ impl Tagsy {
     /// `UnknownId` only if the id itself is unknown.
     pub async fn get_preview(&self, file_id: String) -> Result<PreviewEntry, ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id).await?;
+        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
         Ok(PreviewEntry::from(backend.get_preview(file_id).await?))
     }
 
@@ -836,7 +838,7 @@ impl Tagsy {
         expected_hash: String,
     ) -> Result<String, ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id).await?;
+        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
         Ok(backend
             .fetch_file(file_id, expected_hash)
             .await?
@@ -864,7 +866,7 @@ impl Tagsy {
     /// tracked between calls.
     pub async fn begin_edit(&self, file_id: String) -> Result<String, ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id).await?;
+        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
         Ok(backend
             .begin_edit(file_id)
             .await?
@@ -891,7 +893,7 @@ impl Tagsy {
     /// the same DTO-flattening pattern used elsewhere in this crate.
     pub async fn finish_edit(&self, file_id: String, path: String) -> Result<bool, ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id).await?;
+        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
         Ok(backend
             .finish_edit(file_id, std::path::PathBuf::from(path))
             .await?
@@ -946,8 +948,8 @@ impl Tagsy {
             .collect())
     }
 
-    /// Get a single tag's flattened [`TagEntry`] by id string (a full or short
-    /// id prefix). Errors `UnknownId` if unknown. See
+    /// Get a single tag's flattened [`TagEntry`] by term (a full id, id
+    /// prefix, or name). Errors `UnknownId` if unknown. See
     /// [`Self::get_file_entry`] for the `deleted_rule` semantics.
     pub async fn get_tag_entry(
         &self,
@@ -955,7 +957,7 @@ impl Tagsy {
         deleted_rule: DeletedRule,
     ) -> Result<TagEntry, ApiError> {
         let backend = self.try_backend()?;
-        let tag_id = backend.resolve_tag_id(tag_id).await?;
+        let tag_id = backend.resolve_tag_id(tag_id, deleted_rule).await?;
         Ok(TagEntry::from(backend.get_tag(tag_id, deleted_rule).await?))
     }
 
@@ -974,7 +976,7 @@ impl Tagsy {
     /// Delete a tag.
     pub async fn delete_tag(&self, tag_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let tag_id = backend.resolve_tag_id(tag_id).await?;
+        let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Exclude).await?;
         backend.delete_tag(tag_id).await
     }
 
@@ -984,7 +986,11 @@ impl Tagsy {
     /// the delete.
     pub async fn restore_tag(&self, tag_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let tag_id = backend.resolve_tag_id(tag_id).await?;
+        // The restore path names a *deleted* tag, so resolution must see
+        // tombstoned rows.
+        let tag_id = backend
+            .resolve_tag_id(tag_id, DeletedRule::Include)
+            .await?;
         backend.restore_tag(tag_id).await
     }
 
@@ -992,7 +998,7 @@ impl Tagsy {
     /// live UI (list, detail) refreshes without an explicit reload.
     pub async fn rename_tag(&self, tag_id: String, name: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let tag_id = backend.resolve_tag_id(tag_id).await?;
+        let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Exclude).await?;
         backend.rename_tag(tag_id, name).await
     }
 
@@ -1005,7 +1011,7 @@ impl Tagsy {
         style: TagStyleEntry,
     ) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let tag_id = backend.resolve_tag_id(tag_id).await?;
+        let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Exclude).await?;
         backend.set_tag_style(tag_id, style.into()).await
     }
 
@@ -1016,7 +1022,7 @@ impl Tagsy {
     /// is where the bytes currently live (e.g. the shared-file path the
     /// platform hands us).
     ///
-    /// `tags` are the string ids (full-or-short prefixes, as carried by
+    /// `tags` are the string terms (ids, id prefixes, or names — as carried by
     /// `TagEntry.tag_id`) to apply to the new file; they are resolved to
     /// `TagId` handles here. Returns the new file's id as a string, for the
     /// same reason (see the type-level docs on the string-id convention).
@@ -1029,7 +1035,7 @@ impl Tagsy {
         let backend = self.try_backend()?;
         let mut tag_ids = Vec::with_capacity(tags.len());
         for tag in tags {
-            tag_ids.push(backend.resolve_tag_id(tag).await?);
+            tag_ids.push(backend.resolve_tag_id(tag, DeletedRule::Exclude).await?);
         }
         Ok(backend
             .upload_file(std::path::PathBuf::from(path), path_name, tag_ids)
@@ -1040,7 +1046,7 @@ impl Tagsy {
     /// Delete a file.
     pub async fn delete_file(&self, file_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id).await?;
+        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
         backend.delete_file(file_id).await
     }
 
@@ -1049,7 +1055,10 @@ impl Tagsy {
     /// vault or a connected peer) still holds the file's bytes.
     pub async fn restore_file(&self, file_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id).await?;
+        // Same as restore_tag: a deleted file must be resolvable.
+        let file_id = backend
+            .resolve_file_id(file_id, DeletedRule::Include)
+            .await?;
         backend.restore_file(file_id).await
     }
 
@@ -1077,23 +1086,23 @@ impl Tagsy {
     /// string it already has.
     pub async fn move_file(&self, file_id: String, logical_path: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id).await?;
+        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
         backend.move_file(file_id, logical_path).await
     }
 
     /// Apply `tag_id` to `file_id`.
     pub async fn tag_file(&self, tag_id: String, file_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let tag_id = backend.resolve_tag_id(tag_id).await?;
-        let file_id = backend.resolve_file_id(file_id).await?;
+        let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Exclude).await?;
+        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
         backend.tag_file(tag_id, file_id).await
     }
 
     /// Remove `tag_id` from `file_id`.
     pub async fn untag_file(&self, tag_id: String, file_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let tag_id = backend.resolve_tag_id(tag_id).await?;
-        let file_id = backend.resolve_file_id(file_id).await?;
+        let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Exclude).await?;
+        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
         backend.untag_file(tag_id, file_id).await
     }
 

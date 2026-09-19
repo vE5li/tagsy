@@ -34,18 +34,30 @@ use crate::{
 /// so callers — notably `flutter_rust_bridge`, which spawns them on a
 /// multi-threaded runtime — can move them across threads.
 pub trait Backend {
-    /// Resolve a full-or-short file id `prefix` to a single [`FileId`]. Errors
-    /// with `UnknownId` if nothing matches or `AmbiguousId` if several do.
+    /// Resolve a user-supplied `term` — a full id, any id prefix, or a
+    /// name/path — to a single [`FileId`]. Matches by logical-path substring
+    /// **or** id prefix (never by tag membership); an exact path wins over a
+    /// substring. Errors with `UnknownId` if nothing matches or `AmbiguousId`
+    /// (carrying `term`) if several do.
+    ///
+    /// `deleted_rule` governs whether a tombstoned file can be named — pass
+    /// [`DeletedRule::Exclude`] for operational lookups and
+    /// [`DeletedRule::Include`] on the restore path.
     fn resolve_file_id(
         &self,
-        prefix: String,
+        term: String,
+        deleted_rule: DeletedRule,
     ) -> impl Future<Output = Result<FileId, ApiError>> + Send;
 
-    /// Resolve a full-or-short tag id `prefix` to a single [`TagId`]. Errors
-    /// with `UnknownId` if nothing matches or `AmbiguousId` if several do.
+    /// Resolve a user-supplied `term` — a full id, any id prefix, or a name —
+    /// to a single [`TagId`]. Matches by name substring **or** id prefix
+    /// (never by subtag membership); an exact name wins over a substring.
+    /// Errors with `UnknownId` if nothing matches or `AmbiguousId` (carrying
+    /// `term`) if several do. See [`Self::resolve_file_id`] for `deleted_rule`.
     fn resolve_tag_id(
         &self,
-        prefix: String,
+        term: String,
+        deleted_rule: DeletedRule,
     ) -> impl Future<Output = Result<TagId, ApiError>> + Send;
 
     /// List the tags applied to `file_id`.

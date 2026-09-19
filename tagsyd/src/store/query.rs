@@ -76,6 +76,27 @@ pub enum QueryTerm {
     /// Negation of [`QueryTerm::AnyMatch`]: must match *none* of the text, any
     /// tag in the set, or any file id in the set.
     NotAnyMatch(TextPattern, Vec<TagId>, Vec<FileId>),
+    /// Matches an entity by its **own identity** — [`QueryTerm::AnyMatch`]
+    /// minus the tag-membership axis. Backs the `/e` prefix and CLI/name
+    /// resolution.
+    ///
+    /// On the **file side**: the logical path matches the [`TextPattern`]
+    /// **or** the file's id is in the [`Vec<FileId>`] set (a resolved
+    /// id-prefix). The [`Vec<TagId>`] is ignored — a file is never matched for
+    /// merely *carrying* a tag, which is the sole difference from `AnyMatch`.
+    ///
+    /// On the **tag side**: the tag's name matches the pattern **or** the tag
+    /// *is* one of the tags in the [`Vec<TagId>`] set (the resolved tags
+    /// themselves — **not** their subtags, the other difference from
+    /// `AnyMatch`). The [`Vec<FileId>`] is ignored (a file id never identifies
+    /// a tag).
+    ///
+    /// As with `AnyMatch`, an empty tag/id set does **not** mean "matches
+    /// nothing" — the text side still stands.
+    EntityMatches(TextPattern, Vec<TagId>, Vec<FileId>),
+    /// Negation of [`QueryTerm::EntityMatches`]: must match *none* of the text,
+    /// the tag set (tag side), or the file-id set (file side).
+    NotEntityMatches(TextPattern, Vec<TagId>, Vec<FileId>),
 }
 
 /// How the text half of a [`QueryTerm`] should be interpreted.
@@ -178,6 +199,9 @@ impl CatalogStore {
     /// - [`QueryTerm::AnyMatch`] / [`QueryTerm::NotAnyMatch`]: its logical path
     ///   matches the pattern **or** it carries any tag in the set **or** its id
     ///   is in the resolved id set — the "prefix-less" chunk semantics.
+    /// - [`QueryTerm::EntityMatches`] / [`QueryTerm::NotEntityMatches`]: its
+    ///   logical path matches the pattern **or** its id is in the resolved id
+    ///   set — `Any` without the tag-membership axis (the tag set is ignored).
     ///
     /// An empty term list matches every file; an empty tag set inside a term
     /// matches no tag (so `HasTag([])` matches nothing and `NotTag([])`
@@ -282,7 +306,9 @@ impl CatalogStore {
                     | QueryTerm::LogicalMatches(_)
                     | QueryTerm::NotLogicalMatches(_)
                     | QueryTerm::AnyMatch(..)
-                    | QueryTerm::NotAnyMatch(..),
+                    | QueryTerm::NotAnyMatch(..)
+                    | QueryTerm::EntityMatches(..)
+                    | QueryTerm::NotEntityMatches(..),
             )
         });
 
@@ -324,6 +350,17 @@ impl CatalogStore {
                     QueryTerm::NotAnyMatch(pattern, tag_ids, file_ids) => {
                         let mut member_files = files_for_any_tag(tag_ids)?;
                         member_files.extend(file_ids.iter().copied());
+                        any_tag_sets.push((pattern.compile(), member_files, true));
+                    }
+                    // `/e`: like `Any` but the membership side is the resolved
+                    // file-id set *alone* — the tag set is deliberately ignored,
+                    // so a file is never matched for merely carrying a tag.
+                    QueryTerm::EntityMatches(pattern, _tag_ids, file_ids) => {
+                        let member_files: BTreeSet<FileId> = file_ids.iter().copied().collect();
+                        any_tag_sets.push((pattern.compile(), member_files, false));
+                    }
+                    QueryTerm::NotEntityMatches(pattern, _tag_ids, file_ids) => {
+                        let member_files: BTreeSet<FileId> = file_ids.iter().copied().collect();
                         any_tag_sets.push((pattern.compile(), member_files, true));
                     }
                     _ => continue,
@@ -375,6 +412,10 @@ impl CatalogStore {
     ///   names; `HasTag` (`/t` / `/T`) deliberately stays subtags-only. The
     ///   `Any` file-id set is ignored here, since a file id never identifies a
     ///   tag.
+    /// - [`QueryTerm::EntityMatches`] / [`QueryTerm::NotEntityMatches`]: the
+    ///   tag's name matches the pattern **or** the tag *is* one of the tags in
+    ///   the set — like `AnyMatch` but **without** the subtag expansion (the
+    ///   resolved tags themselves only). The file-id set is ignored.
     ///
     /// An empty term list matches every tag; an empty tag set inside a term
     /// matches no tag. For [`QueryTerm::AnyMatch`] the text side still
@@ -461,7 +502,9 @@ impl CatalogStore {
                 QueryTerm::NameMatches(_)
                     | QueryTerm::NotNameMatches(_)
                     | QueryTerm::AnyMatch(..)
-                    | QueryTerm::NotAnyMatch(..),
+                    | QueryTerm::NotAnyMatch(..)
+                    | QueryTerm::EntityMatches(..)
+                    | QueryTerm::NotEntityMatches(..),
             )
         });
 
@@ -506,6 +549,17 @@ impl CatalogStore {
                     QueryTerm::NotAnyMatch(pattern, tag_ids, _file_ids) => {
                         let mut members = subtags_of_any(tag_ids)?;
                         members.extend(tag_ids.iter().copied());
+                        any_tag_sets.push((pattern.compile(), members, true));
+                    }
+                    // `/e`: name **or** the resolved tags *themselves* — never
+                    // their subtags (the membership axis `AnyMatch` adds). The
+                    // file-id set is ignored, as it is for every tag-side term.
+                    QueryTerm::EntityMatches(pattern, tag_ids, _file_ids) => {
+                        let members: BTreeSet<TagId> = tag_ids.iter().copied().collect();
+                        any_tag_sets.push((pattern.compile(), members, false));
+                    }
+                    QueryTerm::NotEntityMatches(pattern, tag_ids, _file_ids) => {
+                        let members: BTreeSet<TagId> = tag_ids.iter().copied().collect();
                         any_tag_sets.push((pattern.compile(), members, true));
                     }
                     _ => continue,
@@ -953,6 +1007,96 @@ mod tests {
             .into_iter()
             .collect();
         assert!(matched.is_empty());
+    }
+
+    /// `/e` on the file side matches by path **or** id, but — unlike a bare
+    /// `Any` token — never by tag membership: a file that merely *carries* a
+    /// tag whose name matches the text is not returned.
+    #[test]
+    fn file_ids_for_query_entity_match_excludes_tag_membership() {
+        use crate::store::fixtures::file_id_from_hex;
+        let mut database = memory_db();
+
+        // A tag whose *name* contains the search text.
+        let report_tag = TagId::new();
+        database
+            .add_tag(report_tag, "report", &dot_style("red"), 1)
+            .unwrap();
+
+        // `by_path` matches on its logical path; `by_id`'s id prefix matches;
+        // `tagged_only` carries the `report` tag but neither its path nor id
+        // relate to the text.
+        let by_path = file_id_from_hex("ffff000000000000000000000000000f");
+        let by_id = file_id_from_hex("abcd000000000000000000000000000a");
+        let tagged_only = file_id_from_hex("1111000000000000000000000000001a");
+        database
+            .add_file(by_path, &LogicalPath::new("report-final.txt"), 0)
+            .unwrap();
+        database
+            .add_file(by_id, &LogicalPath::new("unrelated"), 0)
+            .unwrap();
+        database
+            .add_file(tagged_only, &LogicalPath::new("misc"), 0)
+            .unwrap();
+        for id in [by_path, by_id, tagged_only] {
+            database.record_version(id, "hash", "local", 1).unwrap();
+        }
+        database.tag_file(report_tag, tagged_only, 1).unwrap();
+
+        // Resolved sets mirror what `parse_query` would produce for `/e report`:
+        // the tag set carries `report_tag`, the file-id set carries `by_id`.
+        let terms = vec![QueryTerm::EntityMatches(
+            TextPattern::Substring("report".to_owned()),
+            vec![report_tag],
+            vec![by_id],
+        )];
+        assert_eq!(
+            matching_files(&database, &terms),
+            BTreeSet::from([by_path, by_id]),
+            "path- and id-matches count; a file matched only by tag membership must not"
+        );
+    }
+
+    /// `/e` on the tag side matches by name **or** the resolved tag itself, but
+    /// — unlike a bare `Any` token — never pulls in the resolved tag's
+    /// *subtags*.
+    #[test]
+    fn tag_ids_for_query_entity_match_excludes_subtags() {
+        use crate::store::fixtures::tag_id_from_hex;
+        let database = memory_db();
+
+        // `work`'s id prefix is the search text; `urgent` is its subtag;
+        // `unrelated` is neither.
+        let work = tag_id_from_hex("abcd000000000000000000000000000a");
+        let urgent = TagId::new();
+        let unrelated = TagId::new();
+        database.add_tag(work, "work", &dot_style("red"), 1).unwrap();
+        database
+            .add_tag(urgent, "urgent", &dot_style("red"), 1)
+            .unwrap();
+        database
+            .add_tag(unrelated, "leisure", &dot_style("red"), 1)
+            .unwrap();
+        database.tag_tag(work, urgent, 1).unwrap();
+
+        // Resolved sets for `/e abcd`: text is the hex prefix (matches no
+        // name), the tag set is the resolved `work`.
+        let terms = vec![QueryTerm::EntityMatches(
+            TextPattern::Substring("abcd".to_owned()),
+            vec![work],
+            vec![],
+        )];
+        let matched: BTreeSet<TagId> = database
+            .tag_ids_for_query(&terms, SubtagRule::Include, DeletedRule::Exclude)
+            .unwrap()
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            matched,
+            BTreeSet::from([work]),
+            "only the resolved tag itself; its subtags must not be swept in"
+        );
     }
 
     /// A file-id term empties the tag result, exactly like a logical-path term:

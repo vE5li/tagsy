@@ -134,35 +134,49 @@ pub async fn tags_by_tag(
     Ok(map)
 }
 
-/// Resolve a user-supplied file id — a full id or any unambiguous short-id
-/// prefix — to a full [`FileId`] via the daemon.
+/// Resolve a user-supplied file term — a full id, any id prefix, or a
+/// name/path — to a full [`FileId`] via the daemon.
 ///
-/// This is the single entry point every command that accepts a file id should
-/// use, so short ids work uniformly everywhere. Resolution is done daemon-side
-/// against all files, so uniqueness is re-checked at use time (a prefix that
-/// was unique when displayed may since have become ambiguous).
-pub async fn resolve_file_id(backend: &IpcBackend, input: &str) -> Result<FileId, String> {
+/// This is the single entry point every command that accepts a file should
+/// use, so the same "type a name or an id" resolution works uniformly
+/// everywhere. Resolution is done daemon-side against all files (matching by
+/// logical-path substring or id prefix, exact path preferred), so uniqueness
+/// is re-checked at use time (a term that was unique when displayed may since
+/// have become ambiguous).
+///
+/// `deleted_rule` governs whether a tombstoned file can be named; pass
+/// [`DeletedRule::Exclude`] for operational commands and
+/// [`DeletedRule::Include`] on the restore path.
+pub async fn resolve_file_id(
+    backend: &IpcBackend,
+    input: &str,
+    deleted_rule: DeletedRule,
+) -> Result<FileId, String> {
     backend
-        .resolve_file_id(input.to_owned())
+        .resolve_file_id(input.to_owned(), deleted_rule)
         .await
         .map_err(|error| match error {
-            tagsy_api::ApiError::UnknownId => format!("no file matches id '{input}'"),
+            tagsy_api::ApiError::UnknownId => format!("no file matches '{input}'"),
             other => other.to_string(),
         })
 }
 
-/// Resolve a user-supplied tag id — a full id or any unambiguous short-id
-/// prefix (as shown by `search`) — to a full [`TagId`] via the daemon.
+/// Resolve a user-supplied tag term — a full id, any id prefix, or a name — to
+/// a full [`TagId`] via the daemon.
 ///
-/// The tag counterpart of [`resolve_file_id`]. Every command that accepts a tag
-/// id should route through this so short ids work uniformly, and so uniqueness
-/// is re-checked daemon-side at use time.
-pub async fn resolve_tag_id(backend: &IpcBackend, input: &str) -> Result<TagId, String> {
+/// The tag counterpart of [`resolve_file_id`]. Every command that accepts a
+/// tag should route through this so name-or-id resolution works uniformly, and
+/// so uniqueness is re-checked daemon-side at use time.
+pub async fn resolve_tag_id(
+    backend: &IpcBackend,
+    input: &str,
+    deleted_rule: DeletedRule,
+) -> Result<TagId, String> {
     backend
-        .resolve_tag_id(input.to_owned())
+        .resolve_tag_id(input.to_owned(), deleted_rule)
         .await
         .map_err(|error| match error {
-            tagsy_api::ApiError::UnknownId => format!("no tag matches id '{input}'"),
+            tagsy_api::ApiError::UnknownId => format!("no tag matches '{input}'"),
             other => other.to_string(),
         })
 }

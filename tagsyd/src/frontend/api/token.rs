@@ -13,7 +13,7 @@
 //!    token; `!foo` is **not** a negation, it's a literal token whose text
 //!    starts with `!`.
 //! 2. An optional *kind prefix* — one of `/t`, `/T`, `/i`, `/h`, `/n`, `/l`,
-//!    again standalone:
+//!    `/e`, again standalone:
 //!    - `/t` — tag token: match tags whose name **or** id resolves from the
 //!      payload.
 //!    - `/T` — tag-id token: match tags by id prefix **only** (no name
@@ -25,6 +25,12 @@
 //!    - `/n` — name token: substring match on the file's logical path or the
 //!      tag's name.
 //!    - `/l` — logical-path token: substring match on the file's logical path.
+//!    - `/e` — entity token: match an entity by its *own identity* — a file by
+//!      its logical path (substring) **or** id prefix, a tag by its name
+//!      (substring) **or** id prefix. Unlike a bare token it never matches by
+//!      tag *membership* (a file merely carrying a matching tag, or a tag's
+//!      subtags), so it denotes "the thing itself, by name or id." This is the
+//!      axis CLI/name resolution routes through.
 //!
 //!    Prefixes are case-sensitive (`/t` and `/T` differ). Unknown `/x` tokens
 //!    are **not** prefixes: they become literal tokens whose payload starts
@@ -96,6 +102,11 @@ pub enum TokenKind {
     Name,
     /// The payload is a logical-path substring.
     Logical,
+    /// Match an entity by its own identity: a file by logical-path substring
+    /// **or** id prefix, a tag by name substring **or** id prefix. Like
+    /// [`Any`](Self::Any) minus the tag-membership axis — it never matches a
+    /// file for merely carrying a tag, nor a tag's subtags.
+    Entity,
 }
 
 /// One parsed token of the query.
@@ -164,7 +175,7 @@ fn lex_one_token(cursor: &str) -> (Option<Token>, &str) {
                 }
                 negated = true;
             }
-            "/t" | "/T" | "/i" | "/h" | "/n" | "/l" => {
+            "/t" | "/T" | "/i" | "/h" | "/n" | "/l" | "/e" => {
                 if kind.is_some() {
                     return (None, &rest[word_end..]);
                 }
@@ -175,6 +186,7 @@ fn lex_one_token(cursor: &str) -> (Option<Token>, &str) {
                     "/h" => TokenKind::ContentHash,
                     "/n" => TokenKind::Name,
                     "/l" => TokenKind::Logical,
+                    "/e" => TokenKind::Entity,
                     _ => unreachable!(),
                 });
             }
@@ -316,6 +328,15 @@ mod tests {
     fn logical(text: &str) -> Token {
         Token {
             kind: TokenKind::Logical,
+            text: text.to_owned(),
+            negated: false,
+            regex: false,
+        }
+    }
+
+    fn entity(text: &str) -> Token {
+        Token {
+            kind: TokenKind::Entity,
             text: text.to_owned(),
             negated: false,
             regex: false,
@@ -469,6 +490,15 @@ mod tests {
     fn tag_prefix_is_case_sensitive() {
         assert_eq!(lex_query("/t foo"), vec![tag("foo")]);
         assert_eq!(lex_query("/T foo"), vec![tag_id("foo")]);
+    }
+
+    /// The entity prefix `/e` lexes to its own kind, and composes with
+    /// negation and a regex payload like every other prefix.
+    #[test]
+    fn entity_prefix_lexes_distinctly() {
+        assert_eq!(lex_query("/e report"), vec![entity("report")]);
+        assert_eq!(lex_query("! /e report"), vec![negate(entity("report"))]);
+        assert_eq!(lex_query("/e %^photos/%"), vec![regex(entity("^photos/"))]);
     }
 
     #[test]

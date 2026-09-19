@@ -45,7 +45,7 @@ mod fixtures;
 pub use directory_index::{DirectoryIndex, SyncDirectoryFile};
 pub use files::ManifestRow;
 pub use query::{QueryTerm, TextPattern};
-pub use short_id::{PrefixResolution, normalize_id_prefix};
+pub use short_id::normalize_id_prefix;
 // The read-filter enums and the `Tag` row cross the port and live in
 // `tagsy-api`; re-exported here so the many `crate::store::{Tag, DeletedRule,
 // SubtagRule}` call sites keep resolving.

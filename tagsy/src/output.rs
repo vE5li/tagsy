@@ -212,10 +212,11 @@ fn tag_table(tags: &[Tag], tags_by_tag: &HashMap<TagId, Vec<String>>) -> Table {
     table
 }
 
-/// The short-id prefix comes from the daemon-computed `short_id_length`
-/// (unique against *all* files, so it is a valid global lookup key).
-/// `tags_by_file` supplies the human-readable tag names shown per file;
-/// a file absent from the map renders with an empty tag column.
+/// The short id shown here comes from the daemon-computed `short_id_length`
+/// (the fewest leading hex chars unique against *all* files right now) — a
+/// convenience handle to display, though any id prefix or a name resolves
+/// equally well. `tags_by_file` supplies the human-readable tag names shown
+/// per file; a file absent from the map renders with an empty tag column.
 fn file_table(files: &[FileInfo], tags_by_file: &HashMap<FileId, Vec<String>>) -> Table {
     let mut table = Table::new();
     table

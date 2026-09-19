@@ -87,12 +87,20 @@ impl InProcessBackend {
 }
 
 impl Backend for InProcessBackend {
-    async fn resolve_file_id(&self, prefix: String) -> Result<FileId, ApiError> {
-        self.api.resolve_file_id(&prefix)
+    async fn resolve_file_id(
+        &self,
+        term: String,
+        deleted_rule: DeletedRule,
+    ) -> Result<FileId, ApiError> {
+        self.api.resolve_file_id(&term, deleted_rule)
     }
 
-    async fn resolve_tag_id(&self, prefix: String) -> Result<TagId, ApiError> {
-        self.api.resolve_tag_id(&prefix)
+    async fn resolve_tag_id(
+        &self,
+        term: String,
+        deleted_rule: DeletedRule,
+    ) -> Result<TagId, ApiError> {
+        self.api.resolve_tag_id(&term, deleted_rule)
     }
 
     async fn tags_for_file(
@@ -346,17 +354,25 @@ impl AnyBackend {
 // than a silent behavioural bug. (`restore_tag`/`delete_tag` were in fact
 // transposed here before 6.4.)
 impl Backend for AnyBackend {
-    async fn resolve_file_id(&self, prefix: String) -> Result<FileId, ApiError> {
+    async fn resolve_file_id(
+        &self,
+        term: String,
+        deleted_rule: DeletedRule,
+    ) -> Result<FileId, ApiError> {
         match self {
-            AnyBackend::InProcess(backend) => backend.resolve_file_id(prefix).await,
-            AnyBackend::Ipc(backend) => backend.resolve_file_id(prefix).await,
+            AnyBackend::InProcess(backend) => backend.resolve_file_id(term, deleted_rule).await,
+            AnyBackend::Ipc(backend) => backend.resolve_file_id(term, deleted_rule).await,
         }
     }
 
-    async fn resolve_tag_id(&self, prefix: String) -> Result<TagId, ApiError> {
+    async fn resolve_tag_id(
+        &self,
+        term: String,
+        deleted_rule: DeletedRule,
+    ) -> Result<TagId, ApiError> {
         match self {
-            AnyBackend::InProcess(backend) => backend.resolve_tag_id(prefix).await,
-            AnyBackend::Ipc(backend) => backend.resolve_tag_id(prefix).await,
+            AnyBackend::InProcess(backend) => backend.resolve_tag_id(term, deleted_rule).await,
+            AnyBackend::Ipc(backend) => backend.resolve_tag_id(term, deleted_rule).await,
         }
     }
 

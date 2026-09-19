@@ -329,14 +329,18 @@ async fn dispatch(
     active_provider: &mut Option<(FileId, String)>,
 ) -> ControlResponse {
     match request {
-        ControlRequest::ResolveFileId { prefix } => match api.resolve_file_id(&prefix) {
-            Ok(file_id) => ControlResponse::FileId(file_id),
-            Err(error) => ControlResponse::Error(error),
-        },
-        ControlRequest::ResolveTagId { prefix } => match api.resolve_tag_id(&prefix) {
-            Ok(tag_id) => ControlResponse::TagId(tag_id),
-            Err(error) => ControlResponse::Error(error),
-        },
+        ControlRequest::ResolveFileId { term, deleted_rule } => {
+            match api.resolve_file_id(&term, deleted_rule) {
+                Ok(file_id) => ControlResponse::FileId(file_id),
+                Err(error) => ControlResponse::Error(error),
+            }
+        }
+        ControlRequest::ResolveTagId { term, deleted_rule } => {
+            match api.resolve_tag_id(&term, deleted_rule) {
+                Ok(tag_id) => ControlResponse::TagId(tag_id),
+                Err(error) => ControlResponse::Error(error),
+            }
+        }
         ControlRequest::TagsForFile {
             file_id,
             subtag_rule,

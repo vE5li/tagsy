@@ -34,9 +34,9 @@ pub enum ApiError {
     /// once the holder is online will succeed.
     #[error("content unavailable: no reachable device holds it")]
     ContentUnavailable,
-    /// A short-id prefix matched more than one row, so it could not be
-    /// resolved to a single id. Carries the ambiguous prefix.
-    #[error("ambiguous id prefix '{0}': matches multiple files")]
+    /// A resolution term — an id prefix or a name/path — matched more than one
+    /// row, so it could not be resolved to a single id. Carries the term.
+    #[error("ambiguous term '{0}': matches multiple entries")]
     AmbiguousId(String),
     /// A caller-supplied argument was invalid (e.g. empty tag name).
     #[error("invalid argument: {0}")]
