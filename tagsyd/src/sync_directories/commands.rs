@@ -574,6 +574,7 @@ impl SyncDirectories {
                     .map(|sync_directory| SyncDirectory {
                         path: sync_directory.path.clone(),
                         sync_type: sync_directory.sync_type.clone(),
+                        respect_gitignore: sync_directory.respect_gitignore,
                     })
                     .collect();
                 let _ = respond_to.send(directories);

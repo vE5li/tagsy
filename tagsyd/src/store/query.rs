@@ -1070,7 +1070,9 @@ mod tests {
         let work = tag_id_from_hex("abcd000000000000000000000000000a");
         let urgent = TagId::new();
         let unrelated = TagId::new();
-        database.add_tag(work, "work", &dot_style("red"), 1).unwrap();
+        database
+            .add_tag(work, "work", &dot_style("red"), 1)
+            .unwrap();
         database
             .add_tag(urgent, "urgent", &dot_style("red"), 1)
             .unwrap();

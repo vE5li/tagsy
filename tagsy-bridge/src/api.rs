@@ -675,7 +675,9 @@ impl Tagsy {
         subtag_rule: SubtagRule,
     ) -> Result<Vec<String>, ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
+        let file_id = backend
+            .resolve_file_id(file_id, DeletedRule::Exclude)
+            .await?;
         Ok(backend
             .tags_for_file(file_id, subtag_rule)
             .await?
@@ -723,8 +725,12 @@ impl Tagsy {
     /// String-id variant of the underlying `tag_tag` call.
     pub async fn tag_tag(&self, parent_id: String, subtag_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let parent_id = backend.resolve_tag_id(parent_id, DeletedRule::Exclude).await?;
-        let subtag_id = backend.resolve_tag_id(subtag_id, DeletedRule::Exclude).await?;
+        let parent_id = backend
+            .resolve_tag_id(parent_id, DeletedRule::Exclude)
+            .await?;
+        let subtag_id = backend
+            .resolve_tag_id(subtag_id, DeletedRule::Exclude)
+            .await?;
         backend.tag_tag(parent_id, subtag_id).await
     }
 
@@ -732,8 +738,12 @@ impl Tagsy {
     /// the underlying `untag_tag` call.
     pub async fn untag_tag(&self, parent_id: String, subtag_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let parent_id = backend.resolve_tag_id(parent_id, DeletedRule::Exclude).await?;
-        let subtag_id = backend.resolve_tag_id(subtag_id, DeletedRule::Exclude).await?;
+        let parent_id = backend
+            .resolve_tag_id(parent_id, DeletedRule::Exclude)
+            .await?;
+        let subtag_id = backend
+            .resolve_tag_id(subtag_id, DeletedRule::Exclude)
+            .await?;
         backend.untag_tag(parent_id, subtag_id).await
     }
 
@@ -800,7 +810,9 @@ impl Tagsy {
     /// bytes across the bridge. Errors `UnknownId` if the id itself is unknown.
     pub async fn local_path_for_file(&self, file_id: String) -> Result<Option<String>, ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
+        let file_id = backend
+            .resolve_file_id(file_id, DeletedRule::Exclude)
+            .await?;
         Ok(backend
             .local_path_for_file(file_id)
             .await?
@@ -817,7 +829,9 @@ impl Tagsy {
     /// `UnknownId` only if the id itself is unknown.
     pub async fn get_preview(&self, file_id: String) -> Result<PreviewEntry, ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
+        let file_id = backend
+            .resolve_file_id(file_id, DeletedRule::Exclude)
+            .await?;
         Ok(PreviewEntry::from(backend.get_preview(file_id).await?))
     }
 
@@ -838,7 +852,9 @@ impl Tagsy {
         expected_hash: String,
     ) -> Result<String, ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
+        let file_id = backend
+            .resolve_file_id(file_id, DeletedRule::Exclude)
+            .await?;
         Ok(backend
             .fetch_file(file_id, expected_hash)
             .await?
@@ -866,7 +882,9 @@ impl Tagsy {
     /// tracked between calls.
     pub async fn begin_edit(&self, file_id: String) -> Result<String, ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
+        let file_id = backend
+            .resolve_file_id(file_id, DeletedRule::Exclude)
+            .await?;
         Ok(backend
             .begin_edit(file_id)
             .await?
@@ -893,7 +911,9 @@ impl Tagsy {
     /// the same DTO-flattening pattern used elsewhere in this crate.
     pub async fn finish_edit(&self, file_id: String, path: String) -> Result<bool, ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
+        let file_id = backend
+            .resolve_file_id(file_id, DeletedRule::Exclude)
+            .await?;
         Ok(backend
             .finish_edit(file_id, std::path::PathBuf::from(path))
             .await?
@@ -988,9 +1008,7 @@ impl Tagsy {
         let backend = self.try_backend()?;
         // The restore path names a *deleted* tag, so resolution must see
         // tombstoned rows.
-        let tag_id = backend
-            .resolve_tag_id(tag_id, DeletedRule::Include)
-            .await?;
+        let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Include).await?;
         backend.restore_tag(tag_id).await
     }
 
@@ -1046,7 +1064,9 @@ impl Tagsy {
     /// Delete a file.
     pub async fn delete_file(&self, file_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
+        let file_id = backend
+            .resolve_file_id(file_id, DeletedRule::Exclude)
+            .await?;
         backend.delete_file(file_id).await
     }
 
@@ -1086,7 +1106,9 @@ impl Tagsy {
     /// string it already has.
     pub async fn move_file(&self, file_id: String, logical_path: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
-        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
+        let file_id = backend
+            .resolve_file_id(file_id, DeletedRule::Exclude)
+            .await?;
         backend.move_file(file_id, logical_path).await
     }
 
@@ -1094,7 +1116,9 @@ impl Tagsy {
     pub async fn tag_file(&self, tag_id: String, file_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
         let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Exclude).await?;
-        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
+        let file_id = backend
+            .resolve_file_id(file_id, DeletedRule::Exclude)
+            .await?;
         backend.tag_file(tag_id, file_id).await
     }
 
@@ -1102,7 +1126,9 @@ impl Tagsy {
     pub async fn untag_file(&self, tag_id: String, file_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
         let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Exclude).await?;
-        let file_id = backend.resolve_file_id(file_id, DeletedRule::Exclude).await?;
+        let file_id = backend
+            .resolve_file_id(file_id, DeletedRule::Exclude)
+            .await?;
         backend.untag_file(tag_id, file_id).await
     }
 

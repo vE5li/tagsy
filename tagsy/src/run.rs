@@ -84,7 +84,8 @@ pub async fn run(
             // tag-id command. Resolved once and applied to every file.
             let mut resolved_tags = Vec::with_capacity(tags.len());
             for tag in &tags {
-                resolved_tags.push(common::resolve_tag_id(backend, tag, DeletedRule::Exclude).await?);
+                resolved_tags
+                    .push(common::resolve_tag_id(backend, tag, DeletedRule::Exclude).await?);
             }
 
             let mut name_cache = common::NameCache::new();
@@ -358,8 +359,7 @@ pub async fn run(
         Commands::RestoreFile { id } => {
             // The restore path names a *deleted* file, so resolution must see
             // tombstoned rows.
-            let file_id =
-                common::resolve_file_id(backend, &id, DeletedRule::Include).await?;
+            let file_id = common::resolve_file_id(backend, &id, DeletedRule::Include).await?;
 
             backend
                 .restore_file(file_id)
@@ -388,8 +388,7 @@ pub async fn run(
         }
         Commands::RestoreTag { tag_id } => {
             // Same as RestoreFile: a deleted tag must be resolvable.
-            let tag_id =
-                common::resolve_tag_id(backend, &tag_id, DeletedRule::Include).await?;
+            let tag_id = common::resolve_tag_id(backend, &tag_id, DeletedRule::Include).await?;
 
             backend
                 .restore_tag(tag_id)
@@ -529,7 +528,8 @@ pub async fn run(
 
             let mut applied = Vec::new();
             for parent in &parents {
-                let parent_id = common::resolve_tag_id(backend, parent, DeletedRule::Exclude).await?;
+                let parent_id =
+                    common::resolve_tag_id(backend, parent, DeletedRule::Exclude).await?;
 
                 backend
                     .tag_tag(parent_id, child_id)
@@ -556,7 +556,8 @@ pub async fn run(
 
             let mut removed = Vec::new();
             for parent in &parents {
-                let parent_id = common::resolve_tag_id(backend, parent, DeletedRule::Exclude).await?;
+                let parent_id =
+                    common::resolve_tag_id(backend, parent, DeletedRule::Exclude).await?;
 
                 backend
                     .untag_tag(parent_id, child_id)

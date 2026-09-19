@@ -89,6 +89,28 @@ impl SyncType {
 pub struct SyncDirectory {
     pub path: PathBuf,
     pub sync_type: SyncType,
+    /// When true, files matched by a `.gitignore` are skipped: never ingested
+    /// during the startup walk, never picked up when created or moved in while
+    /// the watcher is live. **Defaults to true** (see
+    /// [`default_respect_gitignore`]) — a config that omits the field, or that
+    /// predates it, honors `.gitignore`; set it to false to sync everything.
+    ///
+    /// The full chain of `.gitignore` files from the sync root down to a file's
+    /// own directory is honored, so a nested directory that is itself a git
+    /// repo (e.g. `foo/bar/` under a synced `foo/`) has its own
+    /// `.gitignore` applied, not just the root's. Per-repo
+    /// `.git/info/exclude` files are **not** read. The rules are re-read
+    /// from disk on each ingest, so an edited/added/removed `.gitignore`
+    /// takes effect on the next file seen, with no cached state.
+    ///
+    /// This governs *ingestion of local files only*. A file the daemon already
+    /// tracks — or one arriving from a peer — is unaffected: ignore rules
+    /// decide what this device *offers* to the catalog, not what the catalog
+    /// may place here. So it never removes an already-synced file, and toggling
+    /// it off later re-admits newly-seen ignored files without touching the
+    /// old.
+    #[serde(default = "default_respect_gitignore")]
+    pub respect_gitignore: bool,
 }
 
 /// A tag declared in the configuration file so its *definition* is guaranteed
@@ -116,6 +138,14 @@ pub struct TagDeclaration {
     // TODO: Add other properties here as well.
     #[serde(default)]
     pub color: String,
+}
+
+/// Default for [`SyncDirectory::respect_gitignore`]: honor `.gitignore` by
+/// default. Most sync directories are working trees or dotfile repos where the
+/// ignored set (build output, caches, secrets) is exactly what a user does not
+/// want mirrored; opting *out* is the deliberate choice, not opting in.
+pub fn default_respect_gitignore() -> bool {
+    true
 }
 
 /// Default for [`Configuration::max_concurrent_pulls`]: a modest cap that keeps
@@ -462,6 +492,58 @@ mod tests {
         };
         assert_eq!(tags, &vec![tag_id]);
         assert_eq!(configuration.tags[0].id, tag_id);
+    }
+
+    /// A sync directory that omits `respect_gitignore` (or predates it)
+    /// defaults the flag to true, so `.gitignore` is honored without opting
+    /// in.
+    #[test]
+    fn sync_directory_without_respect_gitignore_defaults_to_true() {
+        let json = r#"{
+            "sync_directories": [
+                { "path": "/tmp/x", "sync_type": { "Universal": {} } }
+            ],
+            "listen_port": null,
+            "peers": []
+        }"#;
+        let configuration = Configuration::from_str(json).unwrap();
+        assert!(configuration.sync_directories[0].respect_gitignore);
+    }
+
+    /// The flag can be turned off explicitly to sync everything.
+    #[test]
+    fn sync_directory_respect_gitignore_can_be_disabled() {
+        let json = r#"{
+            "sync_directories": [
+                {
+                    "path": "/tmp/x",
+                    "sync_type": { "Universal": {} },
+                    "respect_gitignore": false
+                }
+            ],
+            "listen_port": null,
+            "peers": []
+        }"#;
+        let configuration = Configuration::from_str(json).unwrap();
+        assert!(!configuration.sync_directories[0].respect_gitignore);
+    }
+
+    /// `respect_gitignore` round-trips when present in the config.
+    #[test]
+    fn sync_directory_respect_gitignore_parses() {
+        let json = r#"{
+            "sync_directories": [
+                {
+                    "path": "/tmp/x",
+                    "sync_type": { "Universal": {} },
+                    "respect_gitignore": true
+                }
+            ],
+            "listen_port": null,
+            "peers": []
+        }"#;
+        let configuration = Configuration::from_str(json).unwrap();
+        assert!(configuration.sync_directories[0].respect_gitignore);
     }
 
     /// A config file predating `tag_rules` still parses.

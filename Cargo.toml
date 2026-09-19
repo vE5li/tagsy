@@ -15,6 +15,11 @@ clap = { version = "4.5.20", features = ["derive"] }
 comfy-table = { version = "7", features = ["custom_styling"] }
 ed25519-dalek = "3.0.0"
 env_logger = "0.11"
+# `.gitignore`-style matching for sync directories that opt into
+# `respect_gitignore`. Used as a path-by-path matcher (`gitignore::Gitignore`),
+# not as its own directory walker, so the same predicate guards both the
+# startup walk and live watcher events.
+ignore = "0.4"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "tiff"] }
 infer = { version = "0.16", default-features = false }
 # PDF first-page rasterization for previews. Binds to libpdfium at *runtime*

@@ -290,9 +290,10 @@ impl ApiService {
             // a *set of file ids* and never a regex — ids and hashes are opaque
             // hex.
             let file_ids = match (token.kind, &pattern) {
-                (TokenKind::FileId | TokenKind::Any | TokenKind::Entity, TextPattern::Substring(text)) => {
-                    database.file_ids_matching_id_prefix(text, deleted_rule)?
-                }
+                (
+                    TokenKind::FileId | TokenKind::Any | TokenKind::Entity,
+                    TextPattern::Substring(text),
+                ) => database.file_ids_matching_id_prefix(text, deleted_rule)?,
                 (TokenKind::ContentHash, TextPattern::Substring(text)) => {
                     database.file_ids_matching_content_hash_prefix(text, deleted_rule)?
                 }
@@ -322,9 +323,7 @@ impl ApiService {
                 // `/e`: name/path **or** id, never tag membership. The
                 // resolved sets are the same as a bare token's; the
                 // membership-free semantics live in the evaluator.
-                (TokenKind::Entity, false) => {
-                    QueryTerm::EntityMatches(pattern, tag_ids, file_ids)
-                }
+                (TokenKind::Entity, false) => QueryTerm::EntityMatches(pattern, tag_ids, file_ids),
                 (TokenKind::Entity, true) => {
                     QueryTerm::NotEntityMatches(pattern, tag_ids, file_ids)
                 }
@@ -613,8 +612,8 @@ fn resolve_tag_id(
     // Tier 2: the `/e` union — name substring ∪ id prefix, no subtags.
     // `tag_ids_matching_pattern` already unions name-substring with id-prefix,
     // exactly the resolved set `parse_query` builds for `/e`.
-    let tag_ids =
-        database.tag_ids_matching_pattern(&TextPattern::Substring(term.to_owned()), deleted_rule)?;
+    let tag_ids = database
+        .tag_ids_matching_pattern(&TextPattern::Substring(term.to_owned()), deleted_rule)?;
     let terms = [QueryTerm::EntityMatches(
         TextPattern::Substring(term.to_owned()),
         tag_ids,

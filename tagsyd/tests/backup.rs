@@ -65,6 +65,7 @@ async fn backup_bundles_databases_sync_files_and_manifest() {
             sync_type: SyncType::Universal {
                 keep_deleted_files: false,
             },
+            respect_gitignore: false,
         }],
         listen_port: None,
         peers: Vec::new(),

@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub use commands::SyncDirectoryCommand;
+use ignore::gitignore::GitignoreBuilder;
 use notify::{RecursiveMode, Watcher};
 use self_write::SelfWrite;
 use tagsy_core::state::{Change, ChangeOrigin};
@@ -82,6 +83,101 @@ struct OpenDirectory {
     path: PathBuf,
     sync_type: SyncType,
     database: DirectoryIndex,
+    /// Whether files matched by a `.gitignore` are skipped on ingest. When
+    /// false, [`OpenDirectory::is_ignored`] short-circuits to false and no
+    /// ignore file is ever read. Also read by the `ListDirectories` command to
+    /// reconstruct the config-accurate [`SyncDirectory`].
+    respect_gitignore: bool,
+}
+
+impl OpenDirectory {
+    /// Whether an ingest of the file at `relative_path` (relative to this
+    /// directory's root) should be skipped because a `.gitignore` rule matches
+    /// it. Always false when the directory did not opt into `respect_gitignore`.
+    ///
+    /// The matcher is built **fresh per call** from the `.gitignore` files
+    /// along the path's own ancestry — the sync root's, then each intermediate
+    /// directory's, down to the file's parent — so a directory that is itself a
+    /// git repo (e.g. `foo/bar/` under a synced `foo/`) has its own
+    /// `.gitignore` honored, not just the root's. There is deliberately **no
+    /// cached matcher state**: an ignore file edited, added, or removed between
+    /// events is picked up on the next check with nothing to invalidate. The
+    /// cost is re-reading a handful of small files per ingest, which only
+    /// happens on the discovery paths (startup walk, watcher create/move-in),
+    /// never in steady state.
+    ///
+    /// Each `.gitignore` is compiled into its **own** matcher rooted at its own
+    /// directory, not merged into one matcher rooted at the sync directory.
+    /// This matters for *anchored* rules (a leading or embedded `/`, and
+    /// the directory-form `build/`): they anchor relative to the directory
+    /// the `.gitignore` lives in, which the `ignore` crate expresses
+    /// through the matcher's root. Merging every file into a single
+    /// sync-root-rooted builder would mis-anchor a rule like `app/build/`
+    /// from a nested `foo/.gitignore` to `<sync-root>/app/build/` instead
+    /// of `<sync-root>/foo/app/build/`, so nothing below a
+    /// synced-but-nested repo would ever match. We therefore consult the
+    /// matchers deepest-first and take the first definitive verdict (ignore
+    /// or whitelist), which is git's precedence rule.
+    ///
+    /// This gates *local ingestion only*; a file the catalog places here
+    /// (already tracked, or received from a peer) never reaches this check.
+    fn is_ignored(&self, relative_path: &Path) -> bool {
+        if !self.respect_gitignore {
+            return false;
+        }
+
+        // The absolute path is what each per-directory matcher expects: a
+        // matcher rooted at `<sync>/foo` strips that prefix internally to anchor
+        // its rules, so we must hand it the full on-disk path, not the
+        // sync-relative one.
+        let absolute_path = self.path.join(relative_path);
+
+        // Walk the file's ancestry deepest-first (leaf → root), compiling each
+        // directory's `.gitignore` into a matcher rooted at that directory. The
+        // first definitive verdict wins, giving the deepest `.gitignore`
+        // precedence — git's rule.
+        for ancestor_dir in absolute_path.ancestors().skip(1) {
+            let gitignore_file = ancestor_dir.join(".gitignore");
+            if !gitignore_file.is_file() {
+                continue;
+            }
+
+            let mut builder = GitignoreBuilder::new(ancestor_dir);
+            if let Some(error) = builder.add(&gitignore_file) {
+                log::debug!(
+                    "Skipping unusable .gitignore {}: {error}",
+                    gitignore_file.to_string_lossy()
+                );
+                continue;
+            }
+
+            let gitignore = match builder.build() {
+                Ok(gitignore) => gitignore,
+                Err(error) => {
+                    // An unparseable ignore file must not take a file out of
+                    // sync by accident: skip it (as if absent) and log.
+                    log::error!(
+                        "Failed to compile {}; ignoring its rules: {error}",
+                        gitignore_file.to_string_lossy()
+                    );
+                    continue;
+                }
+            };
+
+            // `matched_path_or_any_parents` so a rule on a directory (`build/`,
+            // `node_modules/`) also excludes everything beneath it — the leaf
+            // path is all we have at a watcher event, with no hierarchy walk.
+            let matched = gitignore.matched_path_or_any_parents(&absolute_path, false);
+            if matched.is_ignore() {
+                return true;
+            }
+            if matched.is_whitelist() {
+                return false;
+            }
+        }
+
+        false
+    }
 }
 
 pub struct SyncDirectories {
@@ -169,6 +265,7 @@ impl SyncDirectories {
                     path,
                     sync_type: sync_directory.sync_type.clone(),
                     database,
+                    respect_gitignore: sync_directory.respect_gitignore,
                 })
             })
             .collect::<Vec<_>>();
@@ -591,6 +688,7 @@ mod tests {
             sync_directories: vec![SyncDirectory {
                 path: sync_dir.to_path_buf(),
                 sync_type: SyncType::Universal { keep_deleted_files },
+                respect_gitignore: false,
             }],
             listen_port: None,
             peers: Vec::new(),
@@ -807,6 +905,7 @@ mod tests {
                 sync_type: SyncType::Universal {
                     keep_deleted_files: false,
                 },
+                respect_gitignore: false,
             }],
             listen_port: None,
             peers: Vec::new(),
@@ -883,6 +982,7 @@ mod tests {
                 sync_type: SyncType::Universal {
                     keep_deleted_files: false,
                 },
+                respect_gitignore: false,
             }],
             listen_port: None,
             peers: Vec::new(),
@@ -1053,10 +1153,12 @@ mod tests {
                     sync_type: SyncType::Universal {
                         keep_deleted_files: false,
                     },
+                    respect_gitignore: false,
                 },
                 SyncDirectory {
                     path: tagged_dir.to_path_buf(),
                     sync_type: SyncType::TagBased { tags },
+                    respect_gitignore: false,
                 },
             ],
             listen_port: None,
@@ -1438,6 +1540,7 @@ mod tests {
             sync_directories: vec![SyncDirectory {
                 path: sync_dir.to_path_buf(),
                 sync_type: SyncType::TagBased { tags },
+                respect_gitignore: false,
             }],
             listen_port: None,
             peers: Vec::new(),
@@ -1687,5 +1790,132 @@ mod tests {
             directories[1].sync_type,
             SyncType::TagBased { .. }
         ));
+    }
+
+    /// Build a bare `OpenDirectory` rooted at `sync_dir` with the given
+    /// `respect_gitignore`, for exercising [`OpenDirectory::is_ignored`] in
+    /// isolation (no manager, no watcher).
+    fn open_directory_at(sync_dir: &Path, respect_gitignore: bool) -> OpenDirectory {
+        let database =
+            DirectoryIndex::initialize(sync_dir.join("index.db")).expect("open index db");
+        OpenDirectory {
+            path: sync_dir.to_path_buf(),
+            sync_type: SyncType::Universal {
+                keep_deleted_files: false,
+            },
+            database,
+            respect_gitignore,
+        }
+    }
+
+    /// A `.gitignore` at the sync root applies to files under it, and a
+    /// directory-form rule (`build/`) excludes everything beneath it.
+    #[test]
+    fn root_gitignore_is_honored() {
+        let sync_dir = temp_dir("gi-root");
+        std::fs::write(sync_dir.join(".gitignore"), "*.log\nbuild/\n").unwrap();
+
+        let dir = open_directory_at(&sync_dir, true);
+
+        assert!(dir.is_ignored(Path::new("app.log")));
+        assert!(dir.is_ignored(Path::new("build/output.bin")));
+        assert!(!dir.is_ignored(Path::new("src/main.rs")));
+    }
+
+    /// The whole point of the fresh-per-call design: a nested directory that is
+    /// its own repo has its own `.gitignore` honored, not just the sync root's.
+    /// Mirrors syncing `foo/` where `foo/bar` and `foo/baz` are separate repos.
+    #[test]
+    fn nested_repo_gitignores_are_honored() {
+        let sync_dir = temp_dir("gi-nested");
+        // Root repo ignores *.tmp everywhere.
+        std::fs::write(sync_dir.join(".gitignore"), "*.tmp\n").unwrap();
+
+        // foo/bar is its own repo ignoring its target/ output.
+        std::fs::create_dir_all(sync_dir.join("bar")).unwrap();
+        std::fs::write(sync_dir.join("bar/.gitignore"), "target/\n").unwrap();
+
+        // foo/baz is its own repo ignoring node_modules/.
+        std::fs::create_dir_all(sync_dir.join("baz")).unwrap();
+        std::fs::write(sync_dir.join("baz/.gitignore"), "node_modules/\n").unwrap();
+
+        let dir = open_directory_at(&sync_dir, true);
+
+        // Root rule reaches into nested dirs.
+        assert!(dir.is_ignored(Path::new("bar/scratch.tmp")));
+        // Each nested repo's own rule is applied.
+        assert!(dir.is_ignored(Path::new("bar/target/lib.rlib")));
+        assert!(dir.is_ignored(Path::new("baz/node_modules/pkg/index.js")));
+        // A nested rule does not leak to a sibling repo.
+        assert!(!dir.is_ignored(Path::new("baz/target/keep.txt")));
+        // Ordinary source in a nested repo is synced.
+        assert!(!dir.is_ignored(Path::new("bar/src/lib.rs")));
+    }
+
+    /// Regression: an *anchored* rule (a leading/embedded `/`, or the
+    /// directory-form `build/`) in a `.gitignore` that is itself nested below
+    /// the sync root must anchor relative to that `.gitignore`'s directory, not
+    /// to the sync root. Mirrors the real case that motivated this: syncing
+    /// `~/projects` where `projects/tagsy/.gitignore` carries `app/build/`; the
+    /// path is `tagsy/app/build/...`, and the rule must match it.
+    ///
+    /// Before per-directory rooting, one sync-root-rooted matcher anchored the
+    /// rule to `<sync>/app/build/` and never matched anything under
+    /// `tagsy/app/build/`, so build artifacts synced anyway.
+    #[test]
+    fn anchored_rule_in_nested_gitignore_anchors_to_its_own_dir() {
+        let sync_dir = temp_dir("gi-anchored-nested");
+
+        // `tagsy/` is a repo nested one level below the sync root, ignoring its
+        // own `app/build/` (an anchored, directory-form rule).
+        std::fs::create_dir_all(sync_dir.join("tagsy")).unwrap();
+        std::fs::write(sync_dir.join("tagsy/.gitignore"), "app/build/\n/gen\n").unwrap();
+
+        let dir = open_directory_at(&sync_dir, true);
+
+        // The anchored directory rule matches everything beneath it.
+        assert!(dir.is_ignored(Path::new(
+            "tagsy/app/build/linux/x64/release/cmake_install.cmake"
+        )));
+        // A root-anchored rule (`/gen`) matches only at the .gitignore's dir.
+        assert!(dir.is_ignored(Path::new("tagsy/gen")));
+        assert!(dir.is_ignored(Path::new("tagsy/gen/output.rs")));
+        // The same rule text must NOT match at the sync root (mis-anchoring),
+        // nor a same-named directory that is not under the anchor.
+        assert!(!dir.is_ignored(Path::new("app/build/output.bin")));
+        assert!(!dir.is_ignored(Path::new("tagsy/app/src/main.dart")));
+    }
+
+    /// With `respect_gitignore` off, no `.gitignore` is consulted at all — and
+    /// the implicit `.git` exclusion does not apply either, since the whole
+    /// check short-circuits.
+    #[test]
+    fn respect_gitignore_disabled_ignores_nothing() {
+        let sync_dir = temp_dir("gi-off");
+        std::fs::write(sync_dir.join(".gitignore"), "*.log\n").unwrap();
+
+        let dir = open_directory_at(&sync_dir, false);
+
+        assert!(!dir.is_ignored(Path::new("app.log")));
+        assert!(!dir.is_ignored(Path::new(".git/config")));
+    }
+
+    /// A newly-added nested `.gitignore` is picked up on the next check with no
+    /// state to invalidate — the property that motivated building fresh per
+    /// call.
+    #[test]
+    fn added_gitignore_takes_effect_without_cache_invalidation() {
+        let sync_dir = temp_dir("gi-fresh");
+        std::fs::create_dir_all(sync_dir.join("bar")).unwrap();
+        let dir = open_directory_at(&sync_dir, true);
+
+        // No ignore file yet: the file would sync.
+        assert!(!dir.is_ignored(Path::new("bar/secret.key")));
+
+        // Add one after the directory is already open.
+        std::fs::write(sync_dir.join("bar/.gitignore"), "*.key\n").unwrap();
+
+        // Next check honors it immediately, no re-open required.
+        assert!(dir.is_ignored(Path::new("bar/secret.key")));
     }
 }

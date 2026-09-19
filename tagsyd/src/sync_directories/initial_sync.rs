@@ -127,6 +127,18 @@ impl SyncDirectories {
                 continue;
             };
 
+            // A gitignored file is not ours to offer: skip it before any DB
+            // lookup or read. Only untracked files reach here (Pass 1 handled
+            // tracked ones), so this never drops an already-synced file — it
+            // only declines to *ingest* a new one.
+            if sync_directory.is_ignored(relative_path) {
+                log::debug!(
+                    "Skipping gitignored file {}",
+                    relative_path.to_string_lossy()
+                );
+                continue;
+            }
+
             // Is this file already tracked? The lookup key is the per-kind
             // difference. A real database error (anything but `MissingFile`)
             // must skip this one file rather than crash the sole sync-directory

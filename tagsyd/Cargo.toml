@@ -51,6 +51,7 @@ tokio-tungstenite = { workspace = true }
 tokio-util = { workspace = true }
 uuid = { workspace = true }
 notify = { workspace = true }
+ignore = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 walkdir = { workspace = true }

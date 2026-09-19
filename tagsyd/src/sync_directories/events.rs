@@ -45,6 +45,14 @@ impl SyncDirectories {
                 let sync_directory = self.sync_directory_for_path(&file_name)?;
                 let sync_relative_path = relative_within(&file_name, &sync_directory.path)?;
 
+                if sync_directory.is_ignored(sync_relative_path) {
+                    log::debug!(
+                        "Ignoring Create of gitignored file {}",
+                        sync_relative_path.to_string_lossy()
+                    );
+                    return Ok(());
+                }
+
                 let (content, content_hash, size) = self.get_file_content(&file_name).await?;
 
                 match &sync_directory.sync_type {
@@ -187,6 +195,14 @@ impl SyncDirectories {
 
                         let sync_relative_path = relative_within(&to, &sync_directory.path)?;
 
+                        if sync_directory.is_ignored(sync_relative_path) {
+                            log::debug!(
+                                "Ignoring move-in of gitignored file {}",
+                                sync_relative_path.to_string_lossy()
+                            );
+                            return Ok(());
+                        }
+
                         let (content, content_hash, size) = self.get_file_content(&to).await?;
 
                         match &sync_directory.sync_type {
@@ -239,6 +255,14 @@ impl SyncDirectories {
                                 );
                                 continue;
                             };
+
+                            if sync_directory.is_ignored(sync_relative_path) {
+                                log::debug!(
+                                    "Ignoring move-in of gitignored file {}",
+                                    sync_relative_path.to_string_lossy()
+                                );
+                                continue;
+                            }
 
                             let (content, content_hash, size) =
                                 self.get_file_content(entry.path()).await?;
