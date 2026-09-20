@@ -320,6 +320,23 @@ pub enum CatalogCommand {
         dry_run: bool,
         respond_to: oneshot::Sender<Result<Vec<FileId>, DatabaseError>>,
     },
+    /// Operator-initiated purge of **soft-deleted** files: every file whose
+    /// current catalog state is tombstoned (`deleted = 1`). Request-reply,
+    /// handled on the writer loop.
+    ///
+    /// Unlike [`CatalogCommand::PurgeBroken`], this needs no availability probe
+    /// and no Universal-directory precondition: a soft delete is already a
+    /// deliberate, explicit state, and purging it merely makes that deletion
+    /// permanent and irreversible across the mesh. The deleted set is read here
+    /// (not by the caller) to avoid a time-of-check/time-of-use race. With
+    /// `dry_run`, replies with the set and mutates nothing; otherwise enqueues
+    /// a `Change::FilePurged` for each and replies with the purged ids.
+    ///
+    /// Exposed via the `tagsy purge-deleted` CLI command.
+    PurgeDeleted {
+        dry_run: bool,
+        respond_to: oneshot::Sender<Result<Vec<FileId>, DatabaseError>>,
+    },
 }
 
 /// A command sent to a specific peer's live session by `handle_changes`.

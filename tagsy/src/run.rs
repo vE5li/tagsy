@@ -10,8 +10,8 @@ use tagsy_ipc::IpcBackend;
 
 use crate::commands::{Commands, StyleArgs};
 use crate::output::{
-    OutputMode, emit_connected_peers, emit_files, emit_operations, emit_scalar, emit_tags,
-    emit_tags_and_files, print_json, print_tag_rule_report,
+    OutputMode, emit_connected_peers, emit_files, emit_operations, emit_purge_outcome, emit_scalar,
+    emit_tags, emit_tags_and_files, print_json, print_tag_rule_report,
 };
 use crate::{common, upload};
 
@@ -627,41 +627,14 @@ pub async fn run(
                 .purge_broken(dry_run)
                 .await
                 .map_err(|error| error.to_string())?;
-
-            let count = outcome.purged.len();
-            let ids: Vec<String> = outcome
-                .purged
-                .iter()
-                .map(|file_id| file_id.to_string())
-                .collect();
-
-            let human = if outcome.dry_run {
-                if count == 0 {
-                    "No broken files found; nothing would be purged".to_owned()
-                } else {
-                    let mut lines = vec![format!(
-                        "{count} broken file(s) would be purged (dry run, nothing changed):"
-                    )];
-                    lines.extend(ids.iter().map(|id| format!("  {id}")));
-                    lines.join("\n")
-                }
-            } else if count == 0 {
-                "No broken files found; nothing purged".to_owned()
-            } else {
-                let mut lines = vec![format!("Permanently purged {count} broken file(s):")];
-                lines.extend(ids.iter().map(|id| format!("  {id}")));
-                lines.join("\n")
-            };
-
-            emit_scalar(
-                output_mode,
-                human,
-                json!({
-                    "dry_run": outcome.dry_run,
-                    "purged": ids,
-                    "count": count,
-                }),
-            );
+            emit_purge_outcome(output_mode, "broken", &outcome);
+        }
+        Commands::PurgeDeleted { dry_run } => {
+            let outcome = backend
+                .purge_deleted(dry_run)
+                .await
+                .map_err(|error| error.to_string())?;
+            emit_purge_outcome(output_mode, "deleted", &outcome);
         }
         Commands::Backup => {
             let outcome = backend.backup().await.map_err(|error| error.to_string())?;

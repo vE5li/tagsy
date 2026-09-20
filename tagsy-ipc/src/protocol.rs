@@ -203,6 +203,12 @@ pub enum ControlRequest {
     PurgeBroken {
         dry_run: bool,
     },
+    /// Permanently purge soft-deleted (tombstoned) files. Answered with
+    /// [`ControlResponse::PurgedDeleted`]. With `dry_run` the daemon reports
+    /// which files would be purged without mutating anything.
+    PurgeDeleted {
+        dry_run: bool,
+    },
     /// Read the daemon's external-editor rules. Answered with
     /// [`ControlResponse::EditorRules`].
     EditorRules,
@@ -286,6 +292,9 @@ pub enum ControlResponse {
     /// The files purged (or, on a dry run, that would be purged) as broken
     /// (answer to [`ControlRequest::PurgeBroken`]).
     PurgedBroken(tagsy_api::PurgeOutcome),
+    /// The files purged (or, on a dry run, that would be purged) as
+    /// soft-deleted (answer to [`ControlRequest::PurgeDeleted`]).
+    PurgedDeleted(tagsy_api::PurgeOutcome),
     /// The daemon's external-editor rules (answer to
     /// [`ControlRequest::EditorRules`]).
     EditorRules(Vec<EditorRule>),

@@ -309,6 +309,20 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Permanently purge soft-deleted files: every file currently in the
+    /// deleted (trashed) state.
+    ///
+    /// This is DESTRUCTIVE and IRREVERSIBLE. A normal delete is a reversible
+    /// tombstone (it can be restored, or resurrected by a newer edit); a purge
+    /// is not. Each purged file's catalog entry, versions, and on-disk bytes
+    /// are stripped, the purge propagates to every peer, and the id is
+    /// remembered forever so the file can never come back. Run `--dry-run`
+    /// first to see exactly what would be purged.
+    PurgeDeleted {
+        /// Report which files would be purged without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Bundle the entire tagsy state (both databases plus every sync
     /// directory's contents) into a single compressed archive in
     /// TAGSY_BACKUP_DIR. Prints where the archive landed.

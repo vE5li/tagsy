@@ -899,6 +899,62 @@ impl CatalogWriter {
                     let _ = respond_to.send(Ok(broken));
                     continue;
                 }
+                CatalogCommand::PurgeDeleted {
+                    dry_run,
+                    respond_to,
+                } => {
+                    // Operator-initiated purge of soft-deleted files. The target
+                    // set is every file whose current catalog state is
+                    // tombstoned. Unlike `PurgeBroken` this needs no
+                    // sync-directory round-trip and no Universal precondition: a
+                    // tombstone is already a deliberate state. Computed here on
+                    // the sole DB writer to avoid a TOCTOU race.
+                    //
+                    // Applying a purge enqueues a `Change::FilePurged` onto
+                    // *this* loop's own channel, so — as in `PurgeBroken` — we
+                    // send and let this loop process each purge after the current
+                    // handler returns rather than awaiting (self-deadlock).
+                    let files = match database.get_all_files(store::DeletedRule::Include) {
+                        Ok(files) => files,
+                        Err(error) => {
+                            log::error!("PurgeDeleted: failed to list catalog files: {error:?}");
+                            let _ = respond_to.send(Err(error));
+                            continue;
+                        }
+                    };
+                    let deleted: Vec<tagsy_core::FileId> = files
+                        .into_iter()
+                        .filter(|file| file.deleted)
+                        .map(|file| file.file_id)
+                        .collect();
+
+                    if dry_run {
+                        log::info!(
+                            "PurgeDeleted (dry run): {} deleted file(s) would be purged",
+                            deleted.len()
+                        );
+                        let _ = respond_to.send(Ok(deleted));
+                        continue;
+                    }
+
+                    log::info!("PurgeDeleted: purging {} deleted file(s)", deleted.len());
+                    for file_id in &deleted {
+                        if let Err(error) = change_sender.send(CatalogCommand::Change(
+                            Ingest::Meta(Change::FilePurged { file_id: *file_id }),
+                            ChangeOrigin::Local {
+                                directory_path: std::path::PathBuf::new(),
+                            },
+                        )) {
+                            log::error!(
+                                "PurgeDeleted: change channel closed while enqueuing purge for \
+                                 {}: {error}",
+                                file_id.to_string()
+                            );
+                        }
+                    }
+                    let _ = respond_to.send(Ok(deleted));
+                    continue;
+                }
                 CatalogCommand::CatalogFile {
                     file_id,
                     logical_path,

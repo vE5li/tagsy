@@ -7,7 +7,9 @@ use comfy_table::{Cell, ContentArrangement, Table};
 use owo_colors::OwoColorize;
 use serde::Serialize;
 use serde_json::json;
-use tagsy_api::{ConnectedPeer, Direction, Operation, OperationKind, OperationStatus, Tag};
+use tagsy_api::{
+    ConnectedPeer, Direction, Operation, OperationKind, OperationStatus, PurgeOutcome, Tag,
+};
 use tagsy_core::{FileId, FileInfo, FileKind, TagId};
 
 /// How command results are rendered to stdout.
@@ -119,6 +121,48 @@ pub fn emit_scalar(output_mode: OutputMode, human: impl AsRef<str>, json: serde_
         OutputMode::Human => println!("{}", human.as_ref()),
         OutputMode::Json => print_json(&json),
     }
+}
+
+/// Emit the result of a purge command (`purge-broken` / `purge-deleted`).
+///
+/// Shared by every purge that returns a [`PurgeOutcome`]: renders a
+/// dry-run-vs-applied human summary listing the affected ids, or the equivalent
+/// JSON object. `noun` names the class of files purged ("broken", "deleted") so
+/// the one renderer serves each command without drift.
+pub fn emit_purge_outcome(output_mode: OutputMode, noun: &str, outcome: &PurgeOutcome) {
+    let count = outcome.purged.len();
+    let ids: Vec<String> = outcome
+        .purged
+        .iter()
+        .map(|file_id| file_id.to_string())
+        .collect();
+
+    let human = if count == 0 {
+        if outcome.dry_run {
+            format!("No {noun} files found; nothing would be purged")
+        } else {
+            format!("No {noun} files found; nothing purged")
+        }
+    } else {
+        let header = if outcome.dry_run {
+            format!("{count} {noun} file(s) would be purged (dry run, nothing changed):")
+        } else {
+            format!("Permanently purged {count} {noun} file(s):")
+        };
+        let mut lines = vec![header];
+        lines.extend(ids.iter().map(|id| format!("  {id}")));
+        lines.join("\n")
+    };
+
+    emit_scalar(
+        output_mode,
+        human,
+        serde_json::json!({
+            "dry_run": outcome.dry_run,
+            "purged": ids,
+            "count": count,
+        }),
+    );
 }
 
 /// Number of leading characters needed to uniquely identify `target` among

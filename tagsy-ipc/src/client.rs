@@ -728,6 +728,13 @@ impl Backend for IpcBackend {
         }
     }
 
+    async fn purge_deleted(&self, dry_run: bool) -> Result<PurgeOutcome, ApiError> {
+        match self.call(ControlRequest::PurgeDeleted { dry_run }).await? {
+            ControlResponse::PurgedDeleted(outcome) => Ok(outcome),
+            other => Err(unexpected(other)),
+        }
+    }
+
     async fn editor_rules(&self) -> Result<Vec<EditorRule>, ApiError> {
         match self.call(ControlRequest::EditorRules).await? {
             ControlResponse::EditorRules(rules) => Ok(rules),

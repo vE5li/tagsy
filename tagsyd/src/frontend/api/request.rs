@@ -260,4 +260,29 @@ impl ApiService {
             .map_err(ApiError::from)?;
         Ok(PurgeOutcome { dry_run, purged })
     }
+
+    /// Permanently purge soft-deleted files: every file whose current catalog
+    /// state is tombstoned.
+    ///
+    /// Unlike [`Self::purge_broken`], this requires no Universal sync
+    /// directory: a soft delete is already a deliberate, explicit state, so
+    /// purging it just makes that deletion permanent and irreversible
+    /// across the mesh. The deleted set is computed on the sole DB writer
+    /// (see [`CatalogCommand::PurgeDeleted`]) to avoid a
+    /// time-of-check/time-of-use race. With `dry_run`, nothing is mutated.
+    /// Exposed via the `tagsy purge-deleted` CLI command.
+    pub async fn purge_deleted(&self, dry_run: bool) -> Result<PurgeOutcome, ApiError> {
+        let (respond_to, response) = oneshot::channel();
+        self.change_sender
+            .send(CatalogCommand::PurgeDeleted {
+                dry_run,
+                respond_to,
+            })
+            .map_err(|_| ApiError::Internal("runtime is shutting down".to_owned()))?;
+
+        let purged = Self::await_reply(response, "runtime is shutting down".to_owned())
+            .await?
+            .map_err(ApiError::from)?;
+        Ok(PurgeOutcome { dry_run, purged })
+    }
 }

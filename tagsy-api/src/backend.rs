@@ -319,6 +319,19 @@ pub trait Backend {
         dry_run: bool,
     ) -> impl Future<Output = Result<PurgeOutcome, ApiError>> + Send;
 
+    /// Permanently purge **soft-deleted** files: every file whose current
+    /// catalog state is tombstoned. Needs no Universal sync directory (a delete
+    /// is already a deliberate state).
+    ///
+    /// With `dry_run`, reports which files would be purged without mutating
+    /// anything. Otherwise purges each — stripping its catalog metadata and
+    /// on-disk bytes and propagating the purge to all peers, permanently and
+    /// irreversibly — and reports the purged ids.
+    fn purge_deleted(
+        &self,
+        dry_run: bool,
+    ) -> impl Future<Output = Result<PurgeOutcome, ApiError>> + Send;
+
     /// The daemon's configured external-editor rules (see [`EditorRule`]). A
     /// snapshot read; the desktop UI calls this once when preparing to launch
     /// an editor.

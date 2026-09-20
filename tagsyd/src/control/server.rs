@@ -535,6 +535,10 @@ async fn dispatch(
             Ok(outcome) => ControlResponse::PurgedBroken(outcome),
             Err(error) => ControlResponse::Error(error),
         },
+        ControlRequest::PurgeDeleted { dry_run } => match api.purge_deleted(dry_run).await {
+            Ok(outcome) => ControlResponse::PurgedDeleted(outcome),
+            Err(error) => ControlResponse::Error(error),
+        },
         ControlRequest::EditorRules => ControlResponse::EditorRules(api.editor_rules()),
         ControlRequest::HomeSections => ControlResponse::HomeSections(api.home_sections()),
         ControlRequest::Retag { dry_run } => match api.retag(dry_run) {

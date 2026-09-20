@@ -276,6 +276,10 @@ impl Backend for InProcessBackend {
         self.api.purge_broken(dry_run).await
     }
 
+    async fn purge_deleted(&self, dry_run: bool) -> Result<PurgeOutcome, ApiError> {
+        self.api.purge_deleted(dry_run).await
+    }
+
     async fn editor_rules(&self) -> Result<Vec<EditorRule>, ApiError> {
         Ok(self.api.editor_rules())
     }
@@ -626,6 +630,13 @@ impl Backend for AnyBackend {
         match self {
             AnyBackend::InProcess(backend) => backend.purge_broken(dry_run).await,
             AnyBackend::Ipc(backend) => backend.purge_broken(dry_run).await,
+        }
+    }
+
+    async fn purge_deleted(&self, dry_run: bool) -> Result<PurgeOutcome, ApiError> {
+        match self {
+            AnyBackend::InProcess(backend) => backend.purge_deleted(dry_run).await,
+            AnyBackend::Ipc(backend) => backend.purge_deleted(dry_run).await,
         }
     }
 

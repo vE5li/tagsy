@@ -1118,6 +1118,23 @@ impl Tagsy {
             .collect())
     }
 
+    /// Permanently purge soft-deleted (tombstoned) files, returning the ids
+    /// that were (or, with `dry_run`, would be) purged as plain strings.
+    ///
+    /// DESTRUCTIVE and IRREVERSIBLE when `dry_run` is false: unlike a normal
+    /// delete (a reversible tombstone), each id is stripped from the catalog
+    /// and disk and remembered forever so it can never return. Needs no
+    /// Universal sync directory. Flattened to a bare `Vec<String>` like
+    /// [`Self::purge_broken`].
+    pub async fn purge_deleted(&self, dry_run: bool) -> Result<Vec<String>, ApiError> {
+        let outcome = self.try_backend()?.purge_deleted(dry_run).await?;
+        Ok(outcome
+            .purged
+            .iter()
+            .map(|file_id| file_id.to_string())
+            .collect())
+    }
+
     /// Report how much data this device stores locally versus how much the
     /// whole catalog holds. Surfaced in the top bar as a `<local>/<total>`
     /// indicator.
