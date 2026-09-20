@@ -79,6 +79,7 @@ pub(crate) async fn apply_change(
             logical_path_modified_at,
             content_hash,
             size,
+            observed_at,
             tags,
         } => {
             // Metadata-only announcement from a peer. `file_versions` is the
@@ -158,12 +159,16 @@ pub(crate) async fn apply_change(
                 }
             }
 
-            // Record the version into the catalog now, on announcement.
-            if let Err(error) = database.record_version(
+            // Record the version into the catalog now, on announcement, with
+            // the *originating* device's `observed_at` (preserved verbatim over
+            // the wire), never our receive time — this is the content half of
+            // the three-way delete/edit/restore LWW.
+            if let Err(error) = database.record_version_at(
                 *file_id,
                 content_hash,
                 super::forward::version_origin(change_origin),
                 *size as i64,
+                *observed_at,
             ) {
                 log::error!(
                     "FileMetadataAdded: failed to record version for {}: {:?}",
@@ -221,6 +226,7 @@ pub(crate) async fn apply_change(
             file_id,
             content_hash,
             size,
+            observed_at,
         } => {
             // Skip only if this hash is already our latest catalog version.
             // It is NOT enough for the hash to appear somewhere in history: a
@@ -249,12 +255,16 @@ pub(crate) async fn apply_change(
                 .await;
             } else {
                 // Record the new version into the catalog now, on
-                // announcement (independent of whether we pull the bytes).
-                if let Err(error) = database.record_version(
+                // announcement (independent of whether we pull the bytes), with
+                // the *originating* device's `observed_at` preserved verbatim —
+                // never our receive time (the content half of the three-way
+                // LWW).
+                if let Err(error) = database.record_version_at(
                     *file_id,
                     content_hash,
                     super::forward::version_origin(change_origin),
                     *size as i64,
+                    *observed_at,
                 ) {
                     log::error!(
                         "FileMetadataChanged: failed to record version for {}: {:?}",
@@ -754,6 +764,7 @@ pub(crate) async fn catalog_file(
     logical_path_modified_at: i64,
     content_hash: String,
     size: u64,
+    observed_at: i64,
     origin: ChangeOrigin,
 ) {
     // Purge enforcement: a purged file id takes absolute priority over the
@@ -800,11 +811,17 @@ pub(crate) async fn catalog_file(
         return;
     }
 
-    if let Err(error) = database.record_version(
+    // Record the version with the *originating* device's `observed_at` (from
+    // the manifest entry), never our receive time — this is the content half of
+    // the three-way delete/edit/restore LWW, and restamping it would make a
+    // peer's later `deleted_at` lose and resurrect a file that is dead
+    // everywhere else.
+    if let Err(error) = database.record_version_at(
         file_id,
         &content_hash,
         super::forward::version_origin(&origin),
         size as i64,
+        observed_at,
     ) {
         log::error!(
             "CatalogFile: failed to record version for {}: {:?}",
@@ -847,6 +864,7 @@ pub(crate) async fn catalog_file(
             logical_path_modified_at,
             content_hash,
             size,
+            observed_at,
             tags: Vec::new(),
         }
     } else {
@@ -854,6 +872,7 @@ pub(crate) async fn catalog_file(
             file_id,
             content_hash,
             size,
+            observed_at,
         }
     };
     super::forward::forward_to_peers(configuration, runtime_configuration, &change, &origin).await;
@@ -1078,22 +1097,30 @@ pub(crate) async fn materialize(
     // than modelling byte arrival properly. It is never forwarded to
     // peers, so the duplicate cannot escape this device. See
     // `EVENT PUBLISHING` on `handle_changes`.
-    let size = database
-        .latest_version(file_id)
-        .unwrap_or_else(|error| {
-            log::error!(
-                "Materialize: latest_version failed for {}: {:?}; reporting size 0",
-                file_id.to_string(),
-                error
-            );
-            None
-        })
+    let latest = database.latest_version(file_id).unwrap_or_else(|error| {
+        log::error!(
+            "Materialize: latest_version failed for {}: {:?}; reporting size 0",
+            file_id.to_string(),
+            error
+        );
+        None
+    });
+    let size = latest
+        .as_ref()
         .map(|version| version.size.max(0) as u64)
+        .unwrap_or(0);
+    // Synthetic, local-only event: carry the already-recorded version's
+    // `observed_at` (not a fresh `now()`), so the UI event mirrors the catalog
+    // exactly. Never forwarded to peers.
+    let observed_at = latest
+        .as_ref()
+        .map(|version| version.observed_at)
         .unwrap_or(0);
     let _ = event_sender.send(Change::FileMetadataChanged {
         file_id,
         content_hash,
         size,
+        observed_at,
     });
 }
 
@@ -1117,6 +1144,12 @@ pub(crate) async fn announce_provided(
     // peers pull the bytes from the registered provider. No local
     // sync-directory placement: a CLI upload targets peers (files
     // already in a sync directory are synced without the CLI).
+    //
+    // This device is the *origin* of the version: stamp `observed_at` once with
+    // our wall clock and carry the identical value to both the local
+    // `file_versions` row and the outgoing announcement, so every peer records
+    // the same content LWW clock (never their own receive time).
+    let observed_at = clock::now_millis();
     let change = match logical_path {
         Some(logical_path) => {
             // Genuinely local (CLI) creation: "now" is the true
@@ -1171,6 +1204,7 @@ pub(crate) async fn announce_provided(
                 logical_path_modified_at,
                 content_hash: content_hash.clone(),
                 size,
+                observed_at,
                 tags,
             }
         }
@@ -1178,16 +1212,18 @@ pub(crate) async fn announce_provided(
             file_id,
             content_hash: content_hash.clone(),
             size,
+            observed_at,
         },
     };
     let origin = ChangeOrigin::Local {
         directory_path: std::path::PathBuf::new(),
     };
-    if let Err(error) = database.record_version(
+    if let Err(error) = database.record_version_at(
         file_id,
         &content_hash,
         super::forward::version_origin(&origin),
         size as i64,
+        observed_at,
     ) {
         log::error!(
             "AnnounceProvided: failed to record version for {}: {:?}",

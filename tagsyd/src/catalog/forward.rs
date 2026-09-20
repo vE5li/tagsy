@@ -77,12 +77,18 @@ pub(crate) enum WireKind {
         logical_path_modified_at: i64,
         content_hash: String,
         size: u64,
+        /// The version's `observed_at`, stamped on this (origin) device and
+        /// carried verbatim to peers.
+        observed_at: i64,
         tags: Vec<TagId>,
     },
     Changed {
         file_id: FileId,
         content_hash: String,
         size: u64,
+        /// The version's `observed_at`, stamped on this (origin) device and
+        /// carried verbatim to peers.
+        observed_at: i64,
     },
 }
 
@@ -95,6 +101,7 @@ impl WireKind {
                 logical_path_modified_at,
                 content_hash,
                 size,
+                observed_at,
                 tags,
             } => Change::FileMetadataAdded {
                 file_id,
@@ -102,16 +109,19 @@ impl WireKind {
                 logical_path_modified_at,
                 content_hash,
                 size,
+                observed_at,
                 tags,
             },
             WireKind::Changed {
                 file_id,
                 content_hash,
                 size,
+                observed_at,
             } => Change::FileMetadataChanged {
                 file_id,
                 content_hash,
                 size,
+                observed_at,
             },
         }
     }

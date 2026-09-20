@@ -69,6 +69,7 @@ pub(crate) async fn handle_content_change(
             content,
             content_hash,
             size,
+            observed_at,
             mut tags,
         } => {
             // Reconciliation and live edits can both deliver a `FileAdded`
@@ -105,11 +106,12 @@ pub(crate) async fn handle_content_change(
                     return;
                 }
 
-                if let Err(error) = database.record_version(
+                if let Err(error) = database.record_version_at(
                     file_id,
                     &content_hash,
                     super::forward::version_origin(&change_origin),
                     size as i64,
+                    observed_at,
                 ) {
                     log::error!(
                         "Failed to record initial version for {}: {:?}",
@@ -215,6 +217,7 @@ pub(crate) async fn handle_content_change(
                         logical_path_modified_at,
                         content_hash,
                         size,
+                        observed_at,
                         tags,
                     },
                 )
@@ -255,11 +258,12 @@ pub(crate) async fn handle_content_change(
                     "Promoting FileAdded for known file {} to FileChanged (new content_hash)",
                     file_id.to_string()
                 );
-                if let Err(error) = database.record_version(
+                if let Err(error) = database.record_version_at(
                     file_id,
                     &content_hash,
                     super::forward::version_origin(&change_origin),
                     size as i64,
+                    observed_at,
                 ) {
                     log::error!(
                         "Failed to record version for {}: {:?}",
@@ -307,6 +311,7 @@ pub(crate) async fn handle_content_change(
                         file_id,
                         content_hash,
                         size,
+                        observed_at,
                     },
                 )
                 .await;
@@ -318,6 +323,7 @@ pub(crate) async fn handle_content_change(
             content,
             content_hash,
             size,
+            observed_at,
         } => {
             let file_tags = match database.tag_ids_for_file(file_id, store::SubtagRule::Exclude) {
                 Ok(tags) => tags.into_iter().collect::<Vec<TagId>>(),
@@ -331,11 +337,12 @@ pub(crate) async fn handle_content_change(
                 }
             };
 
-            if let Err(error) = database.record_version(
+            if let Err(error) = database.record_version_at(
                 file_id,
                 &content_hash,
                 super::forward::version_origin(&change_origin),
                 size as i64,
+                observed_at,
             ) {
                 log::error!(
                     "Failed to record version for {}: {:?}",
@@ -367,6 +374,7 @@ pub(crate) async fn handle_content_change(
                     file_id,
                     content_hash,
                     size,
+                    observed_at,
                 },
             )
             .await;

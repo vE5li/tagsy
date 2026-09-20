@@ -829,6 +829,7 @@ pub async fn run_peer_session<S>(
                             content_hash,
                             size,
                             logical_path_modified_at,
+                            observed_at,
                             placement,
                         } in pulls
                         {
@@ -868,6 +869,7 @@ pub async fn run_peer_session<S>(
                                 logical_path_modified_at,
                                 content_hash: content_hash.clone(),
                                 size: size as u64,
+                                observed_at,
                                 origin: ChangeOrigin::Peer {
                                     public_key: peer_public_key.to_owned(),
                                 },

@@ -961,6 +961,7 @@ impl CatalogWriter {
                     logical_path_modified_at,
                     content_hash,
                     size,
+                    observed_at,
                     origin,
                 } => {
                     files::catalog_file(
@@ -972,6 +973,7 @@ impl CatalogWriter {
                         logical_path_modified_at,
                         content_hash,
                         size,
+                        observed_at,
                         origin,
                     )
                     .await;

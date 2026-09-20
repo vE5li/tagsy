@@ -68,6 +68,11 @@ pub enum ContentChange {
         content_hash: String,
         /// Content size in bytes, read at hash time.
         size: u64,
+        /// The unix-millis wall-clock time this version was observed. Stamped
+        /// on the originating device and preserved verbatim through the peer
+        /// path; a local ingest passes its own `now()`. Recorded as the
+        /// version's `observed_at` (the content half of the three-way LWW).
+        observed_at: i64,
         tags: Vec<TagId>,
     },
     FileChanged {
@@ -76,6 +81,9 @@ pub enum ContentChange {
         content_hash: String,
         /// Content size in bytes, read at hash time.
         size: u64,
+        /// The unix-millis wall-clock time this version was observed (see
+        /// [`ContentChange::FileAdded::observed_at`]).
+        observed_at: i64,
     },
 }
 
@@ -176,6 +184,11 @@ pub enum CatalogCommand {
         content_hash: String,
         /// The version's content size in bytes (from the manifest history).
         size: u64,
+        /// The originating device's `observed_at` for this version (from the
+        /// manifest entry's `latest_observed_at`), recorded verbatim so the
+        /// content half of the three-way last-writer-wins orders identically
+        /// on every device. Never restamped to the receiver's `now()`.
+        observed_at: i64,
         /// The announcing peer (stored in `file_versions.origin`).
         origin: ChangeOrigin,
     },

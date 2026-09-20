@@ -473,12 +473,15 @@ impl SyncDirectories {
 
         // TagBased ingestion leaves the file in place: the content is a copy of
         // the on-disk source (`get_file_content` returns `FileToCopy`).
+        // This device observed the file: stamp `observed_at` with our wall clock
+        // as the version's origin time (carried verbatim to peers).
         self.send_content_change(sync_directory, ContentChange::FileAdded {
             file_id,
             logical_path,
             content,
             content_hash,
             size,
+            observed_at: crate::clock::now_millis(),
             tags,
         });
         Ok(())
@@ -525,6 +528,7 @@ impl SyncDirectories {
             content: content.into_move(),
             content_hash,
             size,
+            observed_at: crate::clock::now_millis(),
             tags,
         });
 
@@ -544,6 +548,7 @@ impl SyncDirectories {
             content,
             content_hash,
             size,
+            observed_at: crate::clock::now_millis(),
         });
         Ok(())
     }

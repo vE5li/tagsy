@@ -20,7 +20,12 @@ use super::types::{DatabaseError, FileVersion};
 pub type VersionHistory = Vec<(i64, String, i64)>;
 
 impl CatalogStore {
-    /// Append a new version row for `file_id`.
+    /// Append a new version row for `file_id`, stamping `observed_at` with this
+    /// daemon's wall-clock now. Use this only for a **locally-observed**
+    /// version (a file this device saw change on disk); a version learned from
+    /// a peer must preserve the *originating* device's stamp via
+    /// [`record_version_at`](Self::record_version_at) so the three-way
+    /// delete/edit/restore last-writer-wins orders identically on every device.
     ///
     /// The `version_number` is computed as `MAX(version_number) + 1` for this
     /// file (starting at 1) inside a transaction so concurrent calls cannot
@@ -42,7 +47,32 @@ impl CatalogStore {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis() as i64)
             .unwrap_or(0);
+        self.record_version_at(file_id, content_hash, origin, size, observed_at)
+    }
 
+    /// Append a new version row for `file_id` with an **explicit**
+    /// `observed_at` rather than this daemon's clock.
+    ///
+    /// This is the peer path: a version learned over the wire (a live
+    /// `FileMetadataAdded`/`FileMetadataChanged` announcement or a `Manifest`
+    /// reconcile) carries the *originating* device's `observed_at`, and it must
+    /// be recorded verbatim — never restamped to the receiver's `now()`. The
+    /// version's `observed_at` is the content half of the three-way
+    /// delete/edit/restore last-writer-wins; restamping it on receipt makes a
+    /// peer's later `deleted_at` lose LWW and silently resurrect a file that is
+    /// dead everywhere else. `add_tombstoned_file` records `observed_at`
+    /// verbatim for the same reason.
+    ///
+    /// Same `version_number` allocation and preview invalidation as
+    /// [`record_version`](Self::record_version); only the timestamp differs.
+    pub fn record_version_at(
+        &mut self,
+        file_id: FileId,
+        content_hash: &str,
+        origin: &str,
+        size: i64,
+        observed_at: i64,
+    ) -> Result<i64, DatabaseError> {
         let transaction = self.connection.transaction()?;
 
         // `MAX(version_number)` returns NULL when there are no rows for this
@@ -237,6 +267,49 @@ mod tests {
     use super::*;
     use crate::store::DeletedRule;
     use crate::store::fixtures::memory_db;
+
+    /// `record_version_at` records the *given* `observed_at` verbatim rather
+    /// than restamping with the local clock. This is the peer path: a version
+    /// learned over the wire must keep the originating device's stamp so the
+    /// three-way delete/edit/restore last-writer-wins orders identically on
+    /// every device. Regression for tombstones losing LWW (a dead file
+    /// resurrecting on a peer) when the receiver restamped `observed_at` to its
+    /// own — usually later — receive time.
+    #[test]
+    fn record_version_at_preserves_observed_at_so_a_later_delete_still_wins() {
+        let mut database = memory_db();
+        let file_id = FileId::new();
+        database
+            .add_file(file_id, &LogicalPath::new("gone.txt"), 0)
+            .unwrap();
+
+        // A peer's version observed at t=100 (its clock), recorded verbatim.
+        database
+            .record_version_at(file_id, "h1", "peerkey", 7, 100)
+            .unwrap();
+        assert_eq!(
+            database
+                .latest_version(file_id)
+                .unwrap()
+                .unwrap()
+                .observed_at,
+            100,
+            "the origin's observed_at must be recorded verbatim, not restamped"
+        );
+
+        // The peer later deletes at t=200 (> 100). The delete must win LWW.
+        assert!(
+            database.remove_file(file_id, 200).unwrap(),
+            "a delete newer than the preserved observed_at must win"
+        );
+        assert!(
+            database
+                .file_deletion_state(file_id)
+                .unwrap()
+                .unwrap()
+                .deleted
+        );
+    }
 
     #[test]
     fn size_round_trips_through_version_and_file_info() {

@@ -88,6 +88,12 @@ pub struct MissingContent {
     /// already know it (the row's path is reconciled separately via
     /// `PeerMove`).
     pub logical_path_modified_at: i64,
+    /// The originating device's `observed_at` for the peer's latest version
+    /// (from the manifest entry's `latest_observed_at`). Recorded verbatim as
+    /// the version's `observed_at` — the content half of the three-way
+    /// last-writer-wins — so a peer's later `deleted_at` still wins on every
+    /// device. Never restamped to our receive time.
+    pub observed_at: i64,
     pub placement: messages::MaterializePlacement,
 }
 
@@ -413,6 +419,7 @@ pub fn plan_file_sync(
                         content_hash: hash,
                         size,
                         logical_path_modified_at: entry.logical_path_modified_at,
+                        observed_at: entry.latest_observed_at,
                         placement,
                     });
                 }
@@ -441,6 +448,7 @@ pub fn plan_file_sync(
                         content_hash: hash,
                         size,
                         logical_path_modified_at: entry.logical_path_modified_at,
+                        observed_at: entry.latest_observed_at,
                         placement,
                     });
                 }
@@ -559,6 +567,11 @@ mod tests {
         assert_eq!(plan.pulls.len(), 1);
         assert_eq!(plan.pulls[0].file_id, file_id);
         assert_eq!(plan.pulls[0].content_hash, "bbbb");
+        // The pull carries the manifest's `latest_observed_at` verbatim so the
+        // version is cataloged with the *origin's* clock, not our receive time
+        // — otherwise a later peer delete would lose LWW and the file would
+        // resurrect on this device.
+        assert_eq!(plan.pulls[0].observed_at, 100);
         match &plan.pulls[0].placement {
             messages::MaterializePlacement::Create {
                 logical_path: got_logical_path,

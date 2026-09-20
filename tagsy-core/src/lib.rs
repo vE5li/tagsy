@@ -19,7 +19,7 @@ pub use tag_style::{BorderStyle, TagShape, TagStyle};
 /// which every node derives identically). Since all devices are operated by the
 /// same user and updated together, there is no compatibility range — a mismatch
 /// is fail-closed.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 pub mod tag {
     use std::collections::HashMap;
@@ -139,6 +139,15 @@ pub mod state {
             /// The file's content size in bytes, read at hash time. Recorded
             /// alongside `content_hash` in `file_versions`.
             size: u64,
+            /// The unix-millis wall-clock time this version was observed,
+            /// stamped on the *originating* device and preserved
+            /// verbatim across the wire. Recorded as the version's
+            /// `observed_at` — the content half of the three-way
+            /// delete/edit/restore last-writer-wins. Never
+            /// restamp it on receipt: stamping the receiver's `now()` would
+            /// make a peer's later `deleted_at` lose LWW and
+            /// resurrect a file that is dead everywhere else.
+            observed_at: i64,
             // TODO: Bundle metadata with the tag.
             tags: Vec<TagId>,
         },
@@ -168,6 +177,13 @@ pub mod state {
             content_hash: String,
             /// The file's new content size in bytes, read at hash time.
             size: u64,
+            /// The unix-millis wall-clock time this version was observed,
+            /// stamped on the *originating* device and preserved
+            /// verbatim across the wire. Recorded as the version's
+            /// `observed_at` (the content half of the three-way
+            /// last-writer-wins). Never restamp it on receipt — see
+            /// `FileMetadataAdded::observed_at`.
+            observed_at: i64,
         },
         FileDeleted {
             file_id: FileId,

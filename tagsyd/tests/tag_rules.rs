@@ -342,6 +342,7 @@ async fn local_file_added_applies_a_matching_rule() {
             content: tagsyd::file_bytes::FileBytes::InMemory(b"x".to_vec()),
             content_hash: "hash".to_owned(),
             size: 1,
+            observed_at: 1,
             tags: Vec::new(),
         }),
         ChangeOrigin::Local {
@@ -374,6 +375,7 @@ async fn peer_file_added_does_not_apply_rules() {
             content: tagsyd::file_bytes::FileBytes::InMemory(b"x".to_vec()),
             content_hash: "hash".to_owned(),
             size: 1,
+            observed_at: 1,
             tags: Vec::new(),
         }),
         ChangeOrigin::Peer {
