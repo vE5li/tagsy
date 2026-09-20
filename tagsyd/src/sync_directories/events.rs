@@ -24,11 +24,50 @@ fn relative_within<'a>(path: &'a Path, base: &Path) -> Result<&'a Path, SyncDire
         })
 }
 
+/// If `event` is a create / modify / remove of a file named `.gitignore`, the
+/// directory that `.gitignore` governs (its parent). Any other event — or a
+/// `.gitignore` move, whose two endpoints are handled as their own
+/// create/remove halves — yields `None`.
+fn gitignore_change_directory(event: &DebouncedEventKind) -> Option<PathBuf> {
+    let path = match event {
+        DebouncedEventKind::Create { file_name }
+        | DebouncedEventKind::Modify { file_name }
+        | DebouncedEventKind::Remove { file_name } => file_name,
+        DebouncedEventKind::Move { .. }
+        | DebouncedEventKind::DirCreate { .. }
+        | DebouncedEventKind::DirRemove { .. } => return None,
+    };
+
+    if path.file_name().is_some_and(|name| name == ".gitignore") {
+        path.parent().map(Path::to_path_buf)
+    } else {
+        None
+    }
+}
+
 impl SyncDirectories {
     pub(super) async fn handle_event(
         &self,
         event: DebouncedEventKind,
     ) -> Result<(), SyncDirectoryError> {
+        // A `.gitignore` create/modify/remove can newly *un*-ignore a subtree.
+        // Because the non-recursive watcher installs no descriptors under an
+        // ignored subtree, no events flow from inside it, so re-admission cannot
+        // be discovered from file events there — it must be driven from the
+        // `.gitignore` change itself: re-watch and ingest the now-visible files.
+        // This runs *in addition to* the normal handling below (which syncs the
+        // `.gitignore` file itself like any other file).
+        //
+        // The reverse direction (a `.gitignore` edit that newly *ignores* a
+        // subtree) deliberately does nothing at runtime: watches are only ever
+        // added on an edit, never removed, so an already-synced file under a
+        // freshly-ignored directory keeps syncing — the standing invariant that
+        // ignore gates ingestion only and never stops syncing an existing file.
+        // A newly-ignored subtree is re-pruned on the next daemon restart.
+        if let Some(gitignore_dir) = gitignore_change_directory(&event) {
+            self.readmit_after_gitignore_change(&gitignore_dir).await?;
+        }
+
         match event {
             DebouncedEventKind::Create { file_name } => {
                 // A Create for a path the daemon just wrote is our own
@@ -228,68 +267,10 @@ impl SyncDirectories {
                             }
                         }
                     } else if to.is_dir() {
-                        for entry in WalkDir::new(&to)
-                            .into_iter()
-                            .filter_map(|entry| entry.ok())
-                            .filter(|entry| entry.file_type().is_file())
-                        {
-                            if self.take_matching_self_write(entry.path(), None) {
-                                log::debug!(
-                                    "Ignoring move-in of {} (our own operation)",
-                                    entry.path().to_string_lossy()
-                                );
-                                continue;
-                            }
-
-                            let Ok(sync_relative_path) =
-                                entry.path().strip_prefix(&sync_directory.path)
-                            else {
-                                // The walk is rooted at `to`, itself under the
-                                // sync directory, so this is unreachable — but
-                                // skip the one entry rather than crash the
-                                // thread if it ever isn't.
-                                log::warn!(
-                                    "Skipping move-in of {}: not under {}",
-                                    entry.path().to_string_lossy(),
-                                    sync_directory.path.to_string_lossy()
-                                );
-                                continue;
-                            };
-
-                            if sync_directory.is_ignored(sync_relative_path) {
-                                log::debug!(
-                                    "Ignoring move-in of gitignored file {}",
-                                    sync_relative_path.to_string_lossy()
-                                );
-                                continue;
-                            }
-
-                            let (content, content_hash, size) =
-                                self.get_file_content(entry.path()).await?;
-
-                            match &sync_directory.sync_type {
-                                SyncType::Universal { .. } => {
-                                    self.upload_file(
-                                        sync_directory,
-                                        sync_relative_path,
-                                        content,
-                                        content_hash,
-                                        size,
-                                        Vec::new(),
-                                    )?;
-                                }
-                                SyncType::TagBased { tags } => {
-                                    self.add_file(
-                                        sync_directory,
-                                        sync_relative_path,
-                                        content,
-                                        content_hash,
-                                        size,
-                                        tags.to_vec(),
-                                    )?;
-                                }
-                            }
-                        }
+                        // Moving a directory in also brings its subtree under the
+                        // non-recursive watcher: register watches (pruning
+                        // ignored subtrees) *and* ingest its existing files.
+                        self.watch_and_ingest_directory(sync_directory, &to).await?;
                     } else {
                         log::warn!(
                             "A file that is not a regular file or a directory was detected. This \
@@ -336,6 +317,180 @@ impl SyncDirectories {
                 let file_id = self.get_file_id(sync_directory, sync_relative_path)?;
 
                 self.remove_file_by_id(sync_directory, file_id)?;
+            }
+            DebouncedEventKind::DirCreate { path } => {
+                // Under the non-recursive watcher a new directory gets no watch
+                // for free — install one now (unless it is `.gitignore`d). And
+                // because files can appear inside it between its creation and
+                // this handler running (`mkdir -p a/b/c; touch a/b/c/f`, or a
+                // directory populated then created), walk it to ingest anything
+                // already there. Both are what `watch_and_ingest_directory`
+                // does; together they close the create-then-populate race.
+                let sync_directory = self.sync_directory_for_path(&path)?;
+
+                let sync_relative_path = relative_within(&path, &sync_directory.path)?;
+                if sync_directory.is_ignored_dir(sync_relative_path) {
+                    log::debug!(
+                        "Not watching gitignored directory {}",
+                        sync_relative_path.to_string_lossy()
+                    );
+                    return Ok(());
+                }
+
+                self.watch_and_ingest_directory(sync_directory, &path)
+                    .await?;
+            }
+            DebouncedEventKind::DirRemove { path } => {
+                // Drop the subtree's descriptors from the watch set. Individual
+                // file removals beneath it arrive as their own `Remove` events
+                // (which sync the catalog deletions), so there is nothing to
+                // ingest here — only watches to release.
+                self.dispatcher.borrow_mut().unwatch_tree(&path);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// React to a `.gitignore` change under `gitignore_dir` by re-admitting any
+    /// subtree it newly un-ignores: re-watch and ingest the now-visible,
+    /// not-yet-tracked files. Idempotent — [`watch_and_ingest_directory`] skips
+    /// directories already watched and files already tracked, so an edit that
+    /// changes nothing (or one that only *added* ignore rules) does no work
+    /// beyond the walk.
+    ///
+    /// `gitignore_dir` may not belong to any sync directory (a stray path);
+    /// that is not an error, just nothing to do.
+    async fn readmit_after_gitignore_change(
+        &self,
+        gitignore_dir: &Path,
+    ) -> Result<(), SyncDirectoryError> {
+        let Ok(sync_directory) = self.sync_directory_for_path(gitignore_dir) else {
+            return Ok(());
+        };
+
+        log::debug!(
+            "Re-evaluating watches under {} after a .gitignore change",
+            gitignore_dir.to_string_lossy()
+        );
+
+        self.watch_and_ingest_directory(sync_directory, gitignore_dir)
+            .await
+    }
+
+    /// Register `directory`'s subtree with the non-recursive watcher (pruning
+    /// `.gitignore`d subtrees) and ingest every not-yet-tracked file beneath
+    /// it. Used both when a directory is moved in and when one is created,
+    /// and by the `.gitignore` re-admission path. The walk prunes ignored
+    /// subdirectories so a moved-in/created tree containing its own
+    /// `target/` neither watches nor ingests it.
+    async fn watch_and_ingest_directory(
+        &self,
+        sync_directory: &super::OpenDirectory,
+        directory: &Path,
+    ) -> Result<(), SyncDirectoryError> {
+        // Install watches first so files created *after* the walk still produce
+        // events; the walk then covers everything already present. Any file
+        // landing in the gap between the two is caught by whichever side sees it.
+        self.dispatcher
+            .borrow_mut()
+            .watch_tree(directory, &|candidate: &Path| match candidate
+                .strip_prefix(&sync_directory.path)
+            {
+                Ok(relative) if relative.as_os_str().is_empty() => false,
+                Ok(relative) => sync_directory.is_ignored_dir(relative),
+                Err(_) => false,
+            });
+
+        for entry in WalkDir::new(directory)
+            .into_iter()
+            .filter_entry(|entry| {
+                if !entry.file_type().is_dir() {
+                    return true;
+                }
+                match entry.path().strip_prefix(&sync_directory.path) {
+                    Ok(relative) if relative.as_os_str().is_empty() => true,
+                    Ok(relative) => !sync_directory.is_ignored_dir(relative),
+                    Err(_) => true,
+                }
+            })
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+        {
+            if self.take_matching_self_write(entry.path(), None) {
+                log::debug!(
+                    "Ignoring move-in of {} (our own operation)",
+                    entry.path().to_string_lossy()
+                );
+                continue;
+            }
+
+            let Ok(sync_relative_path) = entry.path().strip_prefix(&sync_directory.path) else {
+                // The walk is rooted under the sync directory, so this is
+                // unreachable — but skip the one entry rather than crash the
+                // thread if it ever isn't.
+                log::warn!(
+                    "Skipping ingest of {}: not under {}",
+                    entry.path().to_string_lossy(),
+                    sync_directory.path.to_string_lossy()
+                );
+                continue;
+            };
+
+            if sync_directory.is_ignored(sync_relative_path) {
+                log::debug!(
+                    "Ignoring gitignored file {}",
+                    sync_relative_path.to_string_lossy()
+                );
+                continue;
+            }
+
+            // Keep re-admission idempotent: a `.gitignore` edit that un-ignores
+            // a subtree re-walks it, and some of its files may already be
+            // tracked (e.g. admitted before the ignore, or by a concurrent
+            // path). Skip those rather than re-ingest. A DB error skips just this
+            // file.
+            match sync_directory.is_file_tracked(sync_relative_path) {
+                Ok(true) => {
+                    log::debug!(
+                        "File {} is already tracked",
+                        sync_relative_path.to_string_lossy()
+                    );
+                    continue;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    log::error!(
+                        "DB error checking {}: {error:?}; skipping",
+                        sync_relative_path.to_string_lossy()
+                    );
+                    continue;
+                }
+            }
+
+            let (content, content_hash, size) = self.get_file_content(entry.path()).await?;
+
+            match &sync_directory.sync_type {
+                SyncType::Universal { .. } => {
+                    self.upload_file(
+                        sync_directory,
+                        sync_relative_path,
+                        content,
+                        content_hash,
+                        size,
+                        Vec::new(),
+                    )?;
+                }
+                SyncType::TagBased { tags } => {
+                    self.add_file(
+                        sync_directory,
+                        sync_relative_path,
+                        content,
+                        content_hash,
+                        size,
+                        tags.to_vec(),
+                    )?;
+                }
             }
         }
 

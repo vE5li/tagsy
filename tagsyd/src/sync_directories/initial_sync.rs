@@ -16,13 +16,13 @@
 
 use std::collections::HashMap;
 
-use tagsy_core::{FileId, PhysicalPath, TagId};
+use tagsy_core::{FileId, TagId};
 use tokio_util::sync::CancellationToken;
 use walkdir::WalkDir;
 
 use super::{OpenDirectory, SyncDirectories};
 use crate::configuration::SyncType;
-use crate::store::{DatabaseError, SyncDirectoryFile};
+use crate::store::SyncDirectoryFile;
 
 /// How a sync directory names and ingests files — the axis the two initial-sync
 /// passes differ on. Derived from a directory's [`SyncType`].
@@ -115,8 +115,29 @@ impl SyncDirectories {
         }
 
         // Pass 2: on-disk files the index does not track — ingest them.
+        //
+        // Prune `.gitignore`d subtrees during the walk itself (not just via the
+        // per-file `is_ignored` check below): a directory the watcher is not
+        // watching must not be hash-walked here either, or a huge ignored
+        // `target/` reintroduces the very cost the non-recursive watcher
+        // removed. `filter_entry` stops descent into a pruned directory. The
+        // sync root is never pruned (it strips to an empty relative path). The
+        // per-file `is_ignored` check remains below to honor file-only patterns
+        // (`*.log`) inside otherwise-watched directories.
         for entry in WalkDir::new(&sync_directory.path)
             .into_iter()
+            .filter_entry(|entry| {
+                if !entry.file_type().is_dir() {
+                    // Non-directories are never pruned by `filter_entry`; the
+                    // file-level checks below decide them.
+                    return true;
+                }
+                match entry.path().strip_prefix(&sync_directory.path) {
+                    Ok(relative) if relative.as_os_str().is_empty() => true,
+                    Ok(relative) => !sync_directory.is_ignored_dir(relative),
+                    Err(_) => true,
+                }
+            })
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().is_file())
         {
@@ -139,48 +160,20 @@ impl SyncDirectories {
                 continue;
             }
 
-            // Is this file already tracked? The lookup key is the per-kind
-            // difference. A real database error (anything but `MissingFile`)
-            // must skip this one file rather than crash the sole sync-directory
-            // thread and abandon every other directory's initial sync.
-            let tracked = match naming {
-                Naming::ById => {
-                    // FIX: Maybe this should not use to_string_lossy but rather
-                    // to utf8 since a valid uuid will always be valid utf8?
-                    match FileId::from_string(&relative_path.to_string_lossy()) {
-                        Some(file_id) => match sync_directory.database.get_file(file_id) {
-                            Ok(_) => true,
-                            Err(DatabaseError::MissingFile) => false,
-                            Err(error) => {
-                                log::error!(
-                                    "initial sync: DB error checking {}: {:?}; skipping",
-                                    relative_path.to_string_lossy(),
-                                    error
-                                );
-                                continue;
-                            }
-                        },
-                        // A name that is not a valid `file_id` cannot be tracked
-                        // in a Universal directory: treat it as untracked.
-                        None => false,
-                    }
-                }
-                Naming::ByPath { .. } => {
-                    match sync_directory
-                        .database
-                        .get_file_id(&PhysicalPath::new(relative_path.to_string_lossy()))
-                    {
-                        Ok(_) => true,
-                        Err(DatabaseError::MissingFile) => false,
-                        Err(error) => {
-                            log::error!(
-                                "initial sync: DB error checking {}: {:?}; skipping",
-                                relative_path.to_string_lossy(),
-                                error
-                            );
-                            continue;
-                        }
-                    }
+            // Is this file already tracked? A real database error (anything but
+            // `MissingFile`) must skip this one file rather than crash the sole
+            // sync-directory thread and abandon every other directory's initial
+            // sync. The per-kind lookup lives on `OpenDirectory::is_file_tracked`
+            // (shared with the `.gitignore` re-admission walk).
+            let tracked = match sync_directory.is_file_tracked(relative_path) {
+                Ok(tracked) => tracked,
+                Err(error) => {
+                    log::error!(
+                        "initial sync: DB error checking {}: {:?}; skipping",
+                        relative_path.to_string_lossy(),
+                        error
+                    );
+                    continue;
                 }
             };
 

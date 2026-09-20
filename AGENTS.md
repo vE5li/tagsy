@@ -144,7 +144,8 @@ revisit, not a local patch.
 
 ## Reconciliation is additive, per-entry, and idempotent
 
-Manifest reconciliation (`peer/plan.rs`, `peer/plan_tags.rs`) decides each entry
+Manifest reconciliation (`peer/plan.rs`, `peer/plan_tags.rs`, `peer/plan_purge.rs`)
+decides each entry
 against the local DB alone — no cross-entry state, and **absence never implies
 anything** (deletes/restores are explicit LWW-stamped flags carried *on* the
 entry, never inferred from a file being missing). Every applied change is
@@ -153,7 +154,8 @@ must be preserved:
 
 - **Splittable**: a manifest can be sent in any number of frames grouped any
   way — the connection path batches it (`manifest_batch_size` /
-  `tag_manifest_batch_size`) to stay under the WebSocket size ceiling. Never add
+  `tag_manifest_batch_size` / `purge_manifest_batch_size`) to stay under the
+  WebSocket size ceiling. Never add
   a "complete set" assumption to a manifest handler.
 - **Additive**: a frame only ever *adds* knowledge; a peer that never mentions a
   file simply says nothing about it.
@@ -200,7 +202,7 @@ version stamp lives in the archive itself.
 There are two SQLite databases, both owned by `tagsyd/src/store/`:
 
 - the **main catalog** (`CatalogStore`) — `files_v2`, `tags_v2`,
-  `entries_v1`, `file_versions_v1`, `previews_v1`.
+  `entries_v1`, `file_versions_v1`, `previews_v1`, `purged_files_v1`.
 - a **per-sync-directory index** (`DirectoryIndex`) — one database per sync
   directory, holding a single `files_v1` table. Unrelated to the main
   catalog's former `files_v1`.
@@ -217,6 +219,7 @@ module that owns it:
 | `entries_v1` | `store/entries.rs` |
 | `file_versions_v1` | `store/versions.rs` |
 | `previews_v1` | `store/previews.rs` |
+| `purged_files_v1` | `store/purged.rs` |
 | `files_v1` (per-directory) | `store/directory_index.rs` |
 
 Three modules also touch a table they don't own — check them too when

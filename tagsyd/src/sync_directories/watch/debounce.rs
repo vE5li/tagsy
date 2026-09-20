@@ -32,6 +32,18 @@ pub enum DebouncedEventKind {
     Modify { file_name: PathBuf },
     /// Removal of a *file*.
     Remove { file_name: PathBuf },
+    /// Creation of a *directory*. Distinct from [`Create`](Self::Create)
+    /// because the non-recursive watcher must react to it structurally — a new
+    /// directory needs a fresh `notify` watch (and a walk of its contents to
+    /// close the create-then-populate race), not an ingest. It carries the
+    /// directory path and is deliberately inert to every file-coalescing merge
+    /// rule.
+    DirCreate { path: PathBuf },
+    /// Removal of a *directory*. The counterpart to
+    /// [`DirCreate`](Self::DirCreate): the watcher must drop the subtree's
+    /// descriptors. Individual file removals beneath it arrive as their own
+    /// [`Remove`](Self::Remove) events.
+    DirRemove { path: PathBuf },
 }
 
 impl DebouncedEventKind {
@@ -99,25 +111,32 @@ pub struct DebouncingEvent {
 /// [`DebouncedEventKind`].
 ///
 /// This is the pure `notify`-vocabulary → our-vocabulary mapping, with no
-/// reference to the queue: directory create/remove is dropped (directories are
-/// tracked only through their files), data modifies become `Modify`, the three
-/// rename modes (`To` / `From` / `Both`) become the corresponding `Move`, and
-/// metadata / access / other events are dropped.
+/// reference to the queue: a file create/remove becomes `Create`/`Remove` and a
+/// *directory* create/remove becomes `DirCreate`/`DirRemove` (the non-recursive
+/// watcher must react to directory structure by adding/dropping watches), data
+/// modifies become `Modify`, the three rename modes (`To` / `From` / `Both`)
+/// become the corresponding `Move`, and metadata / access / other events are
+/// dropped.
 ///
 /// Assumes events are not bundled (one path per event, except a `Both` rename
 /// which carries two); this matches the recommended watcher's behaviour.
 pub(super) fn translate(mut event: Event) -> Option<DebouncedEventKind> {
     match event.kind {
         EventKind::Create(create_kind) => {
-            // We don't track the creation/deletion of directories. Directories are only
-            // tracked implicitely through the files that are contained in them.
-            if create_kind == CreateKind::File {
-                assert_eq!(event.paths.len(), 1, "Wrong number of paths");
-
-                let file_name = event.paths.remove(0);
-                Some(DebouncedEventKind::Create { file_name })
-            } else {
-                None
+            assert_eq!(event.paths.len(), 1, "Wrong number of paths");
+            let path = event.paths.remove(0);
+            match create_kind {
+                CreateKind::File => Some(DebouncedEventKind::Create { file_name: path }),
+                // A new directory needs a fresh non-recursive watch; surface it
+                // rather than dropping it (the recursive watcher used to make
+                // this implicit).
+                CreateKind::Folder => Some(DebouncedEventKind::DirCreate { path }),
+                // `Any`/`Other`: kind unknown. Dropping (as before) is the safe
+                // choice — guessing "file" would try to ingest a directory as a
+                // file, and guessing "directory" would install a stray watch.
+                // On Linux `notify` always reports File/Folder, so this is only
+                // the theoretical fallback.
+                CreateKind::Any | CreateKind::Other => None,
             }
         }
         EventKind::Modify(modify_kind) => match modify_kind {
@@ -163,15 +182,15 @@ pub(super) fn translate(mut event: Event) -> Option<DebouncedEventKind> {
             ModifyKind::Any | ModifyKind::Metadata(_) | ModifyKind::Other => None,
         },
         EventKind::Remove(remove_kind) => {
-            // We don't track the creation/deletion of directories. Directories are only
-            // tracked implicitely through the files that are contained in them.
-            if remove_kind == RemoveKind::File {
-                assert_eq!(event.paths.len(), 1, "Wrong number of paths");
-
-                let file_name = event.paths.remove(0);
-                Some(DebouncedEventKind::Remove { file_name })
-            } else {
-                None
+            assert_eq!(event.paths.len(), 1, "Wrong number of paths");
+            let path = event.paths.remove(0);
+            match remove_kind {
+                RemoveKind::File => Some(DebouncedEventKind::Remove { file_name: path }),
+                // A removed directory's descriptors must be dropped from the
+                // watch set; surface it rather than dropping it.
+                RemoveKind::Folder => Some(DebouncedEventKind::DirRemove { path }),
+                // Unknown kind: drop, as before (see the Create arm).
+                RemoveKind::Any | RemoveKind::Other => None,
             }
         }
         // Not used, skip adding it.
@@ -416,6 +435,83 @@ mod tests {
             from: Some(path(from)),
             to: Some(path(to)),
         }
+    }
+    fn dir_create(name: &str) -> DebouncedEventKind {
+        DebouncedEventKind::DirCreate { path: path(name) }
+    }
+    fn dir_remove(name: &str) -> DebouncedEventKind {
+        DebouncedEventKind::DirRemove { path: path(name) }
+    }
+
+    use notify::event::{CreateKind, RemoveKind};
+    use notify::{Event, EventKind};
+
+    fn raw(kind: EventKind, paths: &[&str]) -> Event {
+        Event {
+            kind,
+            paths: paths.iter().map(PathBuf::from).collect(),
+            attrs: Default::default(),
+        }
+    }
+
+    /// A directory create/remove now translates to `DirCreate`/`DirRemove`
+    /// rather than being dropped — the non-recursive watcher must react to
+    /// directory structure. File create/remove still translate as before.
+    #[test]
+    fn directory_create_and_remove_translate_to_dir_events() {
+        assert_eq!(
+            translate(raw(EventKind::Create(CreateKind::Folder), &["d"])),
+            Some(dir_create("d"))
+        );
+        assert_eq!(
+            translate(raw(EventKind::Remove(RemoveKind::Folder), &["d"])),
+            Some(dir_remove("d"))
+        );
+        assert_eq!(
+            translate(raw(EventKind::Create(CreateKind::File), &["f"])),
+            Some(create("f"))
+        );
+        assert_eq!(
+            translate(raw(EventKind::Remove(RemoveKind::File), &["f"])),
+            Some(remove("f"))
+        );
+    }
+
+    /// An unknown-kind create/remove is still dropped (guessing file-vs-dir is
+    /// unsafe); on Linux `notify` always reports File/Folder so this is only
+    /// the theoretical fallback.
+    #[test]
+    fn unknown_kind_create_and_remove_are_dropped() {
+        assert_eq!(
+            translate(raw(EventKind::Create(CreateKind::Any), &["x"])),
+            None
+        );
+        assert_eq!(
+            translate(raw(EventKind::Remove(RemoveKind::Any), &["x"])),
+            None
+        );
+    }
+
+    /// Directory events are inert to every file-coalescing merge rule: they are
+    /// distinct variants none of the seven rules match, so they queue through
+    /// untouched and never merge with, cancel, or rewrite a file event of the
+    /// same path.
+    #[test]
+    fn directory_events_are_inert_to_merge_rules() {
+        // A DirCreate + DirRemove of the same path do NOT cancel (that rule is
+        // file-only): both survive.
+        let debouncer = debouncer_of([dir_create("d"), dir_remove("d")]);
+        assert_eq!(queued_kinds(&debouncer), vec![
+            dir_create("d"),
+            dir_remove("d")
+        ]);
+
+        // A DirCreate is untouched by the file rules operating on the same
+        // path: the file Modify+Remove coalesce between themselves (rule 1
+        // clears the Modify), but the DirCreate survives regardless — it never
+        // absorbs the Modify nor is cleared by the Remove.
+        let debouncer = debouncer_of([dir_create("d"), modify("d"), remove("d")]);
+        assert_eq!(queued_kinds(&debouncer), vec![dir_create("d"), remove("d")]);
     }
 
     fn debouncer_of(events: impl IntoIterator<Item = DebouncedEventKind>) -> Debouncer {

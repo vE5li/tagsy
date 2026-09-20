@@ -27,7 +27,6 @@ use std::path::{Path, PathBuf};
 
 pub use commands::SyncDirectoryCommand;
 use ignore::gitignore::GitignoreBuilder;
-use notify::{RecursiveMode, Watcher};
 use self_write::SelfWrite;
 use tagsy_core::state::{Change, ChangeOrigin};
 use tagsy_core::{FileId, PhysicalPath, TagId};
@@ -38,7 +37,7 @@ use crate::catalog::messages::{CatalogCommand, ContentChange, Ingest};
 use crate::configuration::{Configuration, SyncType};
 use crate::file_bytes::FileBytes;
 use crate::paths::Paths;
-use crate::store::{DirectoryIndex, SyncDirectoryFile};
+use crate::store::{DatabaseError, DirectoryIndex, SyncDirectoryFile};
 
 /// A boxed underlying cause. The failing operations here wrap several unrelated
 /// error types — [`DatabaseError`],
@@ -123,6 +122,32 @@ impl OpenDirectory {
     /// This gates *local ingestion only*; a file the catalog places here
     /// (already tracked, or received from a peer) never reaches this check.
     fn is_ignored(&self, relative_path: &Path) -> bool {
+        self.is_ignored_impl(relative_path, false)
+    }
+
+    /// Whether the *directory* at `relative_path` (relative to this directory's
+    /// root) is excluded by a `.gitignore` rule — the coarser question
+    /// [`is_ignored`](Self::is_ignored) does not answer, used to prune whole
+    /// subtrees from the filesystem watcher rather than filter files one at a
+    /// time.
+    ///
+    /// This is deliberately distinct from the file check: a rule like `*.log`
+    /// excludes files but never lets a directory be pruned, whereas a
+    /// directory-form rule (`target/`, `node_modules/`, `build/`) does. Only
+    /// the latter returns true here, so a watch subtree is dropped exactly
+    /// when git itself would ignore the whole directory. The matcher
+    /// construction, deepest-first precedence, and stateless-per-call
+    /// semantics are identical to the file check — see
+    /// [`is_ignored`](Self::is_ignored).
+    fn is_ignored_dir(&self, relative_path: &Path) -> bool {
+        self.is_ignored_impl(relative_path, true)
+    }
+
+    /// The shared ancestry matcher-walk behind [`is_ignored`](Self::is_ignored)
+    /// and [`is_ignored_dir`](Self::is_ignored_dir). `is_dir` is forwarded to
+    /// the `ignore` crate so a trailing-slash directory rule (`build/`) matches
+    /// a directory path but not a like-named file, matching git's semantics.
+    fn is_ignored_impl(&self, relative_path: &Path, is_dir: bool) -> bool {
         if !self.respect_gitignore {
             return false;
         }
@@ -133,7 +158,7 @@ impl OpenDirectory {
         // sync-relative one.
         let absolute_path = self.path.join(relative_path);
 
-        // Walk the file's ancestry deepest-first (leaf → root), compiling each
+        // Walk the path's ancestry deepest-first (leaf → root), compiling each
         // directory's `.gitignore` into a matcher rooted at that directory. The
         // first definitive verdict wins, giving the deepest `.gitignore`
         // precedence — git's rule.
@@ -168,7 +193,7 @@ impl OpenDirectory {
             // `matched_path_or_any_parents` so a rule on a directory (`build/`,
             // `node_modules/`) also excludes everything beneath it — the leaf
             // path is all we have at a watcher event, with no hierarchy walk.
-            let matched = gitignore.matched_path_or_any_parents(&absolute_path, false);
+            let matched = gitignore.matched_path_or_any_parents(&absolute_path, is_dir);
             if matched.is_ignore() {
                 return true;
             }
@@ -179,12 +204,79 @@ impl OpenDirectory {
 
         false
     }
+
+    /// Register this directory's tree with the watcher non-recursively, pruning
+    /// every `.gitignore`d subtree. Returns the directories newly watched
+    /// (empty on the common re-registration of an already-watched tree), so
+    /// a caller re-admitting a subtree can rescan exactly those.
+    ///
+    /// The prune predicate maps each candidate directory's absolute path back
+    /// to this directory's sync-relative space and asks
+    /// [`is_ignored_dir`](Self::is_ignored_dir). The sync root itself is never
+    /// pruned: it has no sync-relative path to test and a user-configured root
+    /// is watched unconditionally.
+    fn watch_tree(&self, dispatcher: &mut WatchDispatcher) -> Vec<PathBuf> {
+        let root = self.path.clone();
+        let should_prune = move |candidate: &Path| -> bool {
+            match candidate.strip_prefix(&root) {
+                // The root's own strip yields an empty path; never prune it.
+                Ok(relative) if relative.as_os_str().is_empty() => false,
+                Ok(relative) => self.is_ignored_dir(relative),
+                // A candidate outside the root should not happen (the walk is
+                // rooted here); be conservative and do not prune.
+                Err(_) => false,
+            }
+        };
+        dispatcher.watch_tree(&self.path, &should_prune)
+    }
+
+    /// Whether the file at sync-relative `relative_path` is already tracked in
+    /// this directory's index. The lookup key is the per-kind difference a
+    /// Universal directory names files by `file_id`, a TagBased one by physical
+    /// path — mirroring the two initial-sync `Naming` branches. A real DB error
+    /// (anything but `MissingFile`) is surfaced as `Err` so the caller can skip
+    /// just that file; a missing file is a clean `Ok(false)`.
+    ///
+    /// Used to keep re-ingest paths (the `.gitignore` re-admission walk, which
+    /// may revisit files already tracked) idempotent, the same guard the
+    /// initial-sync untracked walk applies.
+    fn is_file_tracked(&self, relative_path: &Path) -> Result<bool, DatabaseError> {
+        match &self.sync_type {
+            SyncType::Universal { .. } => {
+                match FileId::from_string(&relative_path.to_string_lossy()) {
+                    Some(file_id) => match self.database.get_file(file_id) {
+                        Ok(_) => Ok(true),
+                        Err(DatabaseError::MissingFile) => Ok(false),
+                        Err(error) => Err(error),
+                    },
+                    // A name that is not a valid `file_id` cannot be tracked in a
+                    // Universal directory.
+                    None => Ok(false),
+                }
+            }
+            SyncType::TagBased { .. } => {
+                match self
+                    .database
+                    .get_file_id(&PhysicalPath::new(relative_path.to_string_lossy()))
+                {
+                    Ok(_) => Ok(true),
+                    Err(DatabaseError::MissingFile) => Ok(false),
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
 }
 
 pub struct SyncDirectories {
     sync_directories: Vec<OpenDirectory>,
     change_sender: tokio::sync::mpsc::UnboundedSender<CatalogCommand>,
-    _dispatcher: WatchDispatcher,
+    /// The filesystem watcher, behind a `RefCell` because the non-recursive
+    /// scheme mutates the watch set from `handle_event` (`&self`) — a new
+    /// directory adds watches, a removed one drops them — the same interior
+    /// mutability the `self_writes` table uses, and safe for the same reason:
+    /// this actor runs single-threaded on one task.
+    dispatcher: RefCell<WatchDispatcher>,
     watcher_events: tokio::sync::mpsc::UnboundedReceiver<DebouncedEventKind>,
     command_receiver: tokio::sync::mpsc::UnboundedReceiver<SyncDirectoryCommand>,
     // TODO: Make this a more robust messaging framework instead of a ref cell.
@@ -236,18 +328,6 @@ impl SyncDirectories {
                     return None;
                 }
 
-                if let Err(error) = dispatcher
-                    .watcher()
-                    .watch(path.as_ref(), RecursiveMode::Recursive)
-                {
-                    log::error!(
-                        "Sync directory {} will NOT be synced: failed to set up its watcher: \
-                         {error}",
-                        path.to_string_lossy()
-                    );
-                    return None;
-                }
-
                 let database_path = paths.sync_directory_db_path(&path);
 
                 let database = match DirectoryIndex::initialize(database_path) {
@@ -262,19 +342,29 @@ impl SyncDirectories {
                     }
                 };
 
-                Some(OpenDirectory {
+                let open_directory = OpenDirectory {
                     path,
                     sync_type: sync_directory.sync_type.clone(),
                     database,
                     respect_gitignore: sync_directory.respect_gitignore,
-                })
+                };
+
+                // Register the tree non-recursively, pruning every `.gitignore`d
+                // subtree so it installs no inotify descriptors — the whole
+                // point of managing the watch set by hand. The sync root itself
+                // is never pruned (it has no sync-relative path to test, and a
+                // root the user configured is watched unconditionally); only
+                // directories *beneath* it are subject to `is_ignored_dir`.
+                open_directory.watch_tree(&mut dispatcher);
+
+                Some(open_directory)
             })
             .collect::<Vec<_>>();
 
         Self {
             sync_directories,
             change_sender,
-            _dispatcher: dispatcher,
+            dispatcher: RefCell::new(dispatcher),
             watcher_events,
             command_receiver,
             self_writes: Default::default(),
@@ -1826,6 +1916,33 @@ mod tests {
         assert!(dir.is_ignored(Path::new("app.log")));
         assert!(dir.is_ignored(Path::new("build/output.bin")));
         assert!(!dir.is_ignored(Path::new("src/main.rs")));
+    }
+
+    /// `is_ignored_dir` answers the coarser watch-pruning question: a
+    /// directory-form rule (`build/`, `target/`) prunes its subtree, while a
+    /// file-only pattern (`*.log`) never prunes a directory even one that would
+    /// hold matching files. Nested-repo rooting works the same as the file
+    /// check.
+    #[test]
+    fn is_ignored_dir_prunes_only_directory_rules() {
+        let sync_dir = temp_dir("gi-dir-prune");
+        std::fs::write(sync_dir.join(".gitignore"), "*.log\nbuild/\n").unwrap();
+
+        std::fs::create_dir_all(sync_dir.join("bar")).unwrap();
+        std::fs::write(sync_dir.join("bar/.gitignore"), "target/\n").unwrap();
+
+        let dir = open_directory_at(&sync_dir, true);
+
+        // A directory-form rule prunes the subtree.
+        assert!(dir.is_ignored_dir(Path::new("build")));
+        // A nested repo's own directory rule prunes, rooted at its own dir.
+        assert!(dir.is_ignored_dir(Path::new("bar/target")));
+        // A file-only pattern never prunes a directory.
+        assert!(!dir.is_ignored_dir(Path::new("logs")));
+        // An ordinary source directory is not pruned.
+        assert!(!dir.is_ignored_dir(Path::new("src")));
+        // A nested rule does not leak to a sibling.
+        assert!(!dir.is_ignored_dir(Path::new("baz/target")));
     }
 
     /// The whole point of the fresh-per-call design: a nested directory that is
