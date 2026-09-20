@@ -178,6 +178,13 @@ pub fn default_tag_manifest_batch_size() -> usize {
     3000
 }
 
+/// Default for [`Configuration::purge_manifest_batch_size`]: a purge entry is a
+/// bare 16-byte id, the smallest manifest entry of all, so a large batch is
+/// still trivially under the frame ceiling.
+pub fn default_purge_manifest_batch_size() -> usize {
+    5000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Configuration {
     /// Synchronized directories on the device itself.
@@ -244,6 +251,13 @@ pub struct Configuration {
     /// [`default_tag_manifest_batch_size`].
     #[serde(default = "default_tag_manifest_batch_size")]
     pub tag_manifest_batch_size: usize,
+    /// Maximum number of purged file ids packed into a single connection-time
+    /// `Sync::PurgeManifest` frame. A purge entry is just a bare id, so this is
+    /// the largest of the three manifest batch sizes. Reconciliation is
+    /// per-entry, additive, and idempotent (set-union), so splitting changes no
+    /// behavior. Defaults to [`default_purge_manifest_batch_size`].
+    #[serde(default = "default_purge_manifest_batch_size")]
+    pub purge_manifest_batch_size: usize,
     /// Query → `argv` mapping consulted by the desktop UI's external-edit
     /// action. See [`EditorRule`]. Empty (the default) means no file has an
     /// external editor and the UI reports that rather than guessing. The

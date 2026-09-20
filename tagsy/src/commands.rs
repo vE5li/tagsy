@@ -292,6 +292,23 @@ pub enum Commands {
     /// demand. Useful after the set of previewable file types changes (e.g. new
     /// PDF/video support). Prints how many cached previews were removed.
     PurgePreviews,
+    /// Permanently purge broken files: every file the catalog knows about whose
+    /// content is missing from local storage.
+    ///
+    /// This is DESTRUCTIVE and IRREVERSIBLE. A purge strips the file's catalog
+    /// entry, versions, and on-disk bytes, and propagates to every peer, which
+    /// do the same — the id is remembered forever so the file can never come
+    /// back, even from a peer that later reconnects holding a copy.
+    ///
+    /// Because "content missing locally" must be an authoritative verdict, this
+    /// requires the daemon to have a Universal sync directory (one that is
+    /// meant to hold every file's bytes); it refuses to run otherwise.
+    /// Always run `--dry-run` first to see exactly what would be purged.
+    PurgeBroken {
+        /// Report which files would be purged without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Bundle the entire tagsy state (both databases plus every sync
     /// directory's contents) into a single compressed archive in
     /// TAGSY_BACKUP_DIR. Prints where the archive landed.

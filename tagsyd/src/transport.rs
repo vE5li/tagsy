@@ -51,8 +51,8 @@ use tagsy_core::{FileId, FileInfo, FileKind, Preview, TagId, TagStyle};
 use crate::configuration::{EditorRule, HomeSection};
 use crate::connections::ConnectedPeer;
 use crate::frontend::api::{
-    ApiError, ApiService, BackupOutcome, EditOutcome, RetagSummary, SearchResults, StorageStats,
-    TagRuleReport,
+    ApiError, ApiService, BackupOutcome, EditOutcome, PurgeOutcome, RetagSummary, SearchResults,
+    StorageStats, TagRuleReport,
 };
 use crate::operations::Operation;
 use crate::store::{DeletedRule, SubtagRule, Tag};
@@ -270,6 +270,10 @@ impl Backend for InProcessBackend {
 
     async fn purge_previews(&self) -> Result<usize, ApiError> {
         self.api.purge_previews().await
+    }
+
+    async fn purge_broken(&self, dry_run: bool) -> Result<PurgeOutcome, ApiError> {
+        self.api.purge_broken(dry_run).await
     }
 
     async fn editor_rules(&self) -> Result<Vec<EditorRule>, ApiError> {
@@ -615,6 +619,13 @@ impl Backend for AnyBackend {
         match self {
             AnyBackend::InProcess(backend) => backend.purge_previews().await,
             AnyBackend::Ipc(backend) => backend.purge_previews().await,
+        }
+    }
+
+    async fn purge_broken(&self, dry_run: bool) -> Result<PurgeOutcome, ApiError> {
+        match self {
+            AnyBackend::InProcess(backend) => backend.purge_broken(dry_run).await,
+            AnyBackend::Ipc(backend) => backend.purge_broken(dry_run).await,
         }
     }
 

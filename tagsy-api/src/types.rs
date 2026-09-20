@@ -207,6 +207,22 @@ pub struct EditOutcome {
     pub changed: bool,
 }
 
+/// The result of a `purge-broken` invocation.
+///
+/// `purged` lists every file id the daemon identified as broken (cataloged but
+/// with no local bytes despite a Universal sync directory). When `dry_run` is
+/// `true` these are the ids that *would* be purged and nothing was mutated;
+/// when `false` they have been permanently purged. The CLI presents the list
+/// and its length; a Dart UI can show the same either way, keyed on `dry_run`
+/// for the confirmation wording.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PurgeOutcome {
+    /// Whether this was a dry run (no mutation performed).
+    pub dry_run: bool,
+    /// The ids that were (or, on a dry run, would be) purged.
+    pub purged: Vec<FileId>,
+}
+
 /// A live update delivered on the API event stream.
 ///
 /// Delivery is **best-effort**, mirroring the in-process ingest bus. There is

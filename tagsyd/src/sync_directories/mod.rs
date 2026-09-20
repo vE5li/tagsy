@@ -93,7 +93,8 @@ struct OpenDirectory {
 impl OpenDirectory {
     /// Whether an ingest of the file at `relative_path` (relative to this
     /// directory's root) should be skipped because a `.gitignore` rule matches
-    /// it. Always false when the directory did not opt into `respect_gitignore`.
+    /// it. Always false when the directory did not opt into
+    /// `respect_gitignore`.
     ///
     /// The matcher is built **fresh per call** from the `.gitignore` files
     /// along the path's own ancestry — the sync root's, then each intermediate
@@ -699,6 +700,7 @@ mod tests {
                 crate::configuration::default_max_concurrent_preview_generations(),
             manifest_batch_size: crate::configuration::default_manifest_batch_size(),
             tag_manifest_batch_size: crate::configuration::default_tag_manifest_batch_size(),
+            purge_manifest_batch_size: crate::configuration::default_purge_manifest_batch_size(),
             editor_rules: Vec::new(),
             tag_rules: Vec::new(),
             home_sections: Vec::new(),
@@ -916,6 +918,7 @@ mod tests {
                 crate::configuration::default_max_concurrent_preview_generations(),
             manifest_batch_size: crate::configuration::default_manifest_batch_size(),
             tag_manifest_batch_size: crate::configuration::default_tag_manifest_batch_size(),
+            purge_manifest_batch_size: crate::configuration::default_purge_manifest_batch_size(),
             editor_rules: Vec::new(),
             tag_rules: Vec::new(),
             home_sections: Vec::new(),
@@ -993,6 +996,7 @@ mod tests {
                 crate::configuration::default_max_concurrent_preview_generations(),
             manifest_batch_size: crate::configuration::default_manifest_batch_size(),
             tag_manifest_batch_size: crate::configuration::default_tag_manifest_batch_size(),
+            purge_manifest_batch_size: crate::configuration::default_purge_manifest_batch_size(),
             editor_rules: Vec::new(),
             tag_rules: Vec::new(),
             home_sections: Vec::new(),
@@ -1170,6 +1174,7 @@ mod tests {
                 crate::configuration::default_max_concurrent_preview_generations(),
             manifest_batch_size: crate::configuration::default_manifest_batch_size(),
             tag_manifest_batch_size: crate::configuration::default_tag_manifest_batch_size(),
+            purge_manifest_batch_size: crate::configuration::default_purge_manifest_batch_size(),
             editor_rules: Vec::new(),
             tag_rules: Vec::new(),
             home_sections: Vec::new(),
@@ -1551,6 +1556,7 @@ mod tests {
                 crate::configuration::default_max_concurrent_preview_generations(),
             manifest_batch_size: crate::configuration::default_manifest_batch_size(),
             tag_manifest_batch_size: crate::configuration::default_tag_manifest_batch_size(),
+            purge_manifest_batch_size: crate::configuration::default_purge_manifest_batch_size(),
             editor_rules: Vec::new(),
             tag_rules: Vec::new(),
             home_sections: Vec::new(),

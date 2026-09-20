@@ -15,7 +15,8 @@ use futures_util::{SinkExt, StreamExt};
 use tagsy_api::{
     ApiError, ApiEvent, Backend, BackupOutcome, ConnectedPeer, ConnectionEvent, ConnectionStream,
     DeletedRule, EditOutcome, EditorRule, EventStream, HomeSection, Operation, OperationEvent,
-    OperationStream, RetagSummary, SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,
+    OperationStream, PurgeOutcome, RetagSummary, SearchResults, StorageStats, SubtagRule, Tag,
+    TagRuleReport,
 };
 use tagsy_core::content::hash_and_len;
 use tagsy_core::{FileId, FileInfo, FileKind, Preview, TagId, TagStyle};
@@ -716,6 +717,13 @@ impl Backend for IpcBackend {
     async fn purge_previews(&self) -> Result<usize, ApiError> {
         match self.call(ControlRequest::PurgePreviews).await? {
             ControlResponse::PurgedPreviews(purged) => Ok(purged),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    async fn purge_broken(&self, dry_run: bool) -> Result<PurgeOutcome, ApiError> {
+        match self.call(ControlRequest::PurgeBroken { dry_run }).await? {
+            ControlResponse::PurgedBroken(outcome) => Ok(outcome),
             other => Err(unexpected(other)),
         }
     }

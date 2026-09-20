@@ -37,6 +37,36 @@ pub(crate) async fn apply_change(
     change: &Change,
     change_origin: &ChangeOrigin,
 ) -> Option<bool> {
+    // Purge enforcement: a purged file id takes absolute priority over the
+    // catalog. Before applying any file-lifecycle change (local or peer), drop
+    // it if the id has been purged — a stale re-announcement of a broken file
+    // must never re-enter the catalog. This is the single chokepoint that makes
+    // "purged wins over the catalog" checkable rather than conventional; it lives
+    // here in the sole writer so no read path has to defend against it.
+    //
+    // `FilePurged` itself is exempt: it is the fact that *establishes* the purge
+    // and is handled below (idempotent via `record_purge`).
+    if let Some(file_id) = purge_guard_file_id(change) {
+        match database.is_purged(file_id) {
+            Ok(true) => {
+                log::debug!(
+                    "Dropping {} for purged file {} (purge takes priority over the catalog)",
+                    change_variant_name(change),
+                    file_id.to_string(),
+                );
+                return Some(false);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                log::error!(
+                    "Failed to check purge state for {}: {:?}; applying change anyway",
+                    file_id.to_string(),
+                    error
+                );
+            }
+        }
+    }
+
     match change {
         // A metadata-only `FileMetadataAdded` announcement — always from a
         // peer (local ingestion carries bytes and arrives as
@@ -575,7 +605,125 @@ pub(crate) async fn apply_change(
             }
             Some(true)
         }
+        // A permanent purge of a broken file — from the local operator
+        // (`purge-broken`) or reconciled from a peer. Terminal and
+        // irreversible: record the id in the permanent purge set, hard-delete
+        // the file's catalog rows, drop its on-disk bytes, and forward the
+        // purge onward so it propagates across the mesh.
+        Change::FilePurged { file_id } => {
+            // Read the file's tags *before* stripping, so we can fan `RemoveFile`
+            // out to exactly the sync directories that hold it (a TagBased
+            // directory only holds files carrying all its tags). Once stripped,
+            // this information is gone.
+            let file_tags = match database.tag_ids_for_file(*file_id, store::SubtagRule::Exclude) {
+                Ok(tags) => tags.into_iter().collect::<Vec<TagId>>(),
+                Err(error) => {
+                    log::error!(
+                        "FilePurged: failed to get tags for {}: {:?}; proceeding with empty tag \
+                         set",
+                        file_id.to_string(),
+                        error
+                    );
+                    Vec::new()
+                }
+            };
+
+            // Idempotent-redelivery guard: `record_purge` returns false if the
+            // id was already purged. In that case we are in the same terminal
+            // state as the sender — skip the strip, the per-sync-directory
+            // fan-out, and the forward, so a purge redelivered on every
+            // reconnect does not re-run the (failing) `RemoveFile` or re-flood
+            // the mesh. This mirrors the "already tombstoned" guard in
+            // `FileDeleted`.
+            match database.record_purge(*file_id) {
+                Ok(true) => {}
+                Ok(false) => {
+                    log::debug!(
+                        "Ignoring FilePurged for {} (already purged)",
+                        file_id.to_string()
+                    );
+                    return Some(false);
+                }
+                Err(error) => {
+                    log::error!(
+                        "FilePurged: failed to record purge for {}: {:?}; skipping",
+                        file_id.to_string(),
+                        error
+                    );
+                    return Some(false);
+                }
+            }
+
+            if let Err(error) = database.strip_purged_file(*file_id) {
+                log::error!(
+                    "FilePurged: failed to strip catalog rows for {}: {:?}; the purge is recorded \
+                     but its rows may linger",
+                    file_id.to_string(),
+                    error
+                );
+            }
+
+            // Drop the on-disk bytes from every sync directory that held the
+            // file, reusing the same fan-out as `FileDeleted`.
+            for sync_directory in &configuration.sync_directories {
+                if let ChangeOrigin::Local { directory_path } = change_origin
+                    && directory_path == &sync_directory.path
+                {
+                    continue;
+                };
+
+                if let SyncType::TagBased {
+                    tags: sync_directory_tags,
+                } = &sync_directory.sync_type
+                    && !placement::contains_all_tags(sync_directory_tags, &file_tags)
+                {
+                    continue;
+                }
+
+                let _ = command_sender.send(SyncDirectoryCommand::RemoveFile {
+                    file_id: *file_id,
+                    sync_directory_path: sync_directory.path.clone(),
+                });
+            }
+
+            super::forward::forward_to_peers(
+                configuration,
+                runtime_configuration,
+                change,
+                change_origin,
+            )
+            .await;
+            Some(true)
+        }
         _ => None,
+    }
+}
+
+/// The `file_id` a purge-guard check applies to, or `None` for changes the
+/// guard does not gate. Every file-lifecycle change except `FilePurged` itself
+/// (which *establishes* the purge) is gated, so a purged id can never re-enter
+/// the catalog through any of them.
+fn purge_guard_file_id(change: &Change) -> Option<tagsy_core::FileId> {
+    match change {
+        Change::FileMetadataAdded { file_id, .. }
+        | Change::FileMoved { file_id, .. }
+        | Change::FileMetadataChanged { file_id, .. }
+        | Change::FileDeleted { file_id, .. }
+        | Change::FileRestored { file_id, .. } => Some(*file_id),
+        _ => None,
+    }
+}
+
+/// A short human name for a `Change` variant, for the purge-guard drop log.
+fn change_variant_name(change: &Change) -> &'static str {
+    match change {
+        Change::FileMetadataAdded { .. } => "FileMetadataAdded",
+        Change::FileMoved { .. } => "FileMoved",
+        Change::FileMetadataChanged { .. } => "FileMetadataChanged",
+        Change::FileDeleted { .. } => "FileDeleted",
+        Change::FileRestored { .. } => "FileRestored",
+        Change::FilePurged { .. } => "FilePurged",
+        _ => "Change",
     }
 }
 

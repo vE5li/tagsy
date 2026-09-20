@@ -356,6 +356,38 @@ pub(super) fn create_previews_v1(connection: &Connection) -> Result<(), Database
     Ok(())
 }
 
+pub(super) fn create_purged_files_v1(connection: &Connection) -> Result<(), DatabaseError> {
+    // The permanent purge set: file ids that have been purged as broken and
+    // must never be honored again by the catalog, on any peer.
+    //
+    // A purge is a *terminal, irreversible* fact and it takes absolute priority
+    // over every other record about its id: before `CatalogWriter` applies any
+    // file fact (add/change/move/delete/restore, or a peer-reconciled
+    // catalog-file/tombstone) it first checks this table and drops the fact if
+    // the id is present. This is what makes "purged wins over the catalog"
+    // checkable at one chokepoint rather than by convention.
+    //
+    // The row carries *only* the id, deliberately: the merge rule across peers
+    // is set-union (presence is the whole state), so there is no clock to order
+    // and no timestamp is stored. That also makes the fact trivially idempotent
+    // and additive — a purge manifest only ever *adds* an id to a peer's set,
+    // and re-applying a purge is a no-op. One id per broken file, forever; the
+    // cost is a single `TEXT PRIMARY KEY` row.
+    //
+    // No `FOREIGN KEY` on `file_id`: a purge may be learned from a peer for an
+    // id this node has never held, and once applied the catalog rows for that
+    // id are hard-deleted while this row survives to reject any later
+    // re-announcement.
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS purged_files_v1 (
+                file_id TEXT PRIMARY KEY
+            )",
+        (),
+    )?;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Per-sync-directory database (`DirectoryIndex`)
 //

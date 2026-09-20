@@ -10,11 +10,13 @@
 
 use std::path::PathBuf;
 
+use tagsy_api::PurgeOutcome;
 use tagsy_core::{FileId, Preview};
 use tokio::sync::oneshot;
 
 use super::{ApiError, ApiService};
 use crate::catalog::messages::{CatalogCommand, FetchError, PreviewError, RestoreError};
+use crate::configuration::SyncType;
 
 impl ApiService {
     /// Await a daemon reply on `response` under [`Self::FETCH_TIMEOUT`],
@@ -219,5 +221,43 @@ impl ApiService {
         Self::await_reply(response, "runtime is shutting down".to_owned())
             .await?
             .map_err(ApiError::from)
+    }
+
+    /// Permanently purge broken files: every live catalog file whose bytes are
+    /// absent from local disk.
+    ///
+    /// First enforces the precondition that this node has a Universal sync
+    /// directory. A Universal directory is meant to hold the bytes for *every*
+    /// file, so on such a node "the bytes are missing locally" is an
+    /// authoritative, non-transient verdict that a file is broken — not a mere
+    /// artifact of which peers happen to be online. Without one, the command
+    /// refuses ([`ApiError::PurgeRequiresUniversalDirectory`]) rather than risk
+    /// permanently erasing files that are simply held elsewhere.
+    ///
+    /// The broken set itself is computed on the sole DB writer (see
+    /// [`CatalogCommand::PurgeBroken`]) to avoid a time-of-check/time-of-use
+    /// race. With `dry_run`, nothing is mutated. Exposed via the
+    /// `tagsy purge-broken` CLI command.
+    pub async fn purge_broken(&self, dry_run: bool) -> Result<PurgeOutcome, ApiError> {
+        let directories = self.sync_directories().await?;
+        let has_universal = directories
+            .iter()
+            .any(|directory| matches!(directory.sync_type, SyncType::Universal { .. }));
+        if !has_universal {
+            return Err(ApiError::PurgeRequiresUniversalDirectory);
+        }
+
+        let (respond_to, response) = oneshot::channel();
+        self.change_sender
+            .send(CatalogCommand::PurgeBroken {
+                dry_run,
+                respond_to,
+            })
+            .map_err(|_| ApiError::Internal("runtime is shutting down".to_owned()))?;
+
+        let purged = Self::await_reply(response, "runtime is shutting down".to_owned())
+            .await?
+            .map_err(ApiError::from)?;
+        Ok(PurgeOutcome { dry_run, purged })
     }
 }

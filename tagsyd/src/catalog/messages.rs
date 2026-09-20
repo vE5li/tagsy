@@ -301,6 +301,25 @@ pub enum CatalogCommand {
     PurgePreviews {
         respond_to: oneshot::Sender<Result<usize, DatabaseError>>,
     },
+    /// Operator-initiated purge of **broken** files: every live catalog file
+    /// whose bytes are absent from local disk despite this node holding a
+    /// Universal sync directory (which is meant to hold the bytes for every
+    /// file). Request-reply, handled on the writer loop.
+    ///
+    /// The broken set is computed here (not by the caller) to avoid a
+    /// time-of-check/time-of-use race: `handle_changes` enumerates the live
+    /// files and asks the sync-directory actor which are missing bytes
+    /// (`MissingContent` — the same predicate the connect-time recovery sweep
+    /// uses). With `dry_run`, it replies with that set and mutates nothing.
+    /// Otherwise it enqueues a `Change::FilePurged` for each and replies with
+    /// the purged ids. The Universal-directory precondition is enforced by the
+    /// `ApiService` before this is sent.
+    ///
+    /// Exposed via the `tagsy purge-broken` CLI command.
+    PurgeBroken {
+        dry_run: bool,
+        respond_to: oneshot::Sender<Result<Vec<FileId>, DatabaseError>>,
+    },
 }
 
 /// A command sent to a specific peer's live session by `handle_changes`.

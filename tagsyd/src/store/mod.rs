@@ -15,6 +15,7 @@
 //! | `entries` | `entries_v1` — the tag graph and its traversals |
 //! | `versions` | `file_versions_v1` — the append-only content log |
 //! | `previews` | `previews_v1` — the hash-keyed preview cache |
+//! | `purged` | `purged_files_v1` — the permanent purge set |
 //! | `query` | search, composed from the modules above |
 //! | `short_id` | shortest-unique-prefix ids and their resolution |
 //! | `directory_index` | the separate per-sync-directory `(file_id, path)` map |
@@ -32,6 +33,7 @@ mod directory_index;
 mod entries;
 mod files;
 mod previews;
+mod purged;
 mod query;
 mod schema;
 mod short_id;
@@ -79,6 +81,7 @@ impl CatalogStore {
         schema::create_entries_v1(&connection)?;
         schema::create_file_versions_v1(&connection)?;
         schema::create_previews_v1(&connection)?;
+        schema::create_purged_files_v1(&connection)?;
 
         Ok(Self { connection })
     }

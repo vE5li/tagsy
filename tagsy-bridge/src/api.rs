@@ -1092,6 +1092,29 @@ impl Tagsy {
         self.try_backend()?.purge_previews().await
     }
 
+    /// Permanently purge broken files (cataloged but with no local bytes),
+    /// returning the ids that were (or, with `dry_run`, would be) purged as
+    /// plain strings.
+    ///
+    /// DESTRUCTIVE and IRREVERSIBLE when `dry_run` is false: each id is
+    /// stripped from the catalog and disk and remembered forever so it can
+    /// never return. Requires a Universal sync directory on this device;
+    /// errors with [`ApiError::PurgeRequiresUniversalDirectory`] otherwise.
+    ///
+    /// The core [`tagsy_api::PurgeOutcome`] is flattened to a bare
+    /// `Vec<String>` here so the Dart side gets plain id strings rather
+    /// than opaque handles (the same DTO-flattening pattern as
+    /// [`Self::finish_edit`]); the caller already knows whether it asked
+    /// for a dry run.
+    pub async fn purge_broken(&self, dry_run: bool) -> Result<Vec<String>, ApiError> {
+        let outcome = self.try_backend()?.purge_broken(dry_run).await?;
+        Ok(outcome
+            .purged
+            .iter()
+            .map(|file_id| file_id.to_string())
+            .collect())
+    }
+
     /// Report how much data this device stores locally versus how much the
     /// whole catalog holds. Surfaced in the top bar as a `<local>/<total>`
     /// indicator.
@@ -1299,7 +1322,8 @@ impl From<ApiEvent> for ApiEventDto {
             | Change::FileMoved { file_id, .. }
             | Change::FileMetadataChanged { file_id, .. }
             | Change::FileDeleted { file_id, .. }
-            | Change::FileRestored { file_id, .. } => ApiEventDto::FileChanged {
+            | Change::FileRestored { file_id, .. }
+            | Change::FilePurged { file_id, .. } => ApiEventDto::FileChanged {
                 file_id: file_id.to_string(),
             },
             // Tag-only changes.

@@ -17,7 +17,7 @@ use crate::connections::{ConnectedPeer, ConnectionEvent};
 use crate::operations::{Operation, OperationEvent};
 use crate::{
     ApiError, ApiEvent, BackupOutcome, DeletedRule, EditOutcome, EditorRule, HomeSection,
-    RetagSummary, SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,
+    PurgeOutcome, RetagSummary, SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,
 };
 
 /// The transport-agnostic UI-facing API.
@@ -303,6 +303,21 @@ pub trait Backend {
     /// removed. Previews are hash-keyed and regenerated on demand, so this only
     /// forces re-evaluation on the next request.
     fn purge_previews(&self) -> impl Future<Output = Result<usize, ApiError>> + Send;
+
+    /// Permanently purge **broken** files: every live catalog file whose bytes
+    /// are absent from local disk. Requires this node to have a Universal sync
+    /// directory (which is meant to hold every file's bytes), so that "missing
+    /// locally" is an authoritative verdict; errors with
+    /// [`ApiError::PurgeRequiresUniversalDirectory`] otherwise.
+    ///
+    /// With `dry_run`, reports which files would be purged without mutating
+    /// anything. Otherwise purges each — stripping its catalog metadata and
+    /// on-disk bytes and propagating the purge to all peers, permanently and
+    /// irreversibly — and reports the purged ids.
+    fn purge_broken(
+        &self,
+        dry_run: bool,
+    ) -> impl Future<Output = Result<PurgeOutcome, ApiError>> + Send;
 
     /// The daemon's configured external-editor rules (see [`EditorRule`]). A
     /// snapshot read; the desktop UI calls this once when preparing to launch

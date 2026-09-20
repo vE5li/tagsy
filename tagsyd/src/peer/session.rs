@@ -28,6 +28,7 @@ use crate::peer::plan::{
     CreateTombstone, MissingContent, PeerDeletion, PeerMove, PeerRestore, SyncPlan, batch_manifest,
     build_local_manifest, plan_file_sync,
 };
+use crate::peer::plan_purge::{batch_purge_manifest, build_local_purge_manifest, plan_purge_sync};
 use crate::peer::plan_tags::{
     batch_tag_manifest, build_local_tag_manifest, build_tag_request_response, plan_tag_sync,
 };
@@ -100,6 +101,9 @@ pub struct PeerContext {
     /// Max tag definitions/relationships per `Sync::TagManifest` frame. From
     /// `Configuration::tag_manifest_batch_size`.
     pub tag_manifest_batch_size: usize,
+    /// Max purged file ids per `Sync::PurgeManifest` frame. From
+    /// `Configuration::purge_manifest_batch_size`.
+    pub purge_manifest_batch_size: usize,
 }
 
 /// Drive a fully-handshaken WebSocket connection until it closes.
@@ -139,6 +143,7 @@ pub async fn run_peer_session<S>(
         pull_scheduler,
         manifest_batch_size,
         tag_manifest_batch_size,
+        purge_manifest_batch_size,
     } = context;
 
     // Register this peer as connected for the life of the session. A connection
@@ -396,11 +401,39 @@ pub async fn run_peer_session<S>(
     // Announce our manifests by queueing them on the outbound channel (drained
     // by the writer), not by writing them inline — see the block comment above.
     //
-    // Both manifests are split into batches of bounded size so no single
+    // All manifests are split into batches of bounded size so no single
     // WebSocket message approaches the size ceiling on a large catalog. Frames
-    // are queued in order (tag definitions, tag relationships, then files); the
-    // receiver reconciles each independently, so the split is behavior-
-    // preserving (see `batch_manifest` / `batch_tag_manifest`).
+    // are queued in order (purges, tag definitions, tag relationships, then
+    // files); the receiver reconciles each independently, so the split is
+    // behavior-preserving (see `batch_manifest` / `batch_tag_manifest` /
+    // `batch_purge_manifest`).
+
+    // Purge manifest first: a purge takes absolute priority over the catalog, so
+    // applying it before the file/tag manifests means the peer drops any
+    // now-purged id before it would otherwise act on a manifest entry for it.
+    // (Order is only an efficiency hint — the receiver's purge-enforcement guard
+    // drops purged ids regardless — but it avoids wasted work.)
+    match build_local_purge_manifest(&database) {
+        Ok(purges) => {
+            let total = purges.len();
+            let batches = batch_purge_manifest(purges, purge_manifest_batch_size);
+            let count = batches.len();
+            for entries in batches {
+                let frame = Frame::Sync(SyncMessage::PurgeManifest { entries });
+                if our_sender.send(frame).is_err() {
+                    log::warn!("Failed to queue purge manifest to {peer_name}: writer gone");
+                    break;
+                }
+            }
+            log::debug!(
+                "Queued purge manifest to {peer_name}: {total} entries in {count} frame(s)"
+            );
+        }
+        Err(error) => {
+            log::error!("Peer {peer_name}: failed to build initial purge manifest: {error}");
+        }
+    }
+
     match build_local_tag_manifest(&database) {
         Ok((definitions, relationships)) => {
             let frames = batch_tag_manifest(definitions, relationships, tag_manifest_batch_size);
@@ -1018,6 +1051,32 @@ pub async fn run_peer_session<S>(
                             &change_sender,
                         );
                         reconciling_tags.complete();
+                    }
+                    Frame::Sync(SyncMessage::PurgeManifest { entries }) => {
+                        // A purge is set-union across peers and takes absolute
+                        // priority over the catalog. Reconcile the peer's purge
+                        // set against ours (additive, idempotent — ids we
+                        // already hold are skipped) and enqueue each new purge
+                        // through the sole DB writer as a `Change::FilePurged`,
+                        // exactly as a live purge arrives. Every peer accepts an
+                        // incoming purge unconditionally (no Universal-directory
+                        // precondition here — that gate applies only to the node
+                        // that *initiates* a purge via `purge-broken`).
+                        let to_purge = plan_purge_sync(peer_name, entries, &database);
+                        for file_id in to_purge {
+                            if let Err(error) = change_sender.send(CatalogCommand::Change(
+                                Ingest::from_change(Change::FilePurged { file_id }),
+                                ChangeOrigin::Peer {
+                                    public_key: peer_public_key.to_owned(),
+                                },
+                            )) {
+                                log::error!(
+                                    "Reconciliation: failed to enqueue purge for {} announced by \
+                                     {peer_name}: {error}",
+                                    file_id.to_string()
+                                );
+                            }
+                        }
                     }
                     Frame::Sync(SyncMessage::TagRequest { tag_id }) => {
                         // Answer with the full tag definition as a

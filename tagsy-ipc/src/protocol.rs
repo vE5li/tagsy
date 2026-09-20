@@ -197,6 +197,12 @@ pub enum ControlRequest {
     /// [`ControlResponse::PurgedPreviews`] carrying the number of cached
     /// previews removed.
     PurgePreviews,
+    /// Permanently purge broken files (cataloged but with no local bytes).
+    /// Answered with [`ControlResponse::PurgedBroken`]. With `dry_run` the
+    /// daemon reports which files would be purged without mutating anything.
+    PurgeBroken {
+        dry_run: bool,
+    },
     /// Read the daemon's external-editor rules. Answered with
     /// [`ControlResponse::EditorRules`].
     EditorRules,
@@ -277,6 +283,9 @@ pub enum ControlResponse {
     /// The number of cached previews removed (answer to
     /// [`ControlRequest::PurgePreviews`]).
     PurgedPreviews(usize),
+    /// The files purged (or, on a dry run, that would be purged) as broken
+    /// (answer to [`ControlRequest::PurgeBroken`]).
+    PurgedBroken(tagsy_api::PurgeOutcome),
     /// The daemon's external-editor rules (answer to
     /// [`ControlRequest::EditorRules`]).
     EditorRules(Vec<EditorRule>),

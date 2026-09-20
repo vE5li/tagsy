@@ -436,6 +436,7 @@ pub async fn run(
         pull_scheduler,
         manifest_batch_size: configuration.manifest_batch_size,
         tag_manifest_batch_size: configuration.tag_manifest_batch_size,
+        purge_manifest_batch_size: configuration.purge_manifest_batch_size,
     };
 
     let mut peer_handles = Vec::new();

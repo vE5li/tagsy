@@ -19,7 +19,7 @@ pub use tag_style::{BorderStyle, TagShape, TagStyle};
 /// which every node derives identically). Since all devices are operated by the
 /// same user and updated together, there is no compatibility range — a mismatch
 /// is fail-closed.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 pub mod tag {
     use std::collections::HashMap;
@@ -178,6 +178,22 @@ pub mod state {
             /// it when applying a peer's delete.
             deleted_at: i64,
         },
+        /// Permanently purge a broken file. Terminal and irreversible: unlike
+        /// `FileDeleted` (a soft tombstone that a newer edit or an explicit
+        /// restore can beat under last-writer-wins), a purge strips the file's
+        /// catalog metadata outright and takes **absolute priority over the
+        /// catalog** — once purged, no version, restore, move, or manifest
+        /// entry for this id is ever honored again, on any peer.
+        ///
+        /// It carries only the id: the merge rule across peers is set-union
+        /// (presence is the whole state), so there is no clock to order and
+        /// nothing to restamp. Receiving one records the id in the permanent
+        /// purge set, hard-deletes the file's rows, drops its on-disk bytes,
+        /// and forwards the purge onward so it propagates across the
+        /// mesh. A purge for an id a peer has never seen is still
+        /// recorded, so a later stale re-announcement of that id is
+        /// rejected.
+        FilePurged { file_id: FileId },
         /// Un-delete a previously soft-deleted file — a user-initiated restore
         /// from the deleted-files view.
         ///
@@ -481,6 +497,23 @@ pub mod state {
         /// entries themselves, not inferred from absence).
         Manifest {
             entries: Vec<ManifestEntry>,
+        },
+
+        /// The set of file ids this peer has permanently purged as broken, for
+        /// connection-time reconciliation. Sent (batched, before `Manifest`) so
+        /// a peer offline at purge time learns of every purge on reconnect and
+        /// applies it before it would otherwise act on a manifest entry for the
+        /// same id.
+        ///
+        /// A purge is set-union across peers — presence of the id is the whole
+        /// state — so the frame carries only bare ids, and reconciling one is
+        /// purely additive and idempotent: a receiver records any id it does
+        /// not already hold and ignores the rest. Like
+        /// [`Sync::Manifest`], a large purge set is split across
+        /// multiple `PurgeManifest` frames, which is
+        /// behavior-preserving for the same reason.
+        PurgeManifest {
+            entries: Vec<FileId>,
         },
 
         /// Ask any holder for the canonical chunk of `file_id`/`content_hash`

@@ -53,8 +53,8 @@ use std::sync::Arc;
 // keep referencing `crate::frontend::api::{SearchResults, ApiEvent, ...}`.
 // `error` still owns the `From<internal error>` conversions onto `ApiError`.
 pub use tagsy_api::{
-    ApiError, ApiEvent, BackupOutcome, EditOutcome, RetagSummary, SearchResults, StorageStats,
-    TagRuleReport,
+    ApiError, ApiEvent, BackupOutcome, EditOutcome, PurgeOutcome, RetagSummary, SearchResults,
+    StorageStats, TagRuleReport,
 };
 use tagsy_core::state::Change;
 use tokio::sync::broadcast;

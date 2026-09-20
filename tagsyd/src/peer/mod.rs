@@ -17,6 +17,7 @@ pub mod dial;
 pub mod fetch;
 pub mod handshake;
 pub mod plan;
+pub mod plan_purge;
 pub mod plan_tags;
 pub mod pull_scheduler;
 pub mod relay;

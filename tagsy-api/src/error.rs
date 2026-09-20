@@ -41,6 +41,20 @@ pub enum ApiError {
     /// A caller-supplied argument was invalid (e.g. empty tag name).
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    /// `purge-broken` was invoked on a node with no Universal sync directory.
+    ///
+    /// Purge is permanent and irreversible, and its "broken" verdict is
+    /// "cataloged but the bytes are absent locally". That verdict is only
+    /// authoritative on a node that is *supposed* to hold every file's bytes —
+    /// i.e. one with a Universal sync directory. Without one, "missing locally"
+    /// is expected for most files and says nothing about whether they are
+    /// broken, so the command refuses to run rather than risk permanently
+    /// erasing recoverable files.
+    #[error(
+        "purge-broken requires a Universal sync directory: without one, a file's bytes being \
+         absent locally does not mean it is broken"
+    )]
+    PurgeRequiresUniversalDirectory,
     /// IPC-only: socket/protocol failure. Never produced in-process.
     #[error("transport error: {0}")]
     Transport(String),

@@ -800,6 +800,105 @@ impl CatalogWriter {
                     }
                     continue;
                 }
+                CatalogCommand::PurgeBroken {
+                    dry_run,
+                    respond_to,
+                } => {
+                    // Operator-initiated purge of broken files. "Broken" means a
+                    // live catalog file whose bytes are absent from local disk —
+                    // computed with the exact same `MissingContent` predicate as
+                    // the connect-time recovery sweep above. The
+                    // Universal-directory precondition (which makes "missing
+                    // locally" an authoritative, non-transient verdict rather
+                    // than a network artifact) is enforced by the `ApiService`
+                    // before this command is sent.
+                    //
+                    // The DB reads and the sync-directory round-trip mirror
+                    // `SweepMissingContent`. Applying a purge is enqueuing a
+                    // `Change::FilePurged` onto *this* loop's own channel, so we
+                    // must not await it here (self-deadlock, same as the sweep's
+                    // fetch): we send and let this loop process each purge after
+                    // the current handler returns.
+                    let files = match database.get_all_files(store::DeletedRule::Exclude) {
+                        Ok(files) => files,
+                        Err(error) => {
+                            log::error!("PurgeBroken: failed to list catalog files: {error:?}");
+                            let _ = respond_to.send(Err(error));
+                            continue;
+                        }
+                    };
+
+                    let mut catalog_files = Vec::with_capacity(files.len());
+                    for file in files {
+                        let tags = match database
+                            .tag_ids_for_file(file.file_id, store::SubtagRule::Exclude)
+                        {
+                            Ok(tags) => tags.into_iter().collect::<Vec<_>>(),
+                            Err(error) => {
+                                log::error!(
+                                    "PurgeBroken: failed to read tags for {}: {error:?}",
+                                    file.file_id.to_string()
+                                );
+                                continue;
+                            }
+                        };
+                        catalog_files.push((file.file_id, file.logical_path, tags));
+                    }
+
+                    let (missing_respond_to, missing_rx) = tokio::sync::oneshot::channel();
+                    if let Err(error) = command_sender.send(SyncDirectoryCommand::MissingContent {
+                        catalog_files,
+                        respond_to: missing_respond_to,
+                    }) {
+                        log::error!("PurgeBroken: sync-directory channel closed: {error}");
+                        let _ = respond_to.send(Ok(Vec::new()));
+                        continue;
+                    }
+                    let broken = match missing_rx.await {
+                        Ok(missing) => missing,
+                        Err(_) => {
+                            log::warn!(
+                                "PurgeBroken: sync-directory actor dropped responder; aborting"
+                            );
+                            let _ = respond_to.send(Ok(Vec::new()));
+                            continue;
+                        }
+                    };
+
+                    if dry_run {
+                        log::info!(
+                            "PurgeBroken (dry run): {} broken file(s) would be purged",
+                            broken.len()
+                        );
+                        let _ = respond_to.send(Ok(broken));
+                        continue;
+                    }
+
+                    log::info!("PurgeBroken: purging {} broken file(s)", broken.len());
+                    for file_id in &broken {
+                        // Enqueue the purge as a local metadata change so it flows
+                        // through the same `files::apply_change` path as a
+                        // peer-reconciled purge: record in the permanent set,
+                        // strip the catalog rows, drop bytes, forward to peers.
+                        if let Err(error) = change_sender.send(CatalogCommand::Change(
+                            Ingest::Meta(Change::FilePurged { file_id: *file_id }),
+                            // Not sourced from any sync directory: an empty path
+                            // matches none, so the `FilePurged` handler drops the
+                            // bytes from *every* directory that holds the file.
+                            ChangeOrigin::Local {
+                                directory_path: std::path::PathBuf::new(),
+                            },
+                        )) {
+                            log::error!(
+                                "PurgeBroken: change channel closed while enqueuing purge for {}: \
+                                 {error}",
+                                file_id.to_string()
+                            );
+                        }
+                    }
+                    let _ = respond_to.send(Ok(broken));
+                    continue;
+                }
                 CatalogCommand::CatalogFile {
                     file_id,
                     logical_path,
