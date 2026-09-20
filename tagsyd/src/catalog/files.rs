@@ -629,21 +629,22 @@ pub(crate) async fn apply_change(
             };
 
             // Idempotent-redelivery guard: `record_purge` returns false if the
-            // id was already purged. In that case we are in the same terminal
-            // state as the sender — skip the strip, the per-sync-directory
+            // id was already purged. Normally we are then in the same terminal
+            // state as the sender and can skip the strip, the per-sync-directory
             // fan-out, and the forward, so a purge redelivered on every
             // reconnect does not re-run the (failing) `RemoveFile` or re-flood
-            // the mesh. This mirrors the "already tombstoned" guard in
-            // `FileDeleted`.
-            match database.record_purge(*file_id) {
-                Ok(true) => {}
-                Ok(false) => {
-                    log::debug!(
-                        "Ignoring FilePurged for {} (already purged)",
-                        file_id.to_string()
-                    );
-                    return Some(false);
-                }
+            // the mesh (mirroring the "already tombstoned" guard in
+            // `FileDeleted`).
+            //
+            // BUT: if the id is already purged yet a `files_v2` row still
+            // exists, the catalog has drifted from the purge set — e.g. a
+            // resurrection slipped in through a reconciliation path before it
+            // honored the purge guard, or a prior `strip_purged_file` failed
+            // partway. Re-run the strip to repair it (idempotent), so the purge
+            // is self-healing across upgrades rather than requiring the id to be
+            // purged afresh.
+            let newly_recorded = match database.record_purge(*file_id) {
+                Ok(recorded) => recorded,
                 Err(error) => {
                     log::error!(
                         "FilePurged: failed to record purge for {}: {:?}; skipping",
@@ -652,6 +653,20 @@ pub(crate) async fn apply_change(
                     );
                     return Some(false);
                 }
+            };
+            if !newly_recorded {
+                let row_lingers = database.file_exists(*file_id).unwrap_or(false);
+                if !row_lingers {
+                    log::debug!(
+                        "Ignoring FilePurged for {} (already purged, catalog clean)",
+                        file_id.to_string()
+                    );
+                    return Some(false);
+                }
+                log::warn!(
+                    "FilePurged: {} already purged but a catalog row lingers; re-stripping",
+                    file_id.to_string()
+                );
             }
 
             if let Err(error) = database.strip_purged_file(*file_id) {
@@ -741,6 +756,31 @@ pub(crate) async fn catalog_file(
     size: u64,
     origin: ChangeOrigin,
 ) {
+    // Purge enforcement: a purged file id takes absolute priority over the
+    // catalog. This reconciliation path re-materializes a file the peer's file
+    // `Manifest` still advertises as live, so it MUST honor the same guard as
+    // `apply_change` — otherwise a peer that has not yet learned the purge would
+    // resurrect the row on every reconnect (a `files_v2`/`file_versions_v1` row
+    // reappearing for a purged id). Drop it silently; the peer converges when it
+    // learns the purge itself.
+    match database.is_purged(file_id) {
+        Ok(true) => {
+            log::debug!(
+                "CatalogFile: dropping {} (purged; takes priority over the catalog)",
+                file_id.to_string()
+            );
+            return;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            log::error!(
+                "CatalogFile: failed to check purge state for {}: {:?}; proceeding",
+                file_id.to_string(),
+                error
+            );
+        }
+    }
+
     // A peer session's `Manifest` reconciliation decided to catalog
     // this file/version. We are the sole main-DB writer, so the
     // write happens here. Insert the `files` row if new, then append
@@ -848,6 +888,26 @@ pub(crate) async fn catalog_tombstone(
     restored_at: i64,
     origin: ChangeOrigin,
 ) {
+    // Purge enforcement, same as `catalog_file`: never reconstruct a row for a
+    // purged id, even as a tombstone. A purge is terminal and outranks a delete.
+    match database.is_purged(file_id) {
+        Ok(true) => {
+            log::debug!(
+                "CatalogTombstone: dropping {} (purged; takes priority over the catalog)",
+                file_id.to_string()
+            );
+            return;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            log::error!(
+                "CatalogTombstone: failed to check purge state for {}: {:?}; proceeding",
+                file_id.to_string(),
+                error
+            );
+        }
+    }
+
     match database.add_tombstoned_file(
         file_id,
         &logical_path,

@@ -272,6 +272,9 @@ pub enum _ApiError {
     /// A term (id prefix or name) matched more than one row. Carries the term.
     AmbiguousId(String),
     InvalidArgument(String),
+    /// `purge-broken` was invoked on a node with no Universal sync directory;
+    /// the command refuses to run rather than risk erasing recoverable files.
+    PurgeRequiresUniversalDirectory,
     Transport(String),
     Internal(String),
 }

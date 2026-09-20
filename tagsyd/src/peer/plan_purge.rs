@@ -33,12 +33,19 @@ pub fn batch_purge_manifest(entries: Vec<FileId>, batch_size: usize) -> Vec<Vec<
 
 /// Reconcile a peer's purge manifest against ours.
 ///
-/// Returns the ids the peer has purged that we do not already hold as purged —
-/// i.e. the new purges to apply locally. Reconciliation is per-entry and
-/// idempotent: an id we already have is skipped, so a redelivered or duplicated
-/// manifest converges with no repeated work. A lookup error for one id logs and
-/// skips that id (conservatively *not* purging on a read failure) rather than
-/// aborting the whole batch.
+/// Returns the ids to apply a purge for locally: any id the peer has purged
+/// that we either (a) do not yet hold as purged, or (b) hold as purged but
+/// whose `files_v2` row still lingers (catalog-vs-purge-set drift — e.g. a
+/// resurrection that slipped in before the reconciliation paths honored the
+/// purge guard, or a partial earlier strip). Case (b) makes the purge
+/// self-healing across upgrades: the writer's `FilePurged` handler re-strips a
+/// lingering row.
+///
+/// Reconciliation stays per-entry and idempotent: an id we already hold purged
+/// *and* have no row for is skipped, so a redelivered or duplicated manifest
+/// for a converged catalog does no repeated work. A lookup error for one id
+/// logs and skips that id (conservatively *not* purging on a read failure)
+/// rather than aborting the whole batch.
 pub fn plan_purge_sync(
     peer_name: &str,
     entries: Vec<FileId>,
@@ -46,19 +53,44 @@ pub fn plan_purge_sync(
 ) -> Vec<FileId> {
     let mut to_purge = Vec::new();
     for file_id in entries {
-        match database.is_purged(file_id) {
-            Ok(true) => {}
-            Ok(false) => {
-                log::debug!(
-                    "Applying peer purge for {} from {peer_name}",
-                    file_id.to_string()
-                );
-                to_purge.push(file_id);
-            }
+        let purged = match database.is_purged(file_id) {
+            Ok(purged) => purged,
             Err(error) => {
                 log::error!(
                     "Purge reconciliation lookup failed for {} from {peer_name}: {error:?}; \
                      skipping",
+                    file_id.to_string()
+                );
+                continue;
+            }
+        };
+
+        if !purged {
+            log::debug!(
+                "Applying peer purge for {} from {peer_name}",
+                file_id.to_string()
+            );
+            to_purge.push(file_id);
+            continue;
+        }
+
+        // Already purged locally: only act if the catalog has drifted (a row
+        // still exists for a purged id), in which case re-emit so the writer
+        // re-strips it. Otherwise there is nothing to do.
+        match database.file_exists(file_id) {
+            Ok(true) => {
+                log::warn!(
+                    "Purge for {} from {peer_name} already recorded but a catalog row lingers; \
+                     re-applying to repair drift",
+                    file_id.to_string()
+                );
+                to_purge.push(file_id);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                log::error!(
+                    "Purge reconciliation existence check failed for {} from {peer_name}: \
+                     {error:?}; skipping",
                     file_id.to_string()
                 );
             }
@@ -92,13 +124,39 @@ mod tests {
     }
 
     #[test]
-    fn plan_skips_ids_we_already_hold() {
+    fn plan_skips_ids_we_already_hold_with_clean_catalog() {
         let database = memory_db();
         let already = FileId::new();
         let fresh = FileId::new();
         database.record_purge(already).unwrap();
 
+        // `already` is purged and has no catalog row, so it is skipped; only the
+        // fresh id is emitted.
         let to_purge = plan_purge_sync("peer", vec![already, fresh], &database);
         assert_eq!(to_purge, vec![fresh]);
+    }
+
+    #[test]
+    fn plan_reapplies_purge_when_catalog_row_lingers() {
+        use tagsy_core::LogicalPath;
+
+        let mut database = memory_db();
+        let drifted = FileId::new();
+
+        // Simulate drift: the id is in the purge set, yet a `files_v2` row
+        // (and a version) still exists — as if a reconciliation path resurrected
+        // it before honoring the purge guard.
+        database.record_purge(drifted).unwrap();
+        database
+            .add_file(drifted, &LogicalPath::new("resurrected.bin"), 0)
+            .unwrap();
+        database.record_version(drifted, "hash", "peer", 1).unwrap();
+
+        let to_purge = plan_purge_sync("peer", vec![drifted], &database);
+        assert_eq!(
+            to_purge,
+            vec![drifted],
+            "a purged id whose row lingers must be re-emitted so the writer re-strips it"
+        );
     }
 }

@@ -79,6 +79,48 @@ impl CatalogStore {
         transaction.commit()?;
         Ok(())
     }
+
+    /// Startup self-heal: strip every catalog row whose id is in
+    /// `purged_files_v1`. Returns how many `files_v2` rows were removed.
+    ///
+    /// A purge is terminal, so a purged id must never carry catalog rows. This
+    /// repairs any drift where a row exists for a purged id — the state left
+    /// behind by an older build whose manifest-reconciliation paths
+    /// (`catalog_file` / `catalog_tombstone`) re-materialized a purged file
+    /// because they did not yet consult the purge set. Because the purge set is
+    /// append-only (ids are never removed), every device that ever applied a
+    /// purge still knows the id here, so this converges the catalog with **no
+    /// dependence on peers** — apply the fix, restart, and the drift is gone.
+    ///
+    /// It is a set-based no-op on a clean catalog (nothing matches), so it is
+    /// cheap to run unconditionally on every startup. Runs in a single
+    /// transaction across all four tables.
+    pub fn reconcile_purged_files(&self) -> Result<usize, DatabaseError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        // Order does not matter (no FKs), but delete the dependent rows first
+        // for clarity. Each targets only rows whose id/target is purged.
+        transaction.execute(
+            "DELETE FROM file_versions_v1 WHERE file_id IN (SELECT file_id FROM purged_files_v1)",
+            [],
+        )?;
+        transaction.execute(
+            "DELETE FROM previews_v1 WHERE file_id IN (SELECT file_id FROM purged_files_v1)",
+            [],
+        )?;
+        // File-tag edges live in `entries_v1` with `type = 0`; `target_id`
+        // stores the file id as text, matching `purged_files_v1.file_id`.
+        transaction.execute(
+            "DELETE FROM entries_v1 WHERE type = 0 AND target_id IN (SELECT file_id FROM \
+             purged_files_v1)",
+            [],
+        )?;
+        let removed = transaction.execute(
+            "DELETE FROM files_v2 WHERE id IN (SELECT file_id FROM purged_files_v1)",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]
@@ -140,5 +182,40 @@ mod tests {
         // The purge row itself survives the strip so a later re-announcement is
         // rejected.
         assert!(database.is_purged(file_id).unwrap());
+    }
+
+    #[test]
+    fn reconcile_strips_drifted_rows_and_leaves_clean_catalog_untouched() {
+        let mut database = memory_db();
+
+        // A drifted purged file: purged, yet a row + version still exist.
+        let drifted = FileId::new();
+        database.record_purge(drifted).unwrap();
+        database
+            .add_file(drifted, &LogicalPath::new("resurrected.bin"), 0)
+            .unwrap();
+        database.record_version(drifted, "h", "peer", 1).unwrap();
+
+        // A normal live file that is NOT purged must survive reconciliation.
+        let live = FileId::new();
+        database
+            .add_file(live, &LogicalPath::new("keep.bin"), 0)
+            .unwrap();
+        database.record_version(live, "h2", "local", 2).unwrap();
+
+        let removed = database.reconcile_purged_files().unwrap();
+        assert_eq!(removed, 1, "exactly the drifted file's row is stripped");
+
+        assert!(!database.file_exists(drifted).unwrap());
+        assert!(database.latest_version(drifted).unwrap().is_none());
+        assert!(
+            database.is_purged(drifted).unwrap(),
+            "the purge row survives"
+        );
+
+        assert!(database.file_exists(live).unwrap(), "live file untouched");
+
+        // Idempotent: a second run on a now-clean catalog removes nothing.
+        assert_eq!(database.reconcile_purged_files().unwrap(), 0);
     }
 }

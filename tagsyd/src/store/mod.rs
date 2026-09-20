@@ -83,7 +83,27 @@ impl CatalogStore {
         schema::create_previews_v1(&connection)?;
         schema::create_purged_files_v1(&connection)?;
 
-        Ok(Self { connection })
+        let store = Self { connection };
+
+        // Startup self-heal: a purge is terminal, so no purged id may carry
+        // catalog rows. Strip any drift (a row that exists for a purged id) left
+        // by an older build whose reconciliation paths re-materialized purged
+        // files. Set-based and a no-op on a clean catalog; the purge set is
+        // append-only, so this converges every device on restart without needing
+        // a peer to re-advertise the purge.
+        match store.reconcile_purged_files() {
+            Ok(0) => {}
+            Ok(removed) => log::warn!(
+                "Startup purge reconciliation: stripped {removed} catalog row(s) that lingered \
+                 for purged files"
+            ),
+            Err(error) => log::error!(
+                "Startup purge reconciliation failed: {error:?}; purged files may retain catalog \
+                 rows until the next peer reconcile"
+            ),
+        }
+
+        Ok(store)
     }
 
     /// Write a transactionally consistent, defragmented copy of this database
