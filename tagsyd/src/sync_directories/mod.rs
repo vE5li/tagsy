@@ -87,6 +87,11 @@ struct OpenDirectory {
     /// ignore file is ever read. Also read by the `ListDirectories` command to
     /// reconstruct the config-accurate [`SyncDirectory`].
     respect_gitignore: bool,
+    /// This directory's configured debounce window, in milliseconds. Not used
+    /// by the ingest path itself (the window lives in the shared debouncer,
+    /// keyed on `path`); retained only so the `ListDirectories` command can
+    /// reconstruct the config-accurate [`SyncDirectory`].
+    debounce_ms: u64,
 }
 
 impl OpenDirectory {
@@ -298,7 +303,22 @@ impl SyncDirectories {
         change_sender: tokio::sync::mpsc::UnboundedSender<CatalogCommand>,
         command_receiver: tokio::sync::mpsc::UnboundedReceiver<SyncDirectoryCommand>,
     ) -> Self {
-        let (mut dispatcher, watcher_events) = WatchDispatcher::new()
+        // Each sync directory's configured debounce window, keyed on its root,
+        // so the debouncer settles a directory's events on its own schedule.
+        // Built before the dispatcher so the windows are in place from the
+        // first event onward — there is no register-after-construct gap.
+        let debounce_windows = configuration
+            .sync_directories
+            .iter()
+            .map(|sync_directory| {
+                (
+                    sync_directory.path.clone(),
+                    std::time::Duration::from_millis(sync_directory.debounce_ms),
+                )
+            })
+            .collect();
+
+        let (mut dispatcher, watcher_events) = WatchDispatcher::new(debounce_windows)
             .await
             .expect("Failed to set up debouncer");
 
@@ -347,6 +367,7 @@ impl SyncDirectories {
                     sync_type: sync_directory.sync_type.clone(),
                     database,
                     respect_gitignore: sync_directory.respect_gitignore,
+                    debounce_ms: sync_directory.debounce_ms,
                 };
 
                 // Register the tree non-recursively, pruning every `.gitignore`d
@@ -780,6 +801,7 @@ mod tests {
                 path: sync_dir.to_path_buf(),
                 sync_type: SyncType::Universal { keep_deleted_files },
                 respect_gitignore: false,
+                debounce_ms: 500,
             }],
             listen_port: None,
             peers: Vec::new(),
@@ -998,6 +1020,7 @@ mod tests {
                     keep_deleted_files: false,
                 },
                 respect_gitignore: false,
+                debounce_ms: 500,
             }],
             listen_port: None,
             peers: Vec::new(),
@@ -1076,6 +1099,7 @@ mod tests {
                     keep_deleted_files: false,
                 },
                 respect_gitignore: false,
+                debounce_ms: 500,
             }],
             listen_port: None,
             peers: Vec::new(),
@@ -1248,11 +1272,13 @@ mod tests {
                         keep_deleted_files: false,
                     },
                     respect_gitignore: false,
+                    debounce_ms: 500,
                 },
                 SyncDirectory {
                     path: tagged_dir.to_path_buf(),
                     sync_type: SyncType::TagBased { tags },
                     respect_gitignore: false,
+                    debounce_ms: 500,
                 },
             ],
             listen_port: None,
@@ -1636,6 +1662,7 @@ mod tests {
                 path: sync_dir.to_path_buf(),
                 sync_type: SyncType::TagBased { tags },
                 respect_gitignore: false,
+                debounce_ms: 500,
             }],
             listen_port: None,
             peers: Vec::new(),
@@ -1901,6 +1928,7 @@ mod tests {
             },
             database,
             respect_gitignore,
+            debounce_ms: 500,
         }
     }
 

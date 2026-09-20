@@ -111,6 +111,21 @@ pub struct SyncDirectory {
     /// old.
     #[serde(default = "default_respect_gitignore")]
     pub respect_gitignore: bool,
+    /// How long a filesystem event for a file in this directory must sit
+    /// untouched before it is treated as settled and ingested, in
+    /// milliseconds. This is the debounce/coalesce window that collapses the
+    /// noisy multi-event bursts editors and the filesystem emit (a save that
+    /// fires write-then-write, a rename pair) into the single logical change
+    /// they mean.
+    ///
+    /// Per-directory because the right value depends on what lives there: a
+    /// directory of large media files written slowly wants a longer window so
+    /// a still-being-written file is not ingested mid-write, while a directory
+    /// of small notes wants a short window for snappy sync. **Defaults to 500**
+    /// (see [`default_debounce_ms`]) — a config that omits the field, or that
+    /// predates it, keeps the historical 500 ms window.
+    #[serde(default = "default_debounce_ms")]
+    pub debounce_ms: u64,
 }
 
 /// A tag declared in the configuration file so its *definition* is guaranteed
@@ -146,6 +161,15 @@ pub struct TagDeclaration {
 /// want mirrored; opting *out* is the deliberate choice, not opting in.
 pub fn default_respect_gitignore() -> bool {
     true
+}
+
+/// Default for [`SyncDirectory::debounce_ms`]: the historical 500 ms window.
+/// Long enough to coalesce an editor's write burst and a rename pair into one
+/// logical change, short enough that sync still feels prompt. A config that
+/// omits the field reproduces the behavior every sync directory had before the
+/// window became configurable.
+pub fn default_debounce_ms() -> u64 {
+    500
 }
 
 /// Default for [`Configuration::max_concurrent_pulls`]: a modest cap that keeps
@@ -540,6 +564,40 @@ mod tests {
         }"#;
         let configuration = Configuration::from_str(json).unwrap();
         assert!(!configuration.sync_directories[0].respect_gitignore);
+    }
+
+    /// A sync directory that omits `debounce_ms` (or predates it) defaults to
+    /// 500 ms, reproducing the historical fixed window.
+    #[test]
+    fn sync_directory_without_debounce_ms_defaults_to_500() {
+        let json = r#"{
+            "sync_directories": [
+                { "path": "/tmp/x", "sync_type": { "Universal": {} } }
+            ],
+            "listen_port": null,
+            "peers": []
+        }"#;
+        let configuration = Configuration::from_str(json).unwrap();
+        assert_eq!(configuration.sync_directories[0].debounce_ms, 500);
+    }
+
+    /// `debounce_ms` round-trips when present, so a directory can pick its own
+    /// settle window.
+    #[test]
+    fn sync_directory_debounce_ms_parses() {
+        let json = r#"{
+            "sync_directories": [
+                {
+                    "path": "/tmp/x",
+                    "sync_type": { "Universal": {} },
+                    "debounce_ms": 2500
+                }
+            ],
+            "listen_port": null,
+            "peers": []
+        }"#;
+        let configuration = Configuration::from_str(json).unwrap();
+        assert_eq!(configuration.sync_directories[0].debounce_ms, 2500);
     }
 
     /// `respect_gitignore` round-trips when present in the config.

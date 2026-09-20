@@ -66,6 +66,7 @@ async fn backup_bundles_databases_sync_files_and_manifest() {
                 keep_deleted_files: false,
             },
             respect_gitignore: false,
+            debounce_ms: 500,
         }],
         listen_port: None,
         peers: Vec::new(),

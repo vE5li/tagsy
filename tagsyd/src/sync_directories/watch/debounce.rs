@@ -15,9 +15,13 @@ use std::time::{Duration, Instant};
 use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
 use notify::{Event, EventKind};
 
-/// How long an event sits in the queue with no superseding event before it is
-/// considered settled and emitted.
-const DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
+/// Fallback debounce window for an event whose path matches no registered sync
+/// root — every real event does match one (its path lives under the root that
+/// produced it), so this only covers the theoretical gap between a `notify`
+/// event arriving and its root being registered. Kept at the historical 500 ms
+/// so an unmatched event behaves exactly as before per-directory windows
+/// existed.
+const DEFAULT_DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DebouncedEventKind {
@@ -97,6 +101,21 @@ impl DebouncedEventKind {
             true
         } else {
             false
+        }
+    }
+
+    /// The path this event concerns, used to pick which sync directory's
+    /// debounce window applies. A `Move` reports two paths (`from`/`to`); the
+    /// destination is preferred because a settled move is ingested against
+    /// where the file now lives, falling back to the source when only a `from`
+    /// is present (a move *out* of a watched tree).
+    fn primary_path(&self) -> Option<&Path> {
+        match self {
+            Self::Create { file_name }
+            | Self::Modify { file_name }
+            | Self::Remove { file_name } => Some(file_name),
+            Self::DirCreate { path } | Self::DirRemove { path } => Some(path),
+            Self::Move { from, to } => to.as_deref().or(from.as_deref()),
         }
     }
 }
@@ -198,12 +217,63 @@ pub(super) fn translate(mut event: Event) -> Option<DebouncedEventKind> {
     }
 }
 
+/// A sync root and the debounce window its events should use. One is built per
+/// configured sync directory at [`Debouncer::new`]; `window_for_in` finds the
+/// longest matching root for a given event path so a nested sync directory (if
+/// one ever existed) wins over an ancestor.
+#[derive(Clone, Debug)]
+struct WindowRegistration {
+    root: PathBuf,
+    window: Duration,
+}
+
 #[derive(Default)]
 pub struct Debouncer {
     queued: Vec<DebouncingEvent>,
+    /// Per-sync-root debounce windows. An event's settle time is the window of
+    /// the deepest registered root that contains its path; an event under no
+    /// registered root falls back to [`DEFAULT_DEBOUNCE_WINDOW`].
+    windows: Vec<WindowRegistration>,
 }
 
 impl Debouncer {
+    /// Construct a debouncer that settles each sync root's events on its own
+    /// window. `windows` pairs each configured sync directory's root with its
+    /// debounce window; an event under no listed root uses
+    /// [`DEFAULT_DEBOUNCE_WINDOW`].
+    pub fn new(windows: Vec<(PathBuf, Duration)>) -> Self {
+        Self {
+            queued: Vec::new(),
+            windows: windows
+                .into_iter()
+                .map(|(root, window)| WindowRegistration { root, window })
+                .collect(),
+        }
+    }
+
+    /// The debounce window that applies to an event, chosen by the deepest
+    /// registered sync root that contains the event's path. Falls back to
+    /// [`DEFAULT_DEBOUNCE_WINDOW`] when the path matches no root (or carries no
+    /// path).
+    ///
+    /// Takes the registration slice rather than `&self` so it can be called
+    /// from inside a `retain` closure that already borrows `self.queued`
+    /// mutably.
+    fn window_for_in(windows: &[WindowRegistration], event: &DebouncedEventKind) -> Duration {
+        let Some(path) = event.primary_path() else {
+            return DEFAULT_DEBOUNCE_WINDOW;
+        };
+
+        windows
+            .iter()
+            .filter(|registration| path.starts_with(&registration.root))
+            // The deepest (longest) matching root wins, so a nested sync
+            // directory overrides an ancestor.
+            .max_by_key(|registration| registration.root.as_os_str().len())
+            .map(|registration| registration.window)
+            .unwrap_or(DEFAULT_DEBOUNCE_WINDOW)
+    }
+
     /// Translate a raw `notify` event and coalesce it into the queue.
     pub fn push_raw(&mut self, event: Event) {
         if let Some(kind) = translate(event) {
@@ -375,8 +445,11 @@ impl Debouncer {
     pub fn extract_finalized(&mut self) -> Vec<DebouncedEventKind> {
         let mut debounced_events = Vec::new();
 
+        // Borrow `windows` separately from `queued` so the `retain` closure can
+        // consult the per-root windows while mutating the queue.
+        let windows = &self.windows;
         self.queued.retain(|event| {
-            if event.timestamp.elapsed() > DEBOUNCE_WINDOW {
+            if event.timestamp.elapsed() > Self::window_for_in(windows, &event.kind) {
                 // TODO: Optimize to not clone.
                 debounced_events.push(event.kind.clone());
                 return false;
@@ -610,5 +683,78 @@ mod tests {
             modify("b"),
             remove("c")
         ]);
+    }
+
+    fn window_registrations(
+        entries: impl IntoIterator<Item = (&'static str, u64)>,
+    ) -> Vec<WindowRegistration> {
+        entries
+            .into_iter()
+            .map(|(root, millis)| WindowRegistration {
+                root: PathBuf::from(root),
+                window: Duration::from_millis(millis),
+            })
+            .collect()
+    }
+
+    /// An event's window is the one registered for the sync root that contains
+    /// its path; events under different roots get different windows.
+    #[test]
+    fn window_is_selected_by_containing_root() {
+        let windows = window_registrations([("/notes", 100), ("/media", 3000)]);
+
+        assert_eq!(
+            Debouncer::window_for_in(&windows, &modify("/notes/todo.md")),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            Debouncer::window_for_in(&windows, &modify("/media/clip.mp4")),
+            Duration::from_millis(3000)
+        );
+    }
+
+    /// A path under no registered root falls back to the default window, so an
+    /// event that arrives before its root is known still settles.
+    #[test]
+    fn unmatched_path_uses_default_window() {
+        let windows = window_registrations([("/notes", 100)]);
+        assert_eq!(
+            Debouncer::window_for_in(&windows, &modify("/elsewhere/file")),
+            DEFAULT_DEBOUNCE_WINDOW
+        );
+    }
+
+    /// When a sync root nests inside another, the deepest (longest) matching
+    /// root wins, so the inner directory's window governs its own files rather
+    /// than the ancestor's.
+    #[test]
+    fn deepest_matching_root_wins() {
+        let windows = window_registrations([("/root", 100), ("/root/inner", 3000)]);
+        assert_eq!(
+            Debouncer::window_for_in(&windows, &modify("/root/inner/file")),
+            Duration::from_millis(3000)
+        );
+        assert_eq!(
+            Debouncer::window_for_in(&windows, &modify("/root/other")),
+            Duration::from_millis(100)
+        );
+    }
+
+    /// A `Move` is classified by its destination when present (that is where a
+    /// settled move is ingested), falling back to the source for a move out.
+    #[test]
+    fn move_uses_destination_root_then_source() {
+        let windows = window_registrations([("/slow", 3000), ("/fast", 50)]);
+
+        // Move into /fast from /slow: the destination's window applies.
+        assert_eq!(
+            Debouncer::window_for_in(&windows, &move_both("/slow/a", "/fast/a")),
+            Duration::from_millis(50)
+        );
+        // Move out with only a source: fall back to the source's window.
+        assert_eq!(
+            Debouncer::window_for_in(&windows, &move_from("/slow/a")),
+            Duration::from_millis(3000)
+        );
     }
 }

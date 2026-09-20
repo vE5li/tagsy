@@ -43,14 +43,22 @@ pub struct WatchDispatcher {
 }
 
 impl WatchDispatcher {
-    pub async fn new() -> Result<
+    /// Construct a dispatcher whose debouncer applies a per-sync-root debounce
+    /// window. `debounce_windows` pairs each sync directory's root with the
+    /// window its events should settle on; an event under no listed root uses
+    /// the debouncer's built-in fallback. Passing the windows in at
+    /// construction (rather than registering them afterward) means every event
+    /// is debounced correctly from the first one on.
+    pub async fn new(
+        debounce_windows: Vec<(PathBuf, Duration)>,
+    ) -> Result<
         (
             WatchDispatcher,
             tokio::sync::mpsc::UnboundedReceiver<DebouncedEventKind>,
         ),
         notify::Error,
     > {
-        let debouncer = Arc::new(Mutex::new(Debouncer::default()));
+        let debouncer = Arc::new(Mutex::new(Debouncer::new(debounce_windows)));
 
         let stop = Arc::new(AtomicBool::new(false));
         let (event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -219,7 +227,7 @@ mod tests {
         std::fs::create_dir_all(root.join("target/debug/deps")).unwrap();
         std::fs::create_dir_all(root.join("nested/keep")).unwrap();
 
-        let (mut dispatcher, _events) = WatchDispatcher::new().await.unwrap();
+        let (mut dispatcher, _events) = WatchDispatcher::new(vec![]).await.unwrap();
 
         // Prune anything whose path component is `target`.
         let prune = |candidate: &Path| candidate.components().any(|c| c.as_os_str() == "target");
@@ -248,7 +256,7 @@ mod tests {
         let root = temp_dir("idempotent");
         std::fs::create_dir_all(root.join("a/b")).unwrap();
 
-        let (mut dispatcher, _events) = WatchDispatcher::new().await.unwrap();
+        let (mut dispatcher, _events) = WatchDispatcher::new(vec![]).await.unwrap();
         let no_prune = |_: &Path| false;
 
         let first = dispatcher.watch_tree(&root, &no_prune);
@@ -267,7 +275,7 @@ mod tests {
         std::fs::create_dir_all(root.join("keep")).unwrap();
         std::fs::create_dir_all(root.join("build/out")).unwrap();
 
-        let (mut dispatcher, _events) = WatchDispatcher::new().await.unwrap();
+        let (mut dispatcher, _events) = WatchDispatcher::new(vec![]).await.unwrap();
 
         // First pass prunes build/.
         let prune_build =
@@ -299,7 +307,7 @@ mod tests {
         std::fs::create_dir_all(root.join("a/b/c")).unwrap();
         std::fs::create_dir_all(root.join("other")).unwrap();
 
-        let (mut dispatcher, _events) = WatchDispatcher::new().await.unwrap();
+        let (mut dispatcher, _events) = WatchDispatcher::new(vec![]).await.unwrap();
         dispatcher.watch_tree(&root, &|_: &Path| false);
 
         dispatcher.unwatch_tree(&root.join("a"));
