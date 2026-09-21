@@ -14,6 +14,49 @@ use super::short_id::{common_prefix_length, normalize_id_prefix};
 use super::types::{DatabaseError, DeletionState, and_deleted_clause};
 use super::versions::VersionHistory;
 
+/// A `WITH` clause that resolves, in one grouped pass over `file_versions_v1`,
+/// everything the "latest version" listings need per file:
+///
+/// - `latest_version` / `content_hash` / `size`: the payload of the row with
+///   the highest `version_number` — the file's current content.
+/// - `first_recorded_at`: the `observed_at` of the *lowest* `version_number`.
+/// - `latest_change_at`: the `observed_at` of the *highest* `version_number`.
+///
+/// The first/last timestamps are ordered by `version_number`, never by
+/// `observed_at` — a reconciled peer edit records its origin's `observed_at`
+/// verbatim (see [`super::versions`]'s `record_version_at`), so a later version
+/// can legitimately carry an older wall-clock. `MIN/MAX(observed_at)` would be
+/// wrong; the conditional `MAX(... WHEN version_number = extreme)` aggregates
+/// pick the value *at* each extreme version instead.
+///
+/// This replaces the three per-row correlated subqueries the old
+/// `get_all_files`/`file_info_from_id` ran (one for the latest version, two for
+/// the first/last timestamps) with a single aggregate the
+/// `idx_file_versions_v1_latest` index (`file_id, version_number DESC`) covers.
+/// Callers splice it in and join `latest_version` on `file_id`.
+const LATEST_VERSION_CTE: &str = "\
+WITH bounds AS (
+    SELECT file_id,
+           MIN(version_number) AS first_version,
+           MAX(version_number) AS latest_version
+    FROM file_versions_v1
+    GROUP BY file_id
+),
+latest_version AS (
+    SELECT b.file_id,
+           b.latest_version,
+           MAX(CASE WHEN v.version_number = b.latest_version THEN v.content_hash END) AS \
+                                  content_hash,
+           MAX(CASE WHEN v.version_number = b.latest_version THEN v.size END) AS size,
+           MAX(CASE WHEN v.version_number = b.first_version THEN v.observed_at END) AS \
+                                  first_recorded_at,
+           MAX(CASE WHEN v.version_number = b.latest_version THEN v.observed_at END) AS \
+                                  latest_change_at
+    FROM bounds AS b
+    JOIN file_versions_v1 AS v ON v.file_id = b.file_id
+    GROUP BY b.file_id
+)";
+
 /// One row of [`CatalogStore::manifest_entries`]: a file id, its full
 /// [`VersionHistory`], the unix-millis timestamp of its latest version, the
 /// file's logical path, the unix-millis time that path was last changed
@@ -489,21 +532,12 @@ impl CatalogStore {
             DeletedRule::Include => "",
         };
         let sql = format!(
-            "SELECT f.logical_path, v.content_hash, v.version_number, v.size, f.deleted,
-                    (SELECT observed_at FROM file_versions_v1 AS first
-                     WHERE first.file_id = f.id
-                     ORDER BY first.version_number ASC LIMIT 1) AS first_recorded_at,
-                    (SELECT observed_at FROM file_versions_v1 AS last
-                     WHERE last.file_id = f.id
-                     ORDER BY last.version_number DESC LIMIT 1) AS latest_change_at
+            "{LATEST_VERSION_CTE}
+             SELECT f.logical_path, agg.content_hash, agg.latest_version, agg.size, f.deleted,
+                    agg.first_recorded_at, agg.latest_change_at
              FROM files_v2 AS f
-             JOIN file_versions_v1 AS v
-               ON v.file_id = f.id
-              AND v.version_number = (
-                  SELECT MAX(version_number)
-                  FROM file_versions_v1 AS inner
-                  WHERE inner.file_id = f.id
-              )
+             JOIN latest_version AS agg
+               ON agg.file_id = f.id
              WHERE f.id = ?1{extra_clause}"
         );
         let mut statement = self.connection.prepare(&sql)?;
@@ -554,21 +588,13 @@ impl CatalogStore {
             DeletedRule::Include => "",
         };
         let sql = format!(
-            "SELECT f.id, f.logical_path, v.content_hash, v.version_number, v.size, f.deleted,
-                    (SELECT observed_at FROM file_versions_v1 AS first
-                     WHERE first.file_id = f.id
-                     ORDER BY first.version_number ASC LIMIT 1) AS first_recorded_at,
-                    (SELECT observed_at FROM file_versions_v1 AS last
-                     WHERE last.file_id = f.id
-                     ORDER BY last.version_number DESC LIMIT 1) AS latest_change_at
+            "{LATEST_VERSION_CTE}
+             SELECT f.id, f.logical_path, agg.content_hash, agg.latest_version, agg.size, \
+             f.deleted,
+                    agg.first_recorded_at, agg.latest_change_at
              FROM files_v2 AS f
-             JOIN file_versions_v1 AS v
-               ON v.file_id = f.id
-              AND v.version_number = (
-                  SELECT MAX(version_number)
-                  FROM file_versions_v1 AS inner
-                  WHERE inner.file_id = f.id
-              ){where_clause}"
+             JOIN latest_version AS agg
+               ON agg.file_id = f.id{where_clause}"
         );
         let mut statement = self.connection.prepare(&sql)?;
 
@@ -620,6 +646,51 @@ impl CatalogStore {
         Ok(files)
     }
 
+    /// Every file id in the catalog under `deleted_rule`, and nothing else.
+    ///
+    /// The lean counterpart of [`Self::get_all_files`] for callers that need
+    /// only the id set — no version join, no first/last timestamps, and no
+    /// short-id computation. Query planning (`file_ids_for_query`) seeds its
+    /// candidate pool from this when there is no positive tag term, where every
+    /// discarded column of a full listing is pure waste over a large catalog.
+    ///
+    /// A file's id lives in `files_v2` directly, so unlike `get_all_files` this
+    /// does not touch `file_versions_v1` at all: a file with a row but no
+    /// version yet is included here (the caller resolves each id through
+    /// `file_info_from_id` and tolerates the miss), matching the long-standing
+    /// tolerance documented on `file_ids_for_query`.
+    pub fn all_file_ids(&self, deleted_rule: DeletedRule) -> Result<Vec<FileId>, DatabaseError> {
+        let sql = format!(
+            "SELECT id FROM files_v2{}",
+            super::types::where_deleted_clause(deleted_rule)
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let ids = statement.query_map([], |row| row.get::<_, FileId>(0))?;
+        ids.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Every `(file_id, logical_path)` pair in the catalog under
+    /// `deleted_rule`.
+    ///
+    /// The lean counterpart of [`Self::get_all_files`] for the text-search
+    /// pass, which needs each candidate's logical path but none of the version
+    /// payload, timestamps, or short-id length that a full listing computes.
+    /// Reads straight from `files_v2` with no `file_versions_v1` join.
+    pub fn all_file_paths(
+        &self,
+        deleted_rule: DeletedRule,
+    ) -> Result<Vec<(FileId, LogicalPath)>, DatabaseError> {
+        let sql = format!(
+            "SELECT id, logical_path FROM files_v2{}",
+            super::types::where_deleted_clause(deleted_rule)
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, FileId>(0)?, row.get::<_, LogicalPath>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Sum the byte size of the *latest* version of every file in the catalog,
     /// honoring `deleted_rule`, and count those files. This is the
     /// "whole catalog" side of the storage-stats indicator: what the cloud as a
@@ -640,18 +711,29 @@ impl CatalogStore {
             DeletedRule::Exclude => " WHERE f.deleted = 0",
             DeletedRule::Include => "",
         };
+        // Resolve each file's latest version's size in one grouped pass
+        // (`agg`) rather than a per-row correlated `MAX(version_number)`
+        // subquery — same optimization as `get_all_files`, but this stat needs
+        // only the size at the latest version, so a lighter aggregate than
+        // `LATEST_VERSION_CTE` (no first/last timestamps) suffices.
+        //
         // `SUM` yields NULL over an empty set, which rusqlite refuses to
         // deserialize into a plain `i64`; `COALESCE` folds it to 0.
         let sql = format!(
-            "SELECT COALESCE(SUM(v.size), 0), COUNT(*)
+            "SELECT COALESCE(SUM(agg.size), 0), COUNT(*)
              FROM files_v2 AS f
-             JOIN file_versions_v1 AS v
-               ON v.file_id = f.id
-              AND v.version_number = (
-                  SELECT MAX(version_number)
-                  FROM file_versions_v1 AS inner
-                  WHERE inner.file_id = f.id
-              ){where_clause}"
+             JOIN (
+                 SELECT b.file_id,
+                        MAX(CASE WHEN v.version_number = b.latest_version THEN v.size END) AS size
+                 FROM (
+                     SELECT file_id, MAX(version_number) AS latest_version
+                     FROM file_versions_v1
+                     GROUP BY file_id
+                 ) AS b
+                 JOIN file_versions_v1 AS v ON v.file_id = b.file_id
+                 GROUP BY b.file_id
+             ) AS agg
+               ON agg.file_id = f.id{where_clause}"
         );
         let (total, count): (i64, i64) = self
             .connection
@@ -686,16 +768,25 @@ impl CatalogStore {
         let placeholders = std::iter::repeat_n("?", file_ids.len())
             .collect::<Vec<_>>()
             .join(", ");
+        // Resolve each file's latest-version size in one grouped pass (`agg`)
+        // rather than a per-row correlated `MAX(version_number)` subquery —
+        // same lean aggregate as `total_catalog_size`. The `f.id IN (...)`
+        // filter still restricts the set to the caller's ids.
         let sql = format!(
-            "SELECT COALESCE(SUM(v.size), 0), COUNT(*)
+            "SELECT COALESCE(SUM(agg.size), 0), COUNT(*)
              FROM files_v2 AS f
-             JOIN file_versions_v1 AS v
-               ON v.file_id = f.id
-              AND v.version_number = (
-                  SELECT MAX(version_number)
-                  FROM file_versions_v1 AS inner
-                  WHERE inner.file_id = f.id
-              )
+             JOIN (
+                 SELECT b.file_id,
+                        MAX(CASE WHEN v.version_number = b.latest_version THEN v.size END) AS size
+                 FROM (
+                     SELECT file_id, MAX(version_number) AS latest_version
+                     FROM file_versions_v1
+                     GROUP BY file_id
+                 ) AS b
+                 JOIN file_versions_v1 AS v ON v.file_id = b.file_id
+                 GROUP BY b.file_id
+             ) AS agg
+               ON agg.file_id = f.id
              WHERE f.id IN ({placeholders}){deleted_clause}"
         );
         let params = rusqlite::params_from_iter(file_ids.iter());
@@ -962,6 +1053,86 @@ mod tests {
         assert_eq!(info.logical_path, LogicalPath::new("a.txt"));
         assert_eq!(info.content_hash, "hash-v2");
         assert_eq!(info.version_number, v2);
+    }
+
+    #[test]
+    fn timestamps_track_version_number_not_observed_at() {
+        // Regression for the `get_all_files`/`file_info_from_id` rewrite:
+        // `first_recorded_at`/`latest_change_at` must be the `observed_at` of
+        // the lowest/highest *version_number*, never `MIN/MAX(observed_at)`. A
+        // reconciled peer edit records its origin's `observed_at` verbatim (see
+        // `record_version_at`), so a later version can carry an *earlier*
+        // wall-clock — the exact case where the two disagree.
+        let mut database = memory_db();
+        let file_id = FileId::new();
+        database
+            .add_file(file_id, &LogicalPath::new("a.txt"), 0)
+            .unwrap();
+
+        // Version 1 observed at t=500; version 2 (the latest) observed at
+        // t=100, earlier on the wall-clock. `MIN/MAX(observed_at)` would report
+        // first=100/latest=500 — inverted; the correct answer keys off
+        // version_number: first=500 (v1), latest=100 (v2).
+        database
+            .record_version_at(file_id, "hash-v1", "local", 1, 500)
+            .unwrap();
+        database
+            .record_version_at(file_id, "hash-v2", "peer", 1, 100)
+            .unwrap();
+
+        let via_all = database.get_all_files(DeletedRule::Exclude).unwrap();
+        assert_eq!(via_all.len(), 1);
+        assert_eq!(via_all[0].first_recorded_at, 500);
+        assert_eq!(via_all[0].latest_change_at, 100);
+        assert_eq!(via_all[0].content_hash, "hash-v2");
+
+        // `file_info_from_id` shares the same CTE and must agree.
+        let via_id = database
+            .file_info_from_id(file_id, DeletedRule::Exclude)
+            .unwrap();
+        assert_eq!(via_id.first_recorded_at, 500);
+        assert_eq!(via_id.latest_change_at, 100);
+        assert_eq!(via_id.content_hash, "hash-v2");
+    }
+
+    #[test]
+    fn size_of_files_prices_latest_version_and_restricts_to_id_set() {
+        // Regression for the `size_of_files` grouped-`agg` rewrite: it must sum
+        // the *latest* version's size (not a superseded one, and not a sum
+        // across versions), only over the ids passed in, and silently skip ids
+        // absent from the catalog.
+        let mut database = memory_db();
+        let priced = FileId::new();
+        let excluded = FileId::new();
+        let absent = FileId::new();
+        database
+            .add_file(priced, &LogicalPath::new("a.txt"), 0)
+            .unwrap();
+        database
+            .add_file(excluded, &LogicalPath::new("b.txt"), 0)
+            .unwrap();
+
+        // `priced` gets two versions; only the latest (size 30) should count —
+        // not the first (size 10), and not their sum (40).
+        database
+            .record_version(priced, "a-v1", "local", 10)
+            .unwrap();
+        database
+            .record_version(priced, "a-v2", "local", 30)
+            .unwrap();
+        // `excluded` exists but is not in the queried id set.
+        database
+            .record_version(excluded, "b-v1", "local", 999)
+            .unwrap();
+
+        let (bytes, count) = database
+            .size_of_files(&[priced, absent], DeletedRule::Exclude)
+            .unwrap();
+        assert_eq!(bytes, 30, "prices the latest version, not v1 or the sum");
+        assert_eq!(
+            count, 1,
+            "the absent id is skipped, the excluded id unqueried"
+        );
     }
 
     #[test]

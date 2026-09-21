@@ -113,6 +113,15 @@ pub(super) fn create_files_v2(connection: &Connection) -> Result<(), DatabaseErr
         (),
     )?;
 
+    // `logical_path` is queried by value in `file_id_from_logical_path` (the
+    // logical-path -> id inverse). Only `id` is otherwise indexed, so without
+    // this that lookup scans `files_v2`.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_files_v2_logical_path
+                ON files_v2(logical_path)",
+        (),
+    )?;
+
     Ok(())
 }
 
@@ -267,6 +276,18 @@ pub(super) fn create_entries_v1(connection: &Connection) -> Result<(), DatabaseE
         (),
     )?;
 
+    // The `UNIQUE (tag_id, target_id, type)` constraint's implicit index serves
+    // `tag_id`-driven reads (a tag's members). The reverse direction — "which
+    // tags does this target carry?" (`tag_ids_for_file`, the subtag walk's
+    // `tag_ids_for_subtag_inner`) and the startup purge deletes — filters on
+    // `target_id`, which is not the leftmost column of that index, so those
+    // queries would otherwise scan `entries_v1`. This index serves them.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_entries_v1_target
+                ON entries_v1(target_id, type)",
+        (),
+    )?;
+
     Ok(())
 }
 
@@ -312,6 +333,20 @@ pub(super) fn create_file_versions_v1(connection: &Connection) -> Result<(), Dat
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_file_versions_v1_latest
                 ON file_versions_v1(file_id, version_number DESC)",
+        (),
+    )?;
+
+    // `content_hash` backs the `/h` hash-prefix search
+    // (`file_ids_matching_content_hash_prefix`), whose anchored `LIKE 'prefix%'`
+    // this index serves as a range scan. The `COLLATE NOCASE` is required for
+    // SQLite to use the index for `LIKE` at all (default `LIKE` is
+    // case-insensitive, so it only optimizes against a NOCASE index); it is
+    // safe here because stored hashes are lowercase hex, so case-folding never
+    // conflates two distinct hashes. Without this the search scans every
+    // version row.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_file_versions_v1_content_hash
+                ON file_versions_v1(content_hash COLLATE NOCASE)",
         (),
     )?;
 
@@ -408,6 +443,24 @@ pub(super) fn create_directory_files_v1(connection: &Connection) -> Result<(), D
                 id              TEXT PRIMARY KEY,
                 physical_path   TEXT NOT NULL
             )",
+        (),
+    )?;
+
+    // `physical_path` is the reverse index for filesystem events (path ->
+    // file_id), queried by value in `get_file_id` and
+    // `physical_path_in_use_by_other` on the per-watch-event hot path. A plain
+    // (BINARY) index is deliberate: those lookups are case-sensitive equality
+    // (a path's case is significant on a case-sensitive filesystem), so a
+    // NOCASE index would be incorrect. Without it every path lookup is a full
+    // scan of the directory's file table, once per watch event.
+    //
+    // `get_all_files_at`'s `LIKE 'prefix%'` (directory-move path only) is left
+    // to scan: it cannot use this BINARY index for `LIKE`, and a NOCASE index
+    // would break the case-sensitive equality lookups above — that cold path
+    // is not worth trading the hot path's correctness for.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_directory_files_v1_physical_path
+                ON files_v1(physical_path)",
         (),
     )?;
 

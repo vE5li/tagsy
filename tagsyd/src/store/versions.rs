@@ -187,16 +187,25 @@ impl CatalogStore {
             DeletedRule::Exclude => " AND f.deleted = 0",
             DeletedRule::Include => "",
         };
+        // Drive off `idx_file_versions_v1_content_hash`: the anchored
+        // `LIKE 'prefix%'` selects candidate version rows by hash range first
+        // (`v`), then we keep only those that are their file's *latest* version
+        // by joining the grouped-max (`agg`). Only the latest version's hash
+        // counts (a superseded version matching the prefix must not match the
+        // file), and the correlated per-row `MAX(version_number)` subquery is
+        // gone.
         let sql = format!(
             "SELECT f.id
-             FROM files_v2 AS f
-             JOIN file_versions_v1 AS v
-               ON v.file_id = f.id
-              AND v.version_number = (
-                  SELECT MAX(version_number)
-                  FROM file_versions_v1 AS inner
-                  WHERE inner.file_id = f.id
-              )
+             FROM file_versions_v1 AS v
+             JOIN (
+                 SELECT file_id, MAX(version_number) AS latest_version
+                 FROM file_versions_v1
+                 GROUP BY file_id
+             ) AS agg
+               ON agg.file_id = v.file_id
+              AND agg.latest_version = v.version_number
+             JOIN files_v2 AS f
+               ON f.id = v.file_id
              WHERE v.content_hash LIKE ?1{deleted_clause}"
         );
         let mut statement = self.connection.prepare(&sql)?;

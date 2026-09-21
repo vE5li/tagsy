@@ -207,9 +207,10 @@ impl CatalogStore {
     /// matches no tag (so `HasTag([])` matches nothing and `NotTag([])`
     /// excludes nothing). For [`QueryTerm::AnyMatch`] the text side
     /// still stands when the tag set is empty. Composes
-    /// [`Self::file_ids_for_tag`] and [`Self::get_all_files`]; no new SQL.
+    /// [`Self::file_ids_for_tag`], [`Self::all_file_ids`], and
+    /// [`Self::all_file_paths`]; no new SQL.
     ///
-    /// `deleted_rule` is passed through to [`Self::get_all_files`] so that
+    /// `deleted_rule` is passed through to the file listings so that
     /// tombstoned files can participate in the candidate pool under
     /// [`DeletedRule::Include`]. Relationship traversal (`entries_v1`)
     /// stays live-only regardless — only the file's own row visibility is
@@ -260,10 +261,12 @@ impl CatalogStore {
             // without a matching `file_versions` row yet.
             set
         } else {
-            self.get_all_files(deleted_rule)?
-                .into_iter()
-                .map(|file| file.file_id)
-                .collect()
+            // No positive tag term: the candidate pool is every file under
+            // `deleted_rule`. Only the ids are needed here, so take the lean
+            // id-only listing rather than `get_all_files` (which would join
+            // each file's latest version and compute short-id lengths only to
+            // throw all of it away).
+            self.all_file_ids(deleted_rule)?.into_iter().collect()
         };
 
         // Subtract every negative tag term (the union of its matched tags' files).
@@ -317,13 +320,17 @@ impl CatalogStore {
             // a lowercased copy for substring matching. See
             // `CompiledPattern::is_match` for why the regex side must not see
             // the lowercased form.
+            // Only each candidate's logical path is needed for the text pass,
+            // so take the lean id+path listing rather than `get_all_files`
+            // (whose version join, timestamps, and short-id computation would
+            // all be discarded here).
             let paths: std::collections::BTreeMap<FileId, (String, String)> = self
-                .get_all_files(deleted_rule)?
+                .all_file_paths(deleted_rule)?
                 .into_iter()
-                .map(|file| {
-                    let path = file.logical_path.as_str().to_owned();
+                .map(|(file_id, logical_path)| {
+                    let path = logical_path.as_str().to_owned();
                     let lowercased = path.to_lowercase();
-                    (file.file_id, (path, lowercased))
+                    (file_id, (path, lowercased))
                 })
                 .collect();
 

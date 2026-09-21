@@ -299,6 +299,19 @@ pub fn plan_file_sync(
                     file_id: entry.file_id,
                     deleted_at: entry.deleted_at,
                 });
+            } else {
+                // The peer's delete lost last-writer-wins against our local
+                // clocks. This is the symptom of the `observed_at`-restamp bug:
+                // a version we pulled from a peer was stamped with our own
+                // (later) receive time, so a legitimate delete can never win.
+                // Log it so a stuck tombstone is visible rather than silent.
+                log::debug!(
+                    "Peer delete for {} from {peer_name} lost LWW (deleted_at={} <= \
+                     max(ours_observed_at={ours_observed_at}, \
+                     ours_restored_at={ours_restored_at})); file stays live",
+                    entry.file_id.to_string(),
+                    entry.deleted_at,
+                );
             }
             // Whether or not the delete won, do not also request bytes for a
             // tombstoned entry.
