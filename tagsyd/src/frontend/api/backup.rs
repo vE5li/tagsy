@@ -7,8 +7,12 @@
 //! db/main.db               # the main catalog, snapshotted with VACUUM INTO
 //! db/<name>.db …           # each per-sync-directory index, likewise
 //! sync/<name>/…            # the full recursive contents of each sync directory
+//! outbox/…                 # uploads not yet held by any other device
 //! manifest.json            # provenance: created_at, each sync dir's path+type
 //! ```
+//!
+//! The outbox is included because an entry there may be the only copy of its
+//! content anywhere (an upload made while no peer that keeps it was reachable).
 //!
 //! ## Why the daemon does this
 //!
@@ -194,8 +198,13 @@ fn build_archive(
     let final_path = backup_dir.join(format!("tagsy-backup-{}.tar.zst", timestamp_slug()));
     let partial_path = final_path.with_extension("partial");
 
-    let (bytes_written, file_count) =
-        write_tar_zst(&partial_path, &main_snapshot, &resolved, &manifest)?;
+    let (bytes_written, file_count) = write_tar_zst(
+        &partial_path,
+        &main_snapshot,
+        &resolved,
+        &paths.outbox_dir(),
+        &manifest,
+    )?;
 
     std::fs::rename(&partial_path, &final_path).map_err(io("finalize archive"))?;
     std::fs::remove_dir_all(&staging).map_err(io("remove staging dir"))?;
@@ -207,13 +216,14 @@ fn build_archive(
     })
 }
 
-/// Stream the staged databases, the manifest, and every sync directory's
-/// contents into a tar+zstd archive at `partial_path`. Returns the
-/// `(bytes_written, file_count)` of the **sync-directory contents** only.
+/// Stream the staged databases, the manifest, every sync directory's contents
+/// and the outbox's entries into a tar+zstd archive at `partial_path`. Returns
+/// the `(bytes_written, file_count)` of the **sync-directory contents** only.
 fn write_tar_zst(
     partial_path: &Path,
     main_snapshot: &Path,
     resolved: &[ResolvedDirectory],
+    outbox_dir: &Path,
     manifest: &Manifest,
 ) -> Result<(u64, u64), ApiError> {
     let io = |context: &'static str| {
@@ -279,6 +289,21 @@ fn write_tar_zst(
             file_count += 1;
             tar.append_path_with_name(absolute, &archive_path)
                 .map_err(io("archive sync file"))?;
+        }
+    }
+
+    // outbox/… — complete entries only; an in-progress ingest's `.partial` is
+    // not content yet. Each entry is written once and never modified, so it
+    // cannot change under the walk.
+    if let Ok(entries) = std::fs::read_dir(outbox_dir) {
+        for entry in entries {
+            let entry = entry.map_err(io("list outbox"))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".partial") || !entry.path().is_file() {
+                continue;
+            }
+            tar.append_path_with_name(entry.path(), format!("outbox/{name}"))
+                .map_err(io("archive outbox entry"))?;
         }
     }
 

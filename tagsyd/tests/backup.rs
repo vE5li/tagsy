@@ -64,6 +64,11 @@ async fn backup_bundles_databases_sync_files_and_manifest() {
     DirectoryIndex::initialize(data_dir.join(format!("{sync_name}.db")))
         .expect("open directory index");
 
+    // An upload still waiting in the outbox, plus an interrupted ingest.
+    std::fs::create_dir_all(data_dir.join("outbox")).unwrap();
+    std::fs::write(data_dir.join("outbox/abc.def"), b"only copy").unwrap();
+    std::fs::write(data_dir.join("outbox/interrupted.partial"), b"half").unwrap();
+
     // Build an ApiService with a backup dir configured.
     let configuration = Configuration {
         sync_directories: vec![SyncDirectory {
@@ -191,6 +196,14 @@ async fn backup_bundles_databases_sync_files_and_manifest() {
     assert!(
         entries.contains(&"manifest.json".to_owned()),
         "manifest archived"
+    );
+    assert!(
+        entries.contains(&"outbox/abc.def".to_owned()),
+        "outbox entry archived: got {entries:?}"
+    );
+    assert!(
+        !entries.iter().any(|entry| entry.ends_with(".partial")),
+        "an interrupted ingest is not archived: got {entries:?}"
     );
 
     // The manifest records the directory's original path and type.

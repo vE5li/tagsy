@@ -180,8 +180,9 @@ completeness check, or a retry, find the version of the change that doesn't.
 ## Backup
 
 `tagsy backup` produces a single `*.tar.zst` archive of the entire restorable
-state — both SQLite databases plus the full byte contents of every sync
-directory — into `TAGSY_BACKUP_DIR`. It flows through the full mirrored API
+state — both SQLite databases, the full byte contents of every sync
+directory, and the outbox (uploads not yet held by another device, possibly
+the only copy of their bytes) — into `TAGSY_BACKUP_DIR`. It flows through the full mirrored API
 surface like any other operation (`Backend` → `ControlRequest` → `dispatch` →
 `ApiService::backup` → `ControlResponse` → IPC → CLI). **The daemon is the only
 process that can take a consistent snapshot** while running, because it owns the
