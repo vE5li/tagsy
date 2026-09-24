@@ -23,6 +23,33 @@ use crate::store::{self, CatalogStore};
 use crate::sync_directories::SyncDirectoryCommand;
 use crate::{clock, operations};
 
+/// Whether a version stamped `observed_at` is newer than `file_id`'s current
+/// latest version — the content half of last-writer-wins, with the same
+/// strict comparison reconciliation uses (`peer::plan::decide_request`).
+///
+/// A version that is not newer is superseded and must not be recorded:
+/// versions are ordered by number, i.e. by arrival, so appending it would make
+/// an older edit the latest (concurrent edits on disconnected devices reach a
+/// node in either order). An unknown file, or one with no versions, accepts
+/// any version.
+fn supersedes_latest(
+    database: &CatalogStore,
+    file_id: tagsy_core::FileId,
+    observed_at: i64,
+) -> bool {
+    match database.latest_version(file_id) {
+        Ok(Some(latest)) => observed_at > latest.observed_at,
+        Ok(None) => true,
+        Err(error) => {
+            log::error!(
+                "latest_version failed for {}: {error:?}; accepting the version",
+                file_id.to_string()
+            );
+            true
+        }
+    }
+}
+
 /// Apply a file-lifecycle metadata change. Returns `Some(publish)` if `change`
 /// was a file variant, else `None`.
 #[allow(clippy::too_many_arguments)]
@@ -157,6 +184,20 @@ pub(crate) async fn apply_change(
                     .await;
                     return Some(false);
                 }
+                if !supersedes_latest(database, *file_id, *observed_at) {
+                    log::debug!(
+                        "Ignoring FileMetadataAdded for {}: an older version than our latest",
+                        file_id.to_string()
+                    );
+                    super::forward::forward_to_peers(
+                        configuration,
+                        runtime_configuration,
+                        change,
+                        change_origin,
+                    )
+                    .await;
+                    return Some(false);
+                }
             }
 
             // Record the version into the catalog now, on announcement, with
@@ -239,9 +280,11 @@ pub(crate) async fn apply_change(
                 .ok()
                 .flatten()
                 .map(|version| version.content_hash);
-            if current_hash.as_deref() == Some(content_hash.as_str()) {
+            let superseded = !supersedes_latest(database, *file_id, *observed_at);
+            if current_hash.as_deref() == Some(content_hash.as_str()) || superseded {
                 log::debug!(
-                    "Ignoring no-op FileMetadataChanged for {} (already the current version)",
+                    "Ignoring FileMetadataChanged for {} (already the current version, or older \
+                     than it)",
                     file_id.to_string()
                 );
                 // Already our latest catalog version. Announce onward so the
@@ -799,6 +842,16 @@ pub(crate) async fn catalog_file(
     // separately on the session link). Seed the path clock from the
     // manifest entry's originating stamp (not our receive time).
     let is_new = !database.file_exists(file_id).unwrap_or(false);
+    // Reconciliation decided from a snapshot; a newer version may have been
+    // recorded since (e.g. a live announcement on another link).
+    if !is_new && !supersedes_latest(database, file_id, observed_at) {
+        log::debug!(
+            "CatalogFile: dropping {} [{}]: older than our latest version",
+            file_id.to_string(),
+            content_hash.get(..8).unwrap_or(&content_hash)
+        );
+        return;
+    }
     if is_new
         && let Err(error) = database.add_file(file_id, &logical_path, logical_path_modified_at)
     {
@@ -998,6 +1051,32 @@ pub(crate) async fn materialize(
         file_id.to_string(),
         content_hash
     );
+
+    // The file may have been deleted while its bytes were in flight (a user
+    // deletes it while a sweep or pull is fetching it). Placing them now would
+    // resurrect it on disk under a tombstoned catalog entry.
+    if matches!(database.file_deletion_state(file_id), Ok(Some(state)) if state.deleted) {
+        log::debug!(
+            "Materialize: {} was deleted while its bytes were in flight; not placing",
+            file_id.to_string()
+        );
+        return;
+    }
+
+    // Only the catalog's current latest version belongs on disk. Bytes of an
+    // older version can still arrive — a pull started before a newer version
+    // was recorded — and must not overwrite the newer content.
+    match database.latest_version(file_id) {
+        Ok(Some(latest)) if latest.content_hash != content_hash => {
+            log::debug!(
+                "Materialize: {} [{}] is no longer the latest version; not placing",
+                file_id.to_string(),
+                content_hash.get(..8).unwrap_or(&content_hash)
+            );
+            return;
+        }
+        _ => {}
+    }
 
     // Build the local placement targets for the arrived bytes.
     let targets = match placement {
