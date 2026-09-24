@@ -53,22 +53,24 @@ pub enum SyncDirectoryCommand {
         // We currently need that to check which directory this event was meant for.
         sync_directory_path: PathBuf,
     },
-    /// Re-evaluate which TagBased sync directories should hold `file_id` given
-    /// its *current* tag set, and reconcile placement accordingly:
+    /// Re-evaluate which sync directories should hold the live file `file_id`
+    /// given its *current* tag set, and reconcile placement accordingly:
     ///
-    /// - a TagBased directory that now matches (`contains_all_tags`) but does
-    ///   not yet hold the file gains it (the bytes are sourced from another
-    ///   directory that already holds the file);
+    /// - a directory that should hold the file — every Universal directory, and
+    ///   each TagBased one that matches (`contains_all_tags`) — but does not
+    ///   yet gains it (the bytes are sourced from another directory that
+    ///   already holds the file);
     /// - a TagBased directory that no longer matches but currently holds it
     ///   drops it.
     ///
-    /// Universal directories are untouched (they have no tag filter). This is
-    /// the recovery path for the tag-vs-content reconciliation race: when a
-    /// peer transfer materializes a file before its `FileTagged` relationships
-    /// have been applied, the file is placed only where tags already matched
-    /// (e.g. Universal dirs). Applying the tags later re-runs placement so the
-    /// file lands in the TagBased directories it belongs to. Idempotent: a
-    /// no-op when placement is already correct.
+    /// Every Universal directory should hold a live file (e.g. one just
+    /// restored). This is also the recovery path for the tag-vs-content
+    /// reconciliation race: when a peer transfer materializes a file before
+    /// its `FileTagged` relationships have been applied, the file is placed
+    /// only where tags already matched (e.g. Universal dirs). Applying the
+    /// tags later re-runs placement so the file lands in the TagBased
+    /// directories it belongs to. Idempotent: a no-op when placement is
+    /// already correct.
     ///
     /// If a TagBased directory now matches the file but no local copy exists to
     /// source the bytes from, placement cannot complete locally. In that case

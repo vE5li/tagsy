@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use tagsy_core::{FileId, LogicalPath, PhysicalPath, TagId};
 
+use super::self_write::Expected;
 use super::{OpenDirectory, SyncDirectories, SyncDirectoryError};
 use crate::catalog::placement::contains_all_tags;
 use crate::configuration::SyncType;
@@ -97,12 +98,13 @@ impl SyncDirectories {
     /// `file_tags`. See [`SyncDirectoryCommand::ApplyPlacement`] for
     /// the rationale.
     ///
-    /// For each TagBased directory: if it should hold the file (its tags are a
-    /// subset of `file_tags`) but does not, create it there sourcing the bytes
-    /// from any directory that already holds the file; if it holds the file but
-    /// should not, remove it. Universal directories are skipped. Idempotent.
+    /// For each directory: if it should hold the file (always, for Universal;
+    /// when its tags are a subset of `file_tags`, for TagBased) but does not,
+    /// create it there sourcing the bytes from any directory that already
+    /// holds the file; if a TagBased one holds the file but should not, remove
+    /// it. Only called for live files. Idempotent.
     ///
-    /// Returns `true` if a TagBased directory should hold the file but no local
+    /// Returns `true` if a directory should hold the file but no local
     /// copy exists to source the bytes from — i.e. placement was *deferred* and
     /// the caller must fetch the bytes over the network. `false` otherwise.
     pub(super) async fn apply_placement(
@@ -119,16 +121,14 @@ impl SyncDirectories {
         let mut deferred = false;
 
         for sync_directory in &self.sync_directories {
-            let SyncType::TagBased {
-                tags: sync_directory_tags,
-            } = &sync_directory.sync_type
-            else {
-                // Universal directories have no tag filter; their membership
-                // never changes on a tag update.
-                continue;
+            // A Universal directory holds every live file; a TagBased one the
+            // files carrying all of its tags.
+            let should_hold = match &sync_directory.sync_type {
+                SyncType::Universal { .. } => true,
+                SyncType::TagBased {
+                    tags: sync_directory_tags,
+                } => contains_all_tags(sync_directory_tags, file_tags),
             };
-
-            let should_hold = contains_all_tags(sync_directory_tags, file_tags);
             let currently_holds = sync_directory.database.get_file(file_id).is_ok();
 
             match (should_hold, currently_holds) {
@@ -158,8 +158,15 @@ impl SyncDirectories {
                     // disambiguated with a suffix.
                     let base_physical_path =
                         sync_directory.sync_type.physical_for(logical_path, file_id);
-                    let physical_path =
-                        self.resolve_unique_physical(sync_directory, &base_physical_path, file_id);
+                    // A Universal path is the file id: never a collision.
+                    let physical_path = match &sync_directory.sync_type {
+                        SyncType::Universal { .. } => base_physical_path,
+                        SyncType::TagBased { .. } => self.resolve_unique_physical(
+                            sync_directory,
+                            &base_physical_path,
+                            file_id,
+                        ),
+                    };
                     let file_path = sync_directory.path.join(physical_path.as_str());
 
                     log::info!(
@@ -205,7 +212,7 @@ impl SyncDirectories {
                         .add_file(file_id, &physical_path)
                         .map_err(|error| SyncDirectoryError::FailedAddingFile(error.into()))?;
 
-                    self.record_self_write(file_path, Some(content_hash));
+                    self.record_self_write(file_path, Expected::Content(Some(content_hash)));
                 }
                 (false, true) => {
                     // No longer matching: drop the file from this directory.
@@ -235,7 +242,7 @@ impl SyncDirectories {
                         .remove_file_by_id(file_id)
                         .map_err(|error| SyncDirectoryError::FailedRemovingFile(error.into()))?;
 
-                    self.record_self_write(file_path, None);
+                    self.record_self_write(file_path, Expected::Removal);
                 }
                 // Already in the desired state: nothing to do.
                 (true, true) | (false, false) => {}
