@@ -218,6 +218,15 @@ There are two SQLite databases, both owned by `tagsyd/src/store/`:
   directory, holding a single `files_v1` table. Unrelated to the main
   catalog's former `files_v1`.
 
+Every connection to either database is opened through
+`store::open_connection`, which sets `journal_mode = WAL` and
+`synchronous = NORMAL`. That is a deliberate durability trade-off: commits
+don't fsync, so power loss or an OS crash can roll back the latest commits
+(never corrupt the file; a daemon crash or kill loses nothing). This is
+recoverable by design — peers re-advertise everything on reconnect and the
+startup scan re-detects on-disk files — and the default `FULL` made every
+write path ~50× slower. Don't open a connection any other way.
+
 Every table name carries a version suffix. All `CREATE TABLE` statements and
 all migrations live in `store/schema.rs`, for both databases — that one file
 is the entire schema. The SQL that *reads and writes* each table lives in the

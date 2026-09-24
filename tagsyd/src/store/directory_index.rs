@@ -36,8 +36,7 @@ pub struct DirectoryIndex {
 
 impl DirectoryIndex {
     pub fn initialize(database_path: impl AsRef<Path>) -> Result<Self, DatabaseError> {
-        let connection =
-            Connection::open(database_path).map_err(|_| DatabaseError::UnableToOpenOrCreate)?;
+        let connection = super::open_connection(database_path)?;
 
         // Run migrations here.
 

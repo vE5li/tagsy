@@ -65,10 +65,33 @@ pub struct CatalogStore {
     connection: Connection,
 }
 
+/// Open a connection to one of the daemon's SQLite databases, configured the
+/// way every connection to them must be.
+///
+/// - `journal_mode = WAL`: readers (API reads, peer sessions) never block the
+///   single writer, and a commit is one append to the log rather than a
+///   rollback-journal round trip. The mode is persistent in the file; setting
+///   it again is a no-op.
+/// - `synchronous = NORMAL`: a commit does not fsync; the log is synced at
+///   checkpoints. The database is never corrupted, and a daemon crash or kill
+///   loses nothing. Power loss or an OS crash can roll back the commits since
+///   the last checkpoint — recoverable by design, since peers re-advertise
+///   everything on reconnect and the startup scan re-detects on-disk files. The
+///   default (`FULL`, with a rollback journal) cost several fsyncs per commit,
+///   which made every write path ~50× slower (see the scale benchmark in
+///   `tests/multi_daemon/bench.rs`).
+pub(crate) fn open_connection(
+    database_path: impl AsRef<Path>,
+) -> Result<Connection, DatabaseError> {
+    let connection =
+        Connection::open(database_path).map_err(|_| DatabaseError::UnableToOpenOrCreate)?;
+    connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+    Ok(connection)
+}
+
 impl CatalogStore {
     pub fn initialize(database_path: impl AsRef<Path>) -> Result<Self, DatabaseError> {
-        let connection =
-            Connection::open(database_path).map_err(|_| DatabaseError::UnableToOpenOrCreate)?;
+        let connection = open_connection(database_path)?;
 
         // Run migrations here. Each `migrate_*_to_vN` runs before the matching
         // `create_*_vN` so a restored older-version backup is walked forward
