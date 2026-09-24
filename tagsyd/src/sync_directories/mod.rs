@@ -27,7 +27,6 @@ use std::path::{Path, PathBuf};
 
 pub use commands::SyncDirectoryCommand;
 use ignore::gitignore::GitignoreBuilder;
-use self_write::SelfWrite;
 use tagsy_core::state::{Change, ChangeOrigin};
 use tagsy_core::{FileId, PhysicalPath, TagId};
 use tokio_util::sync::CancellationToken;
@@ -285,7 +284,7 @@ pub struct SyncDirectories {
     watcher_events: tokio::sync::mpsc::UnboundedReceiver<DebouncedEventKind>,
     command_receiver: tokio::sync::mpsc::UnboundedReceiver<SyncDirectoryCommand>,
     // TODO: Make this a more robust messaging framework instead of a ref cell.
-    self_writes: RefCell<HashMap<PathBuf, SelfWrite>>,
+    self_writes: RefCell<self_write::SelfWrites>,
     /// Whether this device eagerly warms the preview cache. Mirrors
     /// [`Configuration::preview_generation_policy`] being
     /// [`Eager`](crate::configuration::PreviewGenerationPolicy::Eager);
@@ -526,7 +525,7 @@ impl SyncDirectories {
         // The move out of this directory still produces a `Remove` watcher
         // event we must ignore; record the self-write up front (no content hash:
         // a removal has no bytes to match on).
-        self.record_self_write(full_path.clone(), None);
+        self.record_self_write(full_path.clone(), self_write::Expected::Removal);
 
         log::info!(
             "File {} was uploaded; its bytes will be moved out of this directory",

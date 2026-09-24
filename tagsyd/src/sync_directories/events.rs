@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
+use super::self_write::Observed;
 use super::watch::DebouncedEventKind;
 use super::{SyncDirectories, SyncDirectoryError};
 use crate::configuration::SyncType;
@@ -73,7 +74,7 @@ impl SyncDirectories {
                 // A Create for a path the daemon just wrote is our own
                 // operation (most often a peer-received file placed into a
                 // Universal directory under its `file_id`).
-                if self.take_matching_self_write(&file_name, None) {
+                if self.take_matching_self_write(&file_name, Observed::Arrival) {
                     log::debug!(
                         "Ignoring Create for {} (our own operation)",
                         file_name.to_string_lossy()
@@ -154,8 +155,8 @@ impl SyncDirectories {
                     // it so we do not re-announce our own move. (If it instead
                     // arrives split as a Remove + Create/Move-in, those arms
                     // consume the same records.)
-                    let from_self = self.take_matching_self_write(from, None);
-                    let to_self = self.take_matching_self_write(to, None);
+                    let from_self = self.take_matching_self_write(from, Observed::Removal);
+                    let to_self = self.take_matching_self_write(to, Observed::Arrival);
                     if from_self || to_self {
                         log::debug!(
                             "Ignoring intra-directory move {} -> {} (our own operation)",
@@ -224,7 +225,7 @@ impl SyncDirectories {
                     // daemon temp dir, arriving as `Move { from: None, to }`.
 
                     if to.is_file() {
-                        if self.take_matching_self_write(&to, None) {
+                        if self.take_matching_self_write(&to, Observed::Arrival) {
                             log::debug!(
                                 "Ignoring move-in of {} (our own operation)",
                                 to.to_string_lossy()
@@ -286,7 +287,8 @@ impl SyncDirectories {
 
                 // Suppress only if the on-disk content matches what the daemon
                 // just wrote here.
-                if self.take_matching_self_write(&file_name, Some(&content_hash)) {
+                if self.take_matching_self_write(&file_name, Observed::Modification(&content_hash))
+                {
                     log::debug!(
                         "Ignoring Modify of {} (our own operation)",
                         file_name.to_string_lossy()
@@ -304,7 +306,7 @@ impl SyncDirectories {
                 // A removal the daemon caused itself (delete, move-out, or the
                 // source side of a rename) has no content to match on, so a
                 // presence match consumes the record and ignores the event.
-                if self.take_matching_self_write(&file_name, None) {
+                if self.take_matching_self_write(&file_name, Observed::Removal) {
                     log::debug!(
                         "Ignoring Remove of {} (our own operation)",
                         file_name.to_string_lossy()
@@ -417,7 +419,7 @@ impl SyncDirectories {
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().is_file())
         {
-            if self.take_matching_self_write(entry.path(), None) {
+            if self.take_matching_self_write(entry.path(), Observed::Arrival) {
                 log::debug!(
                     "Ignoring move-in of {} (our own operation)",
                     entry.path().to_string_lossy()

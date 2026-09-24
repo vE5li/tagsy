@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use tagsy_core::{FileId, LogicalPath, PhysicalPath, TagId};
 
+use super::self_write::Expected;
 use super::{SyncDirectories, SyncDirectoryError};
 use crate::configuration::{SyncDirectory, SyncType};
 use crate::file_bytes::FileBytes;
@@ -242,7 +243,7 @@ impl SyncDirectories {
                         SyncDirectoryError::FailedAddingFile(error.into())
                     })?;
 
-                self.record_self_write(file_path, Some(content_hash));
+                self.record_self_write(file_path, Expected::Content(Some(content_hash)));
             }
             SyncDirectoryCommand::ChangeFile {
                 file_id,
@@ -307,7 +308,7 @@ impl SyncDirectories {
                         .map_err(|error| SyncDirectoryError::FailedChangingFile(error.into()))?;
                 }
 
-                self.record_self_write(file_path, Some(content_hash));
+                self.record_self_write(file_path, Expected::Content(Some(content_hash)));
             }
             SyncDirectoryCommand::MoveFile {
                 file_id,
@@ -410,8 +411,8 @@ impl SyncDirectories {
                         // the new one. Record both endpoints (no content hash: a
                         // rename does not change bytes) so any of those shapes is
                         // recognized and ignored.
-                        self.record_self_write(old_file_path, None);
-                        self.record_self_write(new_file_path, None);
+                        self.record_self_write(old_file_path, Expected::Removal);
+                        self.record_self_write(new_file_path, Expected::Content(None));
                     }
                 };
             }
@@ -510,7 +511,7 @@ impl SyncDirectories {
                     .remove_file_by_id(file_id)
                     .map_err(|error| SyncDirectoryError::FailedRemovingFile(error.into()))?;
 
-                self.record_self_write(file_path, None);
+                self.record_self_write(file_path, Expected::Removal);
             }
             SyncDirectoryCommand::ApplyPlacement {
                 file_id,
