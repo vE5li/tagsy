@@ -610,6 +610,43 @@ pub async fn run(
 
             emit_connected_peers(output_mode, &peers);
         }
+        Commands::Activity => {
+            let activity = backend
+                .activity()
+                .await
+                .map_err(|error| error.to_string())?;
+
+            let inbox = |inbox: &tagsy_api::InboxActivity| {
+                format!(
+                    "{} ({} queued, {} processed)",
+                    if inbox.busy { "busy" } else { "idle" },
+                    inbox.queued,
+                    inbox.processed
+                )
+            };
+            emit_scalar(
+                output_mode,
+                format!(
+                    "{}\ncatalog:          {}\nsync directories: {}{}\nfilesystem events \
+                     debouncing: {}\npulls: {} running, {} queued",
+                    if activity.is_idle() { "idle" } else { "busy" },
+                    inbox(&activity.catalog),
+                    inbox(&activity.sync_directories),
+                    if activity.initial_scan_complete {
+                        ""
+                    } else {
+                        " [startup scan running]"
+                    },
+                    activity.pending_filesystem_events,
+                    activity.pulls_running,
+                    activity.pulls_queued,
+                ),
+                json!({
+                    "idle": activity.is_idle(),
+                    "activity": activity,
+                }),
+            );
+        }
         Commands::PurgePreviews => {
             let purged = backend
                 .purge_previews()

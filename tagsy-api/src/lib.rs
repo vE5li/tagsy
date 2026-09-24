@@ -11,12 +11,14 @@
 //! client, and the `AnyBackend` enum) live in `tagsyd`; only the trait
 //! *declaration* and the DTOs are here.
 
+pub mod activity;
 mod backend;
 pub mod connections;
 mod error;
 pub mod operations;
 mod types;
 
+pub use activity::{ActivityInfo, InboxActivity};
 pub use backend::{
     Backend, ConnectionStream, ConnectionUpdate, EventStream, OperationStream, OperationUpdate,
 };

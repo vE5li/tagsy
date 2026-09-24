@@ -788,4 +788,11 @@ impl Backend for IpcBackend {
     fn subscribe_connections(&self) -> ConnectionStream {
         ConnectionStream::Ipc(self.inner.connection_events.subscribe())
     }
+
+    async fn activity(&self) -> Result<tagsy_api::ActivityInfo, ApiError> {
+        match self.call(ControlRequest::Activity).await? {
+            ControlResponse::Activity(activity) => Ok(activity),
+            other => Err(unexpected(other)),
+        }
+    }
 }

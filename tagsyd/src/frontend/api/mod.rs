@@ -53,8 +53,8 @@ use std::sync::Arc;
 // keep referencing `crate::frontend::api::{SearchResults, ApiEvent, ...}`.
 // `error` still owns the `From<internal error>` conversions onto `ApiError`.
 pub use tagsy_api::{
-    ApiError, ApiEvent, BackupOutcome, EditOutcome, PurgeOutcome, RetagSummary, SearchResults,
-    StorageStats, TagRuleReport,
+    ActivityInfo, ApiError, ApiEvent, BackupOutcome, EditOutcome, InboxActivity, PurgeOutcome,
+    RetagSummary, SearchResults, StorageStats, TagRuleReport,
 };
 use tagsy_core::state::Change;
 use tokio::sync::broadcast;
@@ -97,6 +97,9 @@ pub struct ApiService {
     /// `subscribe_connections` taps its event broadcast. Fed by the peer
     /// sessions (each registers itself for its lifetime), not by this API.
     connections: crate::connections::Connections,
+    /// Actor activity gauges, sampled by [`Self::activity`]. Fed by the
+    /// actors themselves, not by this API.
+    activity: crate::activity::Activity,
     /// External-editor rules the desktop UI consults for its "edit" action
     /// (see [`crate::configuration::EditorRule`]). Snapshot of the startup
     /// configuration; the daemon does not act on these but stores them so
@@ -147,6 +150,7 @@ impl ApiService {
         fetch_temp_dir: PathBuf,
         operations: crate::operations::Operations,
         connections: crate::connections::Connections,
+        activity: crate::activity::Activity,
         editor_rules: Vec<EditorRule>,
         home_sections: Vec<HomeSection>,
         tag_rules: Arc<CompiledTagRules>,
@@ -161,6 +165,7 @@ impl ApiService {
             fetch_temp_dir,
             operations,
             connections,
+            activity,
             editor_rules,
             home_sections,
             tag_rules,
@@ -242,5 +247,11 @@ impl ApiService {
         &self,
     ) -> broadcast::Receiver<crate::connections::ConnectionEvent> {
         self.connections.subscribe()
+    }
+
+    /// Sample every actor's activity gauge. See
+    /// [`tagsy_api::activity`] for how to read the result.
+    pub async fn activity(&self) -> tagsy_api::ActivityInfo {
+        self.activity.snapshot().await
     }
 }

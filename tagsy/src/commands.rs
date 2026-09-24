@@ -288,6 +288,10 @@ pub enum Commands {
     /// rather than appearing in `list-operations`.
     #[command(visible_alias = "peers")]
     ConnectedPeers,
+    /// Show how much work the daemon currently has queued or in hand: each
+    /// actor's inbox, filesystem events still debouncing, and byte transfers.
+    /// "idle" means all of them are empty and the startup scan is done.
+    Activity,
     /// Purge the daemon's cached file previews, forcing them to regenerate on
     /// demand. Useful after the set of previewable file types changes (e.g. new
     /// PDF/video support). Prints how many cached previews were removed.

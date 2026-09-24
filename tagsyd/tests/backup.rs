@@ -39,6 +39,12 @@ fn temp_dir(label: &str) -> PathBuf {
     base
 }
 
+fn test_activity() -> tagsyd::activity::Activity {
+    tagsyd::activity::Activity::new(tagsyd::peer::pull_scheduler::PullScheduler::new(
+        tagsyd::configuration::default_max_concurrent_pulls(),
+    ))
+}
+
 #[tokio::test]
 async fn backup_bundles_databases_sync_files_and_manifest() {
     let data_dir = temp_dir("data");
@@ -100,6 +106,7 @@ async fn backup_bundles_databases_sync_files_and_manifest() {
         data_dir.join("fetch-temp"),
         Operations::new(),
         Connections::new(),
+        test_activity(),
         Vec::new(),
         Vec::new(),
         compiled,
@@ -239,6 +246,7 @@ async fn backup_without_backup_dir_errors() {
         data_dir.join("fetch-temp"),
         Operations::new(),
         Connections::new(),
+        test_activity(),
         Vec::new(),
         Vec::new(),
         compiled,

@@ -39,6 +39,7 @@
 
 use std::path::PathBuf;
 
+use tagsy_api::ActivityInfo;
 // The port itself — the `Backend` trait and the normalized event streams — now
 // lives in `tagsy-api`. This module keeps the daemon's *implementations*
 // (`InProcessBackend`, `AnyBackend`) and re-exports the port so external
@@ -314,6 +315,10 @@ impl Backend for InProcessBackend {
 
     fn subscribe_connections(&self) -> ConnectionStream {
         ConnectionStream::InProcess(self.api.subscribe_connections())
+    }
+
+    async fn activity(&self) -> Result<ActivityInfo, ApiError> {
+        Ok(self.api.activity().await)
     }
 }
 
@@ -700,6 +705,13 @@ impl Backend for AnyBackend {
         match self {
             AnyBackend::InProcess(backend) => backend.subscribe_connections(),
             AnyBackend::Ipc(backend) => backend.subscribe_connections(),
+        }
+    }
+
+    async fn activity(&self) -> Result<ActivityInfo, ApiError> {
+        match self {
+            AnyBackend::InProcess(backend) => backend.activity().await,
+            AnyBackend::Ipc(backend) => backend.activity().await,
         }
     }
 }

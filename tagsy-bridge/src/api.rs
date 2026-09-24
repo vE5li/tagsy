@@ -149,6 +149,51 @@ impl From<StorageStats> for StorageStatsEntry {
     }
 }
 
+/// One actor inbox's activity, flattened for the Dart UI (see
+/// `tagsyd::frontend::api::InboxActivity`).
+pub struct InboxActivityEntry {
+    pub queued: i64,
+    pub busy: bool,
+    pub processed: i64,
+}
+
+impl From<tagsyd::frontend::api::InboxActivity> for InboxActivityEntry {
+    fn from(inbox: tagsyd::frontend::api::InboxActivity) -> Self {
+        Self {
+            queued: inbox.queued as i64,
+            busy: inbox.busy,
+            processed: inbox.processed as i64,
+        }
+    }
+}
+
+/// The daemon's activity sample, flattened for the Dart UI (see
+/// `tagsyd::frontend::api::ActivityInfo`). `idle` is precomputed so the UI need
+/// not reimplement the rule.
+pub struct ActivityEntry {
+    pub catalog: InboxActivityEntry,
+    pub sync_directories: InboxActivityEntry,
+    pub pending_filesystem_events: i64,
+    pub initial_scan_complete: bool,
+    pub pulls_queued: i64,
+    pub pulls_running: i64,
+    pub idle: bool,
+}
+
+impl From<tagsyd::frontend::api::ActivityInfo> for ActivityEntry {
+    fn from(activity: tagsyd::frontend::api::ActivityInfo) -> Self {
+        Self {
+            catalog: activity.catalog.into(),
+            sync_directories: activity.sync_directories.into(),
+            pending_filesystem_events: activity.pending_filesystem_events as i64,
+            initial_scan_complete: activity.initial_scan_complete,
+            pulls_queued: activity.pulls_queued as i64,
+            pulls_running: activity.pulls_running as i64,
+            idle: activity.is_idle(),
+        }
+    }
+}
+
 /// Which kind of content a [`PreviewEntry`] carries. Mirrors the variants of
 /// the core [`Preview`] enum as a flat tag the Dart UI can switch on.
 pub enum PreviewKind {
@@ -1251,6 +1296,11 @@ impl Tagsy {
                 .ok()
                 .map(|backend| Mutex::new(backend.subscribe_connections())),
         }
+    }
+
+    /// Sample the daemon's actor activity (see `tagsy_api::activity`).
+    pub async fn activity(&self) -> Result<ActivityEntry, ApiError> {
+        Ok(ActivityEntry::from(self.try_backend()?.activity().await?))
     }
 }
 

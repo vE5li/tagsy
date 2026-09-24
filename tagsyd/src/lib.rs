@@ -34,6 +34,7 @@ use crate::peer::transfer::VerifiedHashCache;
 use crate::store::CatalogStore;
 use crate::sync_directories::{SyncDirectories, SyncDirectoryCommand};
 
+pub mod activity;
 pub mod catalog;
 pub mod clock;
 pub mod configuration;
@@ -327,6 +328,19 @@ pub async fn run(
     // it, and every peer session registers itself in it for the session's life.
     let connections = crate::connections::Connections::new();
 
+    // One process-wide pull gate, shared by every path that starts a file
+    // byte-transfer: the peer sessions (live-sync / reconcile pulls) and the
+    // catalog's own recovery fetches (the connect-time missing-content sweep and
+    // deferred tag placement). Sharing one instance is what lets its
+    // `(file_id, content_hash)` dedup coalesce a sweep fetch against a
+    // concurrent reconcile pull for the same content, instead of racing two
+    // receives on the shared relay's per-chunk keys.
+    let pull_scheduler =
+        crate::peer::pull_scheduler::PullScheduler::new(configuration.max_concurrent_pulls);
+
+    // Activity gauges: each actor updates its own; the API samples them all.
+    let activity = crate::activity::Activity::new(pull_scheduler.clone());
+
     let fetch_temp_dir = paths.fetch_temp_dir();
     if let Err(error) = paths.clean_fetch_temp_dir().await {
         log::warn!(
@@ -347,6 +361,7 @@ pub async fn run(
         fetch_temp_dir,
         operations.clone(),
         connections.clone(),
+        activity.clone(),
         configuration.editor_rules.clone(),
         configuration.home_sections.clone(),
         tag_rules.clone(),
@@ -364,6 +379,7 @@ pub async fn run(
         let configuration = configuration.clone();
         let paths = paths.clone();
         let change_sender = change_sender.clone();
+        let gauges = activity.sync_directories().clone();
         let shutdown_child = shutdown.token().child_token();
 
         std::thread::Builder::new()
@@ -383,6 +399,7 @@ pub async fn run(
                         last_known_hashes,
                         change_sender,
                         command_receiver,
+                        gauges,
                         shutdown_child,
                     ),
                 );
@@ -391,16 +408,6 @@ pub async fn run(
             })
             .expect("failed to spawn sync-directory thread")
     };
-
-    // One process-wide pull gate, shared by every path that starts a file
-    // byte-transfer: the peer sessions (live-sync / reconcile pulls) and the
-    // catalog's own recovery fetches (the connect-time missing-content sweep and
-    // deferred tag placement). Sharing one instance is what lets its
-    // `(file_id, content_hash)` dedup coalesce a sweep fetch against a
-    // concurrent reconcile pull for the same content, instead of racing two
-    // receives on the shared relay's per-chunk keys.
-    let pull_scheduler =
-        crate::peer::pull_scheduler::PullScheduler::new(configuration.max_concurrent_pulls);
 
     let catalog = catalog::CatalogWriter {
         configuration: configuration.clone(),
@@ -417,6 +424,7 @@ pub async fn run(
         command_sender: command_sender.clone(),
         event_sender,
         operations: operations.clone(),
+        activity: activity.catalog().clone(),
         shutdown: shutdown.token().child_token(),
     };
     let changes_handle = tokio::spawn(catalog.run(change_receiver));
@@ -537,10 +545,17 @@ async fn handle_sync_directories(
     last_known_hashes: HashMap<FileId, String>,
     change_sender: UnboundedSender<CatalogCommand>,
     command_receiver: UnboundedReceiver<SyncDirectoryCommand>,
+    gauges: crate::activity::SyncDirectoryGauges,
     shutdown: CancellationToken,
 ) {
-    let mut manager =
-        SyncDirectories::new(configuration, &paths, change_sender, command_receiver).await;
+    let mut manager = SyncDirectories::new(
+        configuration,
+        &paths,
+        change_sender,
+        command_receiver,
+        gauges,
+    )
+    .await;
 
     // Cooperative shutdown: `run` observes `shutdown` as a branch of its own
     // select loop and returns normally between whole events, so an in-flight

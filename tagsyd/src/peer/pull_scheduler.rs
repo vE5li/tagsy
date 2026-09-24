@@ -62,6 +62,9 @@ pub struct PullScheduler {
     /// Keys of pulls currently in flight (queued or running), so a duplicate
     /// submission for the same content is dropped rather than started twice.
     in_flight: Arc<Mutex<HashSet<(FileId, String)>>>,
+    /// The permit count `permits` was created with, so [`Self::load`] can
+    /// derive how many are taken.
+    max_concurrent: usize,
 }
 
 impl PullScheduler {
@@ -70,9 +73,11 @@ impl PullScheduler {
     /// silently stall all sync), matching the "at least make progress" spirit
     /// of the rest of the transfer stack.
     pub fn new(max_concurrent: usize) -> Self {
+        let max_concurrent = max_concurrent.max(1);
         Self {
-            permits: Arc::new(Semaphore::new(max_concurrent.max(1))),
+            permits: Arc::new(Semaphore::new(max_concurrent)),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            max_concurrent,
         }
     }
 
@@ -132,6 +137,15 @@ impl PullScheduler {
     #[cfg(test)]
     pub fn available_permits(&self) -> usize {
         self.permits.available_permits()
+    }
+
+    /// `(queued, running)` pulls right now. A pull holds its dedup entry from
+    /// submission until its job finishes, and a permit only while running, so
+    /// the difference is the queue.
+    pub async fn load(&self) -> (u64, u64) {
+        let in_flight = self.in_flight.lock().await.len();
+        let running = self.max_concurrent - self.permits.available_permits();
+        (in_flight.saturating_sub(running) as u64, running as u64)
     }
 }
 

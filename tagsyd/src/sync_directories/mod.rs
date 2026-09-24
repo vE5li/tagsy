@@ -294,6 +294,9 @@ pub struct SyncDirectories {
     /// still get a preview generated retroactively. Live changes already flow
     /// through `handle_content_change`, which warms them itself.
     eager_previews: bool,
+    /// Activity gauges for this actor and its watcher (see
+    /// [`crate::activity`]).
+    gauges: crate::activity::SyncDirectoryGauges,
 }
 
 impl SyncDirectories {
@@ -302,6 +305,7 @@ impl SyncDirectories {
         paths: &Paths,
         change_sender: tokio::sync::mpsc::UnboundedSender<CatalogCommand>,
         command_receiver: tokio::sync::mpsc::UnboundedReceiver<SyncDirectoryCommand>,
+        gauges: crate::activity::SyncDirectoryGauges,
     ) -> Self {
         // Each sync directory's configured debounce window, keyed on its root,
         // so the debouncer settles a directory's events on its own schedule.
@@ -318,9 +322,10 @@ impl SyncDirectories {
             })
             .collect();
 
-        let (mut dispatcher, watcher_events) = WatchDispatcher::new(debounce_windows)
-            .await
-            .expect("Failed to set up debouncer");
+        let (mut dispatcher, watcher_events) =
+            WatchDispatcher::new(debounce_windows, gauges.pending_filesystem_events.clone())
+                .await
+                .expect("Failed to set up debouncer");
 
         let eager_previews = configuration.preview_generation_policy.is_eager();
 
@@ -390,7 +395,13 @@ impl SyncDirectories {
             command_receiver,
             self_writes: Default::default(),
             eager_previews,
+            gauges,
         }
+    }
+
+    /// Messages waiting in either of this actor's two inboxes.
+    fn queued(&self) -> usize {
+        self.command_receiver.len() + self.watcher_events.len()
     }
 
     /// Retroactively warm the preview cache for a locally-present, *unchanged*
@@ -727,7 +738,17 @@ impl SyncDirectories {
         last_known_hashes: HashMap<FileId, String>,
         shutdown: CancellationToken,
     ) {
-        self.run_initial_sync(&last_known_hashes, &shutdown).await;
+        // The gauge is cloned out so the busy guard does not borrow `self`
+        // across the `&mut self` handlers below.
+        let inbox = self.gauges.inbox.clone();
+
+        {
+            let _busy = inbox.begin(self.queued());
+            self.run_initial_sync(&last_known_hashes, &shutdown).await;
+        }
+        self.gauges
+            .initial_scan_complete
+            .store(true, std::sync::atomic::Ordering::Release);
 
         log::info!("Directories are fully synced");
 
@@ -743,6 +764,7 @@ impl SyncDirectories {
                         break;
                     };
 
+                    let _busy = inbox.begin(self.queued());
                     if let Err(error) = self.handle_command(command).await {
                         log::error!("Failed to handle command: {:?}", error);
                     }
@@ -755,6 +777,7 @@ impl SyncDirectories {
 
                     log::debug!("Received event: {:?}", event);
 
+                    let _busy = inbox.begin(self.queued());
                     if let Err(error) = self.handle_event(event).await {
                         log::error!("Failed to handle event: {:?}", error);
                     }
@@ -826,7 +849,14 @@ mod tests {
         let paths = Paths::new(data_dir, None::<PathBuf>, data_dir.join("identity"));
         let (change_sender, _change_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (_command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
-        SyncDirectories::new(configuration, &paths, change_sender, command_receiver).await
+        SyncDirectories::new(
+            configuration,
+            &paths,
+            change_sender,
+            command_receiver,
+            Default::default(),
+        )
+        .await
     }
 
     /// `CreateFile` carrying a `FileToMove` renames the source into the file's
@@ -1046,8 +1076,14 @@ mod tests {
         let paths = Paths::new(&data_dir, None::<PathBuf>, data_dir.join("identity"));
         let (change_sender, mut change_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (_command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut manager =
-            SyncDirectories::new(configuration, &paths, change_sender, command_receiver).await;
+        let mut manager = SyncDirectories::new(
+            configuration,
+            &paths,
+            change_sender,
+            command_receiver,
+            Default::default(),
+        )
+        .await;
 
         // Materialize a received file: writes it under its file_id and tracks it.
         let file_id = FileId::new();
@@ -1126,8 +1162,14 @@ mod tests {
         let paths = Paths::new(data_dir, None::<PathBuf>, data_dir.join("identity"));
         let (change_sender, change_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (_command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let manager =
-            SyncDirectories::new(configuration, &paths, change_sender, command_receiver).await;
+        let manager = SyncDirectories::new(
+            configuration,
+            &paths,
+            change_sender,
+            command_receiver,
+            Default::default(),
+        )
+        .await;
         (manager, change_receiver)
     }
 
@@ -1307,7 +1349,14 @@ mod tests {
         let paths = Paths::new(&data_dir, None::<PathBuf>, data_dir.join("identity"));
         let (change_sender, _change_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (_command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
-        SyncDirectories::new(configuration, &paths, change_sender, command_receiver).await
+        SyncDirectories::new(
+            configuration,
+            &paths,
+            change_sender,
+            command_receiver,
+            Default::default(),
+        )
+        .await
     }
 
     /// Regression: when one materialized file fans out to multiple sync
@@ -1691,8 +1740,14 @@ mod tests {
         let paths = Paths::new(data_dir, None::<PathBuf>, data_dir.join("identity"));
         let (change_sender, change_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (_command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let manager =
-            SyncDirectories::new(configuration, &paths, change_sender, command_receiver).await;
+        let manager = SyncDirectories::new(
+            configuration,
+            &paths,
+            change_sender,
+            command_receiver,
+            Default::default(),
+        )
+        .await;
         (manager, change_receiver)
     }
 

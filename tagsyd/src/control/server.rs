@@ -559,6 +559,7 @@ async fn dispatch(
             *connection_events = Some(ConnectionStream::InProcess(api.subscribe_connections()));
             ControlResponse::ConnectionsSubscribed
         }
+        ControlRequest::Activity => ControlResponse::Activity(api.activity().await),
     }
 }
 

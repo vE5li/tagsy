@@ -18,7 +18,7 @@ pub mod debounce;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -49,8 +49,13 @@ impl WatchDispatcher {
     /// the debouncer's built-in fallback. Passing the windows in at
     /// construction (rather than registering them afterward) means every event
     /// is debounced correctly from the first one on.
+    ///
+    /// `pending_events` is kept equal to the number of events inside the
+    /// debounce window (updated under the debouncer's lock after every push and
+    /// extraction) so the activity API can see changes not yet delivered.
     pub async fn new(
         debounce_windows: Vec<(PathBuf, Duration)>,
+        pending_events: Arc<AtomicU64>,
     ) -> Result<
         (
             WatchDispatcher,
@@ -66,6 +71,7 @@ impl WatchDispatcher {
         let task = {
             let debouncer = debouncer.clone();
             let stop = stop.clone();
+            let pending_events = pending_events.clone();
 
             tokio::spawn(async move {
                 loop {
@@ -76,9 +82,12 @@ impl WatchDispatcher {
                     tokio::time::sleep(Duration::from_millis(250)).await;
 
                     let mut debouncer = debouncer.lock().unwrap();
+                    // Send before lowering the pending count, so an event is
+                    // always visible in one of the two places.
                     for event in debouncer.extract_finalized() {
                         let _ = event_sender.send(event);
                     }
+                    pending_events.store(debouncer.pending() as u64, Ordering::Relaxed);
                 }
             })
         };
@@ -86,7 +95,9 @@ impl WatchDispatcher {
         let watcher = RecommendedWatcher::new(
             move |result: Result<Event, notify::Error>| {
                 if let Ok(event) = result {
-                    debouncer.lock().unwrap().push_raw(event);
+                    let mut debouncer = debouncer.lock().unwrap();
+                    debouncer.push_raw(event);
+                    pending_events.store(debouncer.pending() as u64, Ordering::Relaxed);
                 }
             },
             notify::Config::default(),
@@ -227,7 +238,9 @@ mod tests {
         std::fs::create_dir_all(root.join("target/debug/deps")).unwrap();
         std::fs::create_dir_all(root.join("nested/keep")).unwrap();
 
-        let (mut dispatcher, _events) = WatchDispatcher::new(vec![]).await.unwrap();
+        let (mut dispatcher, _events) = WatchDispatcher::new(vec![], Default::default())
+            .await
+            .unwrap();
 
         // Prune anything whose path component is `target`.
         let prune = |candidate: &Path| candidate.components().any(|c| c.as_os_str() == "target");
@@ -256,7 +269,9 @@ mod tests {
         let root = temp_dir("idempotent");
         std::fs::create_dir_all(root.join("a/b")).unwrap();
 
-        let (mut dispatcher, _events) = WatchDispatcher::new(vec![]).await.unwrap();
+        let (mut dispatcher, _events) = WatchDispatcher::new(vec![], Default::default())
+            .await
+            .unwrap();
         let no_prune = |_: &Path| false;
 
         let first = dispatcher.watch_tree(&root, &no_prune);
@@ -275,7 +290,9 @@ mod tests {
         std::fs::create_dir_all(root.join("keep")).unwrap();
         std::fs::create_dir_all(root.join("build/out")).unwrap();
 
-        let (mut dispatcher, _events) = WatchDispatcher::new(vec![]).await.unwrap();
+        let (mut dispatcher, _events) = WatchDispatcher::new(vec![], Default::default())
+            .await
+            .unwrap();
 
         // First pass prunes build/.
         let prune_build =
@@ -307,7 +324,9 @@ mod tests {
         std::fs::create_dir_all(root.join("a/b/c")).unwrap();
         std::fs::create_dir_all(root.join("other")).unwrap();
 
-        let (mut dispatcher, _events) = WatchDispatcher::new(vec![]).await.unwrap();
+        let (mut dispatcher, _events) = WatchDispatcher::new(vec![], Default::default())
+            .await
+            .unwrap();
         dispatcher.watch_tree(&root, &|_: &Path| false);
 
         dispatcher.unwatch_tree(&root.join("a"));

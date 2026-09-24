@@ -238,6 +238,9 @@ pub enum ControlRequest {
     /// starts emitting [`ControlFrame::ConnectionEvent`]s on this connection;
     /// the response is [`ControlResponse::ConnectionsSubscribed`].
     SubscribeConnections,
+    /// Sample the daemon's actor activity. Answered with
+    /// [`ControlResponse::Activity`].
+    Activity,
 }
 
 /// The result of a [`ControlRequest`], returned as [`ControlFrame::Response`].
@@ -318,6 +321,9 @@ pub enum ControlResponse {
     /// The connection subscription was established; connection events will
     /// follow on this connection.
     ConnectionsSubscribed,
+    /// A sample of the daemon's actor activity (answer to
+    /// [`ControlRequest::Activity`]).
+    Activity(tagsy_api::ActivityInfo),
     /// The request failed. Carries the single UI-facing error type.
     Error(ApiError),
 }

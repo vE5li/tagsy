@@ -442,6 +442,11 @@ impl Debouncer {
         });
     }
 
+    /// Events still inside their debounce window.
+    pub fn pending(&self) -> usize {
+        self.queued.len()
+    }
+
     pub fn extract_finalized(&mut self) -> Vec<DebouncedEventKind> {
         let mut debounced_events = Vec::new();
 

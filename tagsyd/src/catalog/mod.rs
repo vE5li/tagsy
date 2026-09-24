@@ -89,6 +89,8 @@ pub struct CatalogWriter {
     pub command_sender: UnboundedSender<SyncDirectoryCommand>,
     pub event_sender: tokio::sync::broadcast::Sender<Change>,
     pub operations: operations::Operations,
+    /// This actor's inbox gauge, held busy for the duration of each command.
+    pub activity: crate::activity::InboxGauge,
     pub shutdown: CancellationToken,
 }
 
@@ -112,6 +114,7 @@ impl CatalogWriter {
             command_sender,
             event_sender,
             operations,
+            activity,
             shutdown,
         } = self;
 
@@ -136,6 +139,8 @@ impl CatalogWriter {
                     }
                 }
             };
+            // Busy until this iteration ends, whichever `continue` it takes.
+            let _busy = activity.begin(change_receiver.len());
 
             // Route the two bus message kinds. A `Fetch` is an on-demand request
             // for a file's bytes (from `tagsy edit`): satisfy it locally if we

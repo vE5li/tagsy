@@ -13,6 +13,7 @@ use tagsy_core::state::Change;
 use tagsy_core::{FileId, FileInfo, FileKind, Preview, TagId, TagStyle};
 use tokio::sync::broadcast;
 
+use crate::activity::ActivityInfo;
 use crate::connections::{ConnectedPeer, ConnectionEvent};
 use crate::operations::{Operation, OperationEvent};
 use crate::{
@@ -379,6 +380,10 @@ pub trait Backend {
     /// [`ConnectionStream`] whose [`recv`](ConnectionStream::recv) yields
     /// [`ConnectionUpdate`]s.
     fn subscribe_connections(&self) -> ConnectionStream;
+
+    /// Sample how much work the daemon currently has queued or in hand. See
+    /// [`ActivityInfo`] for how to turn samples into a quiescence check.
+    fn activity(&self) -> impl Future<Output = Result<ActivityInfo, ApiError>> + Send;
 }
 
 /// The transport-agnostic event stream returned by [`Backend::subscribe`].

@@ -102,6 +102,10 @@ impl Harness {
         let shutdown = CancellationToken::new();
         let pending_fetches = ChunkRelay::new(runtime_configuration.clone());
         let operations = Operations::new();
+        let pull_scheduler = tagsyd::peer::pull_scheduler::PullScheduler::new(
+            tagsyd::configuration::default_max_concurrent_pulls(),
+        );
+        let activity = tagsyd::activity::Activity::new(pull_scheduler.clone());
 
         let api = ApiService::new(
             main_db_path,
@@ -112,6 +116,7 @@ impl Harness {
             data_dir.join("fetch-temp"),
             operations.clone(),
             Connections::new(),
+            activity.clone(),
             Vec::new(),
             Vec::new(),
             compiled.clone(),
@@ -131,14 +136,13 @@ impl Harness {
             preview_scheduler: tagsyd::catalog::preview_scheduler::PreviewScheduler::new(
                 tagsyd::configuration::default_max_concurrent_preview_generations(),
             ),
-            pull_scheduler: tagsyd::peer::pull_scheduler::PullScheduler::new(
-                tagsyd::configuration::default_max_concurrent_pulls(),
-            ),
+            pull_scheduler,
             database,
             change_sender: change_sender.clone(),
             command_sender,
             event_sender,
             operations,
+            activity: activity.catalog().clone(),
             shutdown: shutdown.clone(),
         };
         tokio::spawn(catalog.run(change_receiver));
