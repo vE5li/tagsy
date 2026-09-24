@@ -153,6 +153,29 @@ final verification, not an attack to attribute. Don't add per-chunk hashing or
 blame machinery; if the trust model ever changes, that's the design decision to
 revisit, not a local patch.
 
+## Uploads go through the outbox
+
+An upload or edit through the API (CLI, app) hands the daemon a **path**; the
+daemon copies it into `data_dir/outbox/` — hashing while copying, fsynced —
+before announcing anything (`outbox.rs`). From then on the daemon holds its own
+copy: the caller may delete the source, the daemon may restart, and peers pull
+whenever they connect. The outbox is just another local holder: the relay
+answers local receives from it first, and it serves peers' chunk requests
+after the sync directories.
+
+This works because every client shares the daemon's host and user — the
+control socket's `0700` runtime directory is the whole local security model —
+so the daemon can read any path a client names. Don't reintroduce client-side
+byte serving over the socket (the old "provider"); it made uploads depend on a
+connected keeper and released files on the first "last chunk" served.
+
+An entry is dropped once it is no longer needed (file deleted, purged, or
+superseded by a newer recorded version) or its content is held elsewhere — a
+local sync directory, or a peer answering the peers-only offset-0 probe. The
+release runs at startup, on every peer connect, and periodically
+(`outbox_release_interval_ms`): recovery on the same footing as the
+connect-time sweep, never per-transfer acknowledgements.
+
 ## Reconciliation is additive, per-entry, and idempotent
 
 Manifest reconciliation (`peer/plan.rs`, `peer/plan_tags.rs`, `peer/plan_purge.rs`)

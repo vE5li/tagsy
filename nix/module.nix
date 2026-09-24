@@ -105,6 +105,11 @@ self: {
         # the fixed /run/tagsy/tagsy.sock — no XDG_RUNTIME_DIR guessing.
         RuntimeDirectory = "tagsy";
         RuntimeDirectoryMode = "0700";
+
+        # Uploads hand the daemon a path that it reads itself (the CLI runs as
+        # the same user, see above). Any sandboxing added here must keep the
+        # user's files readable: `ProtectHome = "read-only"` is fine,
+        # `ProtectHome = true` would break `tagsy upload` from $HOME.
       };
 
       environment =
