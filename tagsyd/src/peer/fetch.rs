@@ -101,6 +101,7 @@ pub(crate) async fn answer_local_chunk(
     // `answer_chunk_request` verifies against `content_hash` via the cache
     // (hashing once, then serving from the cache on subsequent chunks).
     let (respond_to, response) = tokio::sync::oneshot::channel();
+    let mut held_other_content = false;
     if command_sender
         .send(SyncDirectoryCommand::LocalPath {
             file_id,
@@ -110,17 +111,22 @@ pub(crate) async fn answer_local_chunk(
         && let Ok(Some(path)) = response.await
     {
         let source = FileBytes::FileToCopy(path.clone());
-        return Some(
-            transfer::answer_chunk_request(
-                &source,
-                Some(&path),
-                verified_hashes,
-                content_hash,
-                offset,
-                /* pre_verified */ false,
-            )
-            .await,
-        );
+        match transfer::answer_chunk_request(
+            &source,
+            Some(&path),
+            verified_hashes,
+            content_hash,
+            offset,
+            /* pre_verified */ false,
+        )
+        .await
+        {
+            ChunkAnswer::Data(bytes) => return Some(ChunkAnswer::Data(bytes)),
+            // We hold the file, but at another version — typically the one
+            // a local upload/edit is replacing, before its own placement has
+            // landed. The provider below may hold the requested content.
+            ChunkAnswer::Miss => held_other_content = true,
+        }
     }
 
     // 2. A temporary provider (CLI upload/edit in flight), trusted by its
@@ -140,7 +146,7 @@ pub(crate) async fn answer_local_chunk(
         );
     }
 
-    None
+    held_other_content.then_some(ChunkAnswer::Miss)
 }
 /// Spawn a **content-addressed receive** of `(file_id, content_hash)` into a
 /// fresh temp file, sourcing each chunk through the content-keyed relay.
