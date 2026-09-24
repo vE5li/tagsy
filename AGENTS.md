@@ -331,3 +331,28 @@ When the schema needs to change again — steps 1–4 all happen in
 
 This chain lets a restored v1 backup on a v3 build migrate v1 → v2 → v3
 on startup, permanently.
+
+## Known follow-ups
+
+Deliberately deferred; each is small and independent. Measure with the scale
+benchmark (`tagsyd/tests/multi_daemon/bench.rs`) before and after.
+
+- **Clock skew between devices.** Last-writer-wins compares wall-clock
+  stamps. Local stamps are strictly increasing (`tagsy_core::clock`), but a
+  device whose clock runs ahead can still beat a *later* change made on
+  another device. A hybrid logical clock — also advancing past every stamp
+  received from a peer — would make a local change always win over any change
+  this device had already seen.
+- **API reads re-initialize the catalog.** `ApiService::open_read` goes through
+  `CatalogStore::initialize`, re-running the schema statements, migrations and
+  a purge-reconciliation write transaction on every read. A plain read-only
+  connection would do; that work belongs to the writer's startup open.
+- **Uncached SQL.** `prepare` calls use the statement cache, but
+  `Connection::execute` / `query_row` still re-parse their SQL on every call.
+- **Receive temp files live under the system temp dir**
+  (`tagsy-transfer-*`, `tagsy-fetch-*`), so placing a received file can be a
+  cross-filesystem copy instead of a rename, and nothing cleans leftovers.
+  Move them under the data dir, next to `fetch-temp`.
+- **"Divergent history" is logged at ERROR** on every reconnect after
+  concurrent edits (`peer/plan.rs`), although it is now expected: histories may
+  differ, only the latest version must agree. Demote it, or merge histories.
