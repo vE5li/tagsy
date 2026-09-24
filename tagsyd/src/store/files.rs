@@ -34,6 +34,11 @@ use super::versions::VersionHistory;
 /// the first/last timestamps) with a single aggregate the
 /// `idx_file_versions_v1_latest` index (`file_id, version_number DESC`) covers.
 /// Callers splice it in and join `latest_version` on `file_id`.
+///
+/// This form aggregates **every** file's versions — right for a listing, but
+/// SQLite does not push a single-file filter from the outer query into the
+/// `GROUP BY`, so a per-file lookup must use [`LATEST_VERSION_CTE_ONE`]
+/// instead (running this once per result made search quadratic).
 const LATEST_VERSION_CTE: &str = "\
 WITH bounds AS (
     SELECT file_id,
@@ -56,6 +61,54 @@ latest_version AS (
     JOIN file_versions_v1 AS v ON v.file_id = b.file_id
     GROUP BY b.file_id
 )";
+
+/// [`LATEST_VERSION_CTE`] restricted to the one file bound as `?1`: an
+/// indexed lookup of that file's versions rather than a pass over all of them.
+const LATEST_VERSION_CTE_ONE: &str = "\
+WITH bounds AS (
+    SELECT file_id,
+           MIN(version_number) AS first_version,
+           MAX(version_number) AS latest_version
+    FROM file_versions_v1
+    WHERE file_id = ?1
+    GROUP BY file_id
+),
+latest_version AS (
+    SELECT b.file_id,
+           b.latest_version,
+           MAX(CASE WHEN v.version_number = b.latest_version THEN v.content_hash END) AS \
+                                      content_hash,
+           MAX(CASE WHEN v.version_number = b.latest_version THEN v.size END) AS size,
+           MAX(CASE WHEN v.version_number = b.first_version THEN v.observed_at END) AS \
+                                      first_recorded_at,
+           MAX(CASE WHEN v.version_number = b.latest_version THEN v.observed_at END) AS \
+                                      latest_change_at
+    FROM bounds AS b
+    JOIN file_versions_v1 AS v ON v.file_id = b.file_id
+    GROUP BY b.file_id
+)";
+
+/// Result sets at least this large are resolved by [`CatalogStore::file_infos`]
+/// in one aggregate pass over the whole catalog; smaller ones by per-file
+/// indexed lookups.
+const BULK_LOOKUP_THRESHOLD: usize = 64;
+
+/// The shortest prefix of `id` that no neighbour in `sorted_ids` (which must
+/// contain `id`) shares — the short id. Neighbours in sort order are the only
+/// candidates for the longest common prefix.
+fn unique_prefix_length(sorted_ids: &[String], id: &str) -> usize {
+    let position = sorted_ids
+        .binary_search_by(|candidate| candidate.as_str().cmp(id))
+        .expect("id is in the sorted set");
+    let mut required = 1;
+    if position > 0 {
+        required = required.max(common_prefix_length(id, &sorted_ids[position - 1]) + 1);
+    }
+    if position + 1 < sorted_ids.len() {
+        required = required.max(common_prefix_length(id, &sorted_ids[position + 1]) + 1);
+    }
+    required.clamp(1, id.len())
+}
 
 /// One row of [`CatalogStore::manifest_entries`]: a file id, its full
 /// [`VersionHistory`], the unix-millis timestamp of its latest version, the
@@ -541,7 +594,7 @@ impl CatalogStore {
             DeletedRule::Include => "",
         };
         let sql = format!(
-            "{LATEST_VERSION_CTE}
+            "{LATEST_VERSION_CTE_ONE}
              SELECT f.logical_path, agg.content_hash, agg.latest_version, agg.size, f.deleted,
                     agg.first_recorded_at, agg.latest_change_at
              FROM files_v2 AS f
@@ -635,23 +688,82 @@ impl CatalogStore {
         let mut sorted_ids: Vec<String> = files.iter().map(|f| f.file_id.to_string()).collect();
         sorted_ids.sort();
         for file in &mut files {
-            let id = file.file_id.to_string();
-            let position = sorted_ids
-                .binary_search(&id)
-                .expect("every file's id is in the sorted set");
-
-            let mut required = 1;
-            if position > 0 {
-                let predecessor = &sorted_ids[position - 1];
-                required = required.max(common_prefix_length(&id, predecessor) + 1);
-            }
-            if position + 1 < sorted_ids.len() {
-                let successor = &sorted_ids[position + 1];
-                required = required.max(common_prefix_length(&id, successor) + 1);
-            }
-            file.short_id_length = required.clamp(1, id.len());
+            file.short_id_length = unique_prefix_length(&sorted_ids, &file.file_id.to_string());
         }
 
+        Ok(files)
+    }
+
+    /// [`Self::file_info_from_id`] for many files at once, in `file_ids`
+    /// order. Ids with no listable row (unknown, no version yet, or tombstoned
+    /// under [`DeletedRule::Exclude`]) are skipped rather than failing — the
+    /// same tolerance search applies per id.
+    ///
+    /// A large set is resolved in one aggregate pass over the catalog, with
+    /// short ids computed in memory against every file id (the set
+    /// [`Self::shorten_file_id`] disambiguates against); a small one by
+    /// per-file indexed lookups, where a full pass would cost more.
+    pub fn file_infos(
+        &self,
+        file_ids: &[FileId],
+        deleted_rule: DeletedRule,
+    ) -> Result<Vec<FileInfo>, DatabaseError> {
+        if file_ids.len() < BULK_LOOKUP_THRESHOLD {
+            let mut files = Vec::with_capacity(file_ids.len());
+            for &file_id in file_ids {
+                match self.file_info_from_id(file_id, deleted_rule) {
+                    Ok(file) => files.push(file),
+                    Err(DatabaseError::MissingFile) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            return Ok(files);
+        }
+
+        let sql = format!(
+            "{LATEST_VERSION_CTE}
+             SELECT f.id, f.logical_path, agg.content_hash, agg.latest_version, agg.size,
+                    f.deleted, agg.first_recorded_at, agg.latest_change_at
+             FROM files_v2 AS f
+             JOIN latest_version AS agg
+               ON agg.file_id = f.id"
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let mut by_id: std::collections::HashMap<FileId, FileInfo> = statement
+            .query_map([], |row| {
+                Ok(FileInfo {
+                    file_id: row.get(0)?,
+                    logical_path: row.get(1)?,
+                    content_hash: row.get(2)?,
+                    version_number: row.get(3)?,
+                    size: row.get::<_, i64>(4)? as u64,
+                    short_id_length: 0,
+                    deleted: row.get::<_, i64>(5)? != 0,
+                    first_recorded_at: row.get(6)?,
+                    latest_change_at: row.get(7)?,
+                })
+            })?
+            .map(|row| row.map(|file| (file.file_id, file)))
+            .collect::<Result<_, _>>()?;
+
+        let mut sorted_ids: Vec<String> = self
+            .all_file_ids(DeletedRule::Include)?
+            .iter()
+            .map(FileId::to_string)
+            .collect();
+        sorted_ids.sort();
+
+        let mut files = Vec::with_capacity(file_ids.len());
+        for file_id in file_ids {
+            let Some(mut file) = by_id.remove(file_id) else {
+                continue;
+            };
+            if deleted_rule == DeletedRule::Exclude && file.deleted {
+                continue;
+            }
+            file.short_id_length = unique_prefix_length(&sorted_ids, &file_id.to_string());
+            files.push(file);
+        }
         Ok(files)
     }
 
@@ -845,6 +957,47 @@ mod tests {
     use super::*;
     use crate::clock::now_millis;
     use crate::store::fixtures::{file_id_from_hex, memory_db};
+
+    /// `file_infos` must agree with `file_info_from_id`, id for id and in
+    /// order, on both sides of the bulk threshold — including skipping
+    /// unknown and (under `Exclude`) tombstoned ids.
+    #[test]
+    fn file_infos_matches_per_file_lookups() {
+        for count in [3, BULK_LOOKUP_THRESHOLD + 10] {
+            let mut database = memory_db();
+            let mut ids = Vec::new();
+            for index in 0..count {
+                let id = FileId::new();
+                database
+                    .add_file(id, &LogicalPath::new(format!("f{index}")), 0)
+                    .unwrap();
+                database.record_version(id, "h1", "local", 1).unwrap();
+                database
+                    .record_version(id, &format!("h{index}"), "local", 2)
+                    .unwrap();
+                ids.push(id);
+            }
+            database.remove_file(ids[1], now_millis() + 1000).unwrap();
+            // Reverse order, plus an unknown id, to check order and skipping.
+            let mut query: Vec<FileId> = ids.iter().rev().copied().collect();
+            query.insert(1, FileId::new());
+
+            for rule in [DeletedRule::Exclude, DeletedRule::Include] {
+                let expected: Vec<String> = query
+                    .iter()
+                    .filter_map(|id| database.file_info_from_id(*id, rule).ok())
+                    .map(|file| format!("{file:?}"))
+                    .collect();
+                let actual: Vec<String> = database
+                    .file_infos(&query, rule)
+                    .unwrap()
+                    .iter()
+                    .map(|file| format!("{file:?}"))
+                    .collect();
+                assert_eq!(actual, expected, "count={count} rule={rule:?}");
+            }
+        }
+    }
 
     #[test]
     fn file_ids_matching_id_prefix_resolves_hex_prefix() {

@@ -159,20 +159,18 @@ impl ApiService {
         // that has no `file_versions` row yet (tagged before its content
         // materialized). Such a file is not listable, so skip it rather than
         // failing the whole query with `UnknownId`. Same tolerance for tags.
-        let mut files = Vec::new();
-        for file_id in database.file_ids_for_query(&terms, subtag_rule, deleted_rule)? {
-            match database.file_info_from_id(file_id, deleted_rule) {
-                Ok(file) => {
-                    // Under `Include` we want only the tombstoned files; the
-                    // live ones are handled by the standard `Exclude` path.
-                    if deleted_rule == DeletedRule::Include && !file.deleted {
-                        continue;
-                    }
-                    files.push(file);
-                }
-                Err(DatabaseError::MissingFile) => {}
-                Err(other) => return Err(other.into()),
-            }
+        //
+        // Resolved in bulk: one lookup per result used to scan the whole
+        // version table each time, which made search quadratic.
+        let file_ids: Vec<_> = database
+            .file_ids_for_query(&terms, subtag_rule, deleted_rule)?
+            .into_iter()
+            .collect();
+        let mut files = database.file_infos(&file_ids, deleted_rule)?;
+        // Under `Include` we want only the tombstoned files; the live ones are
+        // handled by the standard `Exclude` path.
+        if deleted_rule == DeletedRule::Include {
+            files.retain(|file| file.deleted);
         }
 
         let mut tags = Vec::new();
