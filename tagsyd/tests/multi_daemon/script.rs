@@ -327,6 +327,11 @@ async fn run(scenario: &Scenario, mode: Mode) -> Vec<(String, Snapshot)> {
     cluster.settle().await;
     eprintln!("[{mode:?} run] checking convergence");
     cluster.assert_converged();
+    // Every topology here has a node keeping everything, so each upload ends
+    // up held elsewhere (or deleted) and every outbox must drain.
+    for &node in roles.nodes.values() {
+        cluster.wait_for_empty_outbox(node).await;
+    }
     let result = cluster.normalized();
 
     if mode == Mode::Live {
