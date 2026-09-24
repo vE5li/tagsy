@@ -31,6 +31,11 @@ pub(crate) fn version_origin(change_origin: &ChangeOrigin) -> &str {
     }
 }
 
+/// Send `change` to every connected peer except the one it came from.
+///
+/// Excluding only the immediate sender is sufficient because the peer graph is
+/// required to be a tree (see AGENTS.md, "Peer topology is a tree"): there is
+/// no seen-set or hop limit, so on a cycle a change would circulate forever.
 pub(crate) async fn forward_to_peers(
     configuration: &Configuration,
     runtime_configuration: &Arc<RwLock<RuntimeConfiguration>>,

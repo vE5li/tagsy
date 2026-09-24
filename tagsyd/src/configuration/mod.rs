@@ -209,6 +209,13 @@ pub fn default_purge_manifest_batch_size() -> usize {
     5000
 }
 
+/// Default for [`Configuration::reconnect_interval_ms`]: 5 s between dial
+/// attempts — quick enough that a peer coming back online is picked up
+/// promptly, slow enough not to spin against one that is down.
+pub fn default_reconnect_interval_ms() -> u64 {
+    5000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Configuration {
     /// Synchronized directories on the device itself.
@@ -282,6 +289,12 @@ pub struct Configuration {
     /// behavior. Defaults to [`default_purge_manifest_batch_size`].
     #[serde(default = "default_purge_manifest_batch_size")]
     pub purge_manifest_batch_size: usize,
+    /// Delay in milliseconds between outbound connection attempts to a peer
+    /// that is unreachable or whose link just dropped. Defaults to
+    /// [`default_reconnect_interval_ms`]. Mostly a knob for multi-daemon
+    /// tests, which would otherwise spend the full default per reconnect.
+    #[serde(default = "default_reconnect_interval_ms")]
+    pub reconnect_interval_ms: u64,
     /// Query → `argv` mapping consulted by the desktop UI's external-edit
     /// action. See [`EditorRule`]. Empty (the default) means no file has an
     /// external editor and the UI reports that rather than guessing. The

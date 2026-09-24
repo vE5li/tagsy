@@ -104,6 +104,9 @@ pub struct PeerContext {
     /// Max purged file ids per `Sync::PurgeManifest` frame. From
     /// `Configuration::purge_manifest_batch_size`.
     pub purge_manifest_batch_size: usize,
+    /// Delay between outbound dial attempts (`connect_to_peer`). From
+    /// `Configuration::reconnect_interval_ms`. Unused by the session itself.
+    pub reconnect_interval: std::time::Duration,
 }
 
 /// Drive a fully-handshaken WebSocket connection until it closes.
@@ -144,6 +147,7 @@ pub async fn run_peer_session<S>(
         manifest_batch_size,
         tag_manifest_batch_size,
         purge_manifest_batch_size,
+        reconnect_interval: _,
     } = context;
 
     // Register this peer as connected for the life of the session. A connection

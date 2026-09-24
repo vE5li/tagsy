@@ -27,6 +27,7 @@ pub(crate) fn runtime_for_test() -> Arc<RwLock<RuntimeConfiguration>> {
         manifest_batch_size: crate::configuration::default_manifest_batch_size(),
         tag_manifest_batch_size: crate::configuration::default_tag_manifest_batch_size(),
         purge_manifest_batch_size: crate::configuration::default_purge_manifest_batch_size(),
+        reconnect_interval_ms: crate::configuration::default_reconnect_interval_ms(),
         editor_rules: Vec::new(),
         tag_rules: Vec::new(),
         home_sections: Vec::new(),

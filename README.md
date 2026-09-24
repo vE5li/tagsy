@@ -19,6 +19,8 @@ The upshot is that search is intentionally fuzzy: matching on any tag in a chain
 
 Sync is handled by `tagsyd`, running on every device. It's a true two-way sync (edits on any device propagate to the others, with conflicts resolved per-item) and it's push-based over persistent connections — changes show up on peers as they happen, with no polling.
 
+Devices connected through the `peers` configuration must form a **tree**: any two devices may be linked directly or through intermediaries, but there must be exactly one path between them. Cycles (e.g. A–B, B–C and C–A all configured) are not supported — changes are relayed hop by hop and would circulate forever.
+
 ## Searching
 
 A query is a list of chunks, all of which must match. A chunk is an optional `!` (negate), an optional prefix picking what to match against (`/t` tag, `/l` logical path, nothing at all for "either"), and a payload.

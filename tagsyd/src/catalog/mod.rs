@@ -157,7 +157,7 @@ impl CatalogWriter {
                     .await
                     {
                         let _ = respond_to.send(Ok(file_bytes));
-                        return;
+                        continue;
                     }
 
                     // Resolve the version's authoritative size (needed to bound the
@@ -170,7 +170,7 @@ impl CatalogWriter {
                         }
                         _ => {
                             let _ = respond_to.send(Err(messages::FetchError::NotAvailable));
-                            return;
+                            continue;
                         }
                     };
 

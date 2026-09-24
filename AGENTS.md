@@ -112,6 +112,17 @@ depends on all three and holds the server half. **The CLI must not depend on
 compiler-enforced fact and keeps the preview-generation stack out of the CLI
 build.
 
+## Peer topology is a tree
+
+The peer graph (the union of every device's `peers` configuration) must be a
+**tree**: exactly one path between any two devices. Cycles are unsupported by
+design, not an open bug. Forwarding (`catalog/forward.rs::forward_to_peers`)
+and the relays (`peer/relay/`) exclude only the immediate sender and carry no
+seen-set, hop count, or message id — and some changes are forwarded even when
+applying them locally was a no-op — so on a cycle they would circulate
+forever. Don't add dedup/TTL machinery to "support" cycles; that would be a
+design change, not a fix. Multi-daemon tests use lines/stars only.
+
 ## Content-addressed transfers
 
 All byte movement is **one mechanism**, and the reason it collapses to one is a

@@ -97,8 +97,7 @@ pub async fn connect_to_peer(
     context: PeerContext,
     shutdown: CancellationToken,
 ) {
-    // TODO: Make this configurable.
-    const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+    let retry_interval: Duration = context.reconnect_interval;
 
     let Some((ip, port)) = peer.address else {
         // Caller should have filtered these out, but be defensive.
@@ -136,7 +135,7 @@ pub async fn connect_to_peer(
                     Ok(handshake) => handshake,
                     Err(error) => {
                         log::error!("Cannot build handshake for peer {}: {error}", peer.name);
-                        tokio::time::sleep(RETRY_INTERVAL).await;
+                        tokio::time::sleep(retry_interval).await;
                         continue;
                     }
                 };
@@ -147,7 +146,7 @@ pub async fn connect_to_peer(
                     .await
                 {
                     log::warn!("Failed to send handshake to {}: {error}", peer.name);
-                    tokio::time::sleep(RETRY_INTERVAL).await;
+                    tokio::time::sleep(retry_interval).await;
                     continue;
                 }
 
@@ -156,12 +155,12 @@ pub async fn connect_to_peer(
                     Some(Ok(message)) => message.to_string(),
                     Some(Err(error)) => {
                         log::warn!("Handshake read error from {}: {error}", peer.name);
-                        tokio::time::sleep(RETRY_INTERVAL).await;
+                        tokio::time::sleep(retry_interval).await;
                         continue;
                     }
                     None => {
                         log::warn!("Peer {} closed before sending handshake", peer.name);
-                        tokio::time::sleep(RETRY_INTERVAL).await;
+                        tokio::time::sleep(retry_interval).await;
                         continue;
                     }
                 };
@@ -169,7 +168,7 @@ pub async fn connect_to_peer(
                     Ok(response) => response,
                     Err(error) => {
                         log::warn!("Invalid handshake JSON from {}: {error}", peer.name);
-                        tokio::time::sleep(RETRY_INTERVAL).await;
+                        tokio::time::sleep(retry_interval).await;
                         continue;
                     }
                 };
@@ -182,7 +181,7 @@ pub async fn connect_to_peer(
                         response.public_key,
                         peer.public_key
                     );
-                    tokio::time::sleep(RETRY_INTERVAL).await;
+                    tokio::time::sleep(retry_interval).await;
                     continue;
                 }
 
@@ -192,7 +191,7 @@ pub async fn connect_to_peer(
                         "Peer {} handshake verification failed ({error}); dropping connection",
                         peer.name
                     );
-                    tokio::time::sleep(RETRY_INTERVAL).await;
+                    tokio::time::sleep(retry_interval).await;
                     continue;
                 }
 
@@ -225,7 +224,7 @@ pub async fn connect_to_peer(
         }
         tokio::select! {
             _ = shutdown.cancelled() => return,
-            _ = tokio::time::sleep(RETRY_INTERVAL) => {}
+            _ = tokio::time::sleep(retry_interval) => {}
         }
     }
 }

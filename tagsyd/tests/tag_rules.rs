@@ -86,6 +86,7 @@ impl Harness {
             manifest_batch_size: tagsyd::configuration::default_manifest_batch_size(),
             tag_manifest_batch_size: tagsyd::configuration::default_tag_manifest_batch_size(),
             purge_manifest_batch_size: tagsyd::configuration::default_purge_manifest_batch_size(),
+            reconnect_interval_ms: tagsyd::configuration::default_reconnect_interval_ms(),
             editor_rules: Vec::new(),
             tag_rules,
             home_sections: Vec::new(),
