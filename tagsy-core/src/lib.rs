@@ -19,7 +19,10 @@ pub use tag_style::{BorderStyle, TagShape, TagStyle};
 /// which every node derives identically). Since all devices are operated by the
 /// same user and updated together, there is no compatibility range — a mismatch
 /// is fail-closed.
-pub const PROTOCOL_VERSION: u32 = 5;
+///
+/// 6: byte payloads (`Sync::ChunkData::bytes`, `Preview::Image::bytes`) are
+/// encoded as MessagePack binary instead of an array of integers.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 pub mod tag {
     use std::collections::HashMap;
@@ -555,6 +558,7 @@ pub mod state {
             file_id: FileId,
             content_hash: String,
             offset: u64,
+            #[serde(with = "serde_bytes")]
             bytes: Vec<u8>,
         },
         /// This direction cannot (any longer) serve `(file_id, content_hash,
@@ -663,6 +667,7 @@ pub enum Preview {
     /// (e.g. WebP/PNG) — self-describing, decoded directly by the UI — and
     /// `width`/`height` are its pixel dimensions for layout hints.
     Image {
+        #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
         width: u32,
         height: u32,
@@ -1353,5 +1358,45 @@ mod file_kind_tests {
         // Trailing-dot and multi-dot names use the final segment.
         assert_eq!(LogicalPath::new("archive.tar.gz").extension(), "gz");
         assert_eq!(kind_of("archive.tar.gz"), FileKind::Other);
+    }
+}
+
+#[cfg(test)]
+mod wire_encoding_tests {
+    use super::*;
+
+    /// Chunk and preview payloads cross the peer wire as MessagePack binary,
+    /// not integer arrays (see `PROTOCOL_VERSION` 6), and still round-trip.
+    #[test]
+    fn byte_payloads_are_encoded_as_binary() {
+        use state::{Frame, Sync};
+        let payload = vec![0xABu8; content::CHUNK_SIZE];
+        let frame = Frame::Sync(Sync::ChunkData {
+            file_id: FileId::new(),
+            content_hash: "h".repeat(64),
+            offset: 0,
+            bytes: payload.clone(),
+        });
+        let encoded = rmp_serde::to_vec_named(&frame).unwrap();
+        assert!(
+            encoded.len() < payload.len() + 256,
+            "{} bytes",
+            encoded.len()
+        );
+        let decoded: Frame = rmp_serde::from_slice(&encoded).unwrap();
+        assert!(matches!(decoded, Frame::Sync(Sync::ChunkData { bytes, .. }) if bytes == payload));
+
+        let preview = Preview::Image {
+            bytes: payload.clone(),
+            width: 1,
+            height: 1,
+        };
+        let encoded = rmp_serde::to_vec_named(&preview).unwrap();
+        assert!(
+            encoded.len() < payload.len() + 64,
+            "{} bytes",
+            encoded.len()
+        );
+        assert_eq!(rmp_serde::from_slice::<Preview>(&encoded).unwrap(), preview);
     }
 }

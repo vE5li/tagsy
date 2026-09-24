@@ -357,6 +357,7 @@ pub enum ControlFrame {
     /// Client -> daemon: the requested chunk. `last` marks end of file.
     ProviderChunkReply {
         chunk_id: u64,
+        #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
         last: bool,
     },
@@ -367,8 +368,10 @@ pub enum ControlFrame {
 /// The control protocol uses **binary msgpack** (via `rmp_serde`), not JSON
 /// text. This matters for the provider protocol: JSON encodes a `Vec<u8>` chunk
 /// as an array of decimal numbers (~4-6x blow-up), producing multi-hundred-KB
-/// frames that are both slow and fragile; msgpack encodes bytes compactly and
-/// unambiguously. It also mirrors the peer `Frame` wire format (also `rmp`).
+/// frames that are both slow and fragile. msgpack encodes bytes compactly —
+/// provided the field is marked `#[serde(with = "serde_bytes")]`; a plain
+/// `Vec<u8>` still becomes an array of integers. It also mirrors the peer
+/// `Frame` wire format (also `rmp`).
 pub fn encode_frame(frame: &ControlFrame) -> Result<Message, String> {
     let bytes = rmp_serde::to_vec_named(frame).map_err(|error| format!("serialize: {error}"))?;
     Ok(Message::binary(bytes))
@@ -434,6 +437,25 @@ mod tests {
             // Compare via debug repr (ControlFrame has no PartialEq).
             assert_eq!(format!("{frame:?}"), format!("{decoded:?}"));
         }
+    }
+
+    /// A chunk reply encodes its bytes as one binary blob: the frame is the
+    /// payload plus a small constant, not an integer array (~1.5x larger and
+    /// far slower to encode).
+    #[test]
+    fn chunk_reply_bytes_are_encoded_as_binary() {
+        let payload = vec![0xABu8; tagsy_core::content::CHUNK_SIZE];
+        let message = encode_frame(&ControlFrame::ProviderChunkReply {
+            chunk_id: 1,
+            bytes: payload.clone(),
+            last: false,
+        })
+        .expect("encode");
+        assert!(
+            message.len() < payload.len() + 64,
+            "{} bytes",
+            message.len()
+        );
     }
 
     /// A large chunk reply must not be mis-decoded as another variant (the
