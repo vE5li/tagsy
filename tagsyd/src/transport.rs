@@ -186,23 +186,23 @@ impl Backend for InProcessBackend {
         // local filesystem instead of the control socket.
         let (content_hash, size) = crate::file_bytes::hash_and_len(&path).await?;
         let source = crate::file_bytes::FileBytes::FileToCopy(path);
-        let file_id = self
-            .api
-            .upload_file(path_name, content_hash.clone(), size, tags)?;
         self.api
-            .register_provider(file_id, content_hash, std::sync::Arc::new(source))
-            .await;
-        Ok(file_id)
+            .upload_file(
+                path_name,
+                content_hash,
+                size,
+                tags,
+                std::sync::Arc::new(source),
+            )
+            .await
     }
 
     async fn edit_file(&self, file_id: FileId, path: PathBuf) -> Result<(), ApiError> {
         let (content_hash, size) = crate::file_bytes::hash_and_len(&path).await?;
         let source = crate::file_bytes::FileBytes::FileToCopy(path);
-        self.api.edit_file(file_id, content_hash.clone(), size)?;
         self.api
-            .register_provider(file_id, content_hash, std::sync::Arc::new(source))
-            .await;
-        Ok(())
+            .edit_file(file_id, content_hash, size, std::sync::Arc::new(source))
+            .await
     }
 
     async fn begin_edit(&self, file_id: FileId) -> Result<PathBuf, ApiError> {

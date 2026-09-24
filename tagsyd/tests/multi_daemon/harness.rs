@@ -318,6 +318,17 @@ impl Cluster {
         });
     }
 
+    /// Start every node, wait for every link, and settle — the starting point
+    /// for a scenario. Settling first matters: a fresh connection queues
+    /// reconcile work (manifests, the missing-content sweep) that would
+    /// otherwise race the scenario's first operations and make the outcome
+    /// timing-dependent.
+    pub async fn start_connected(&mut self) {
+        self.start_all().await;
+        self.wait_all_connected().await;
+        self.settle().await;
+    }
+
     pub async fn start_all(&mut self) {
         for id in self.node_ids().collect::<Vec<_>>() {
             if self.node(id).running.is_none() {

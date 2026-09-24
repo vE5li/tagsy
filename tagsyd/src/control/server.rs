@@ -414,16 +414,17 @@ async fn dispatch(
             size,
             tags,
         } => {
-            match api.upload_file(path_name, content_hash.clone(), size, tags) {
+            // This connection is the temporary provider: the daemon (for local
+            // placement) and peers pull the bytes from it on demand.
+            let source = std::sync::Arc::new(crate::peer::transfer::ProviderSource::new(
+                provider_req_tx.clone(),
+                provider_done_tx.clone(),
+            ));
+            match api
+                .upload_file(path_name, content_hash.clone(), size, tags, source)
+                .await
+            {
                 Ok(file_id) => {
-                    // Register this connection as the temporary provider so
-                    // peers can pull the bytes on demand.
-                    let source = std::sync::Arc::new(crate::peer::transfer::ProviderSource::new(
-                        provider_req_tx.clone(),
-                        provider_done_tx.clone(),
-                    ));
-                    api.register_provider(file_id, content_hash.clone(), source)
-                        .await;
                     *active_provider = Some((file_id, content_hash));
                     ControlResponse::FileId(file_id)
                 }
@@ -434,19 +435,22 @@ async fn dispatch(
             file_id,
             content_hash,
             size,
-        } => match api.edit_file(file_id, content_hash.clone(), size) {
-            Ok(()) => {
-                let source = std::sync::Arc::new(crate::peer::transfer::ProviderSource::new(
-                    provider_req_tx.clone(),
-                    provider_done_tx.clone(),
-                ));
-                api.register_provider(file_id, content_hash.clone(), source)
-                    .await;
-                *active_provider = Some((file_id, content_hash));
-                ControlResponse::Ok
+        } => {
+            let source = std::sync::Arc::new(crate::peer::transfer::ProviderSource::new(
+                provider_req_tx.clone(),
+                provider_done_tx.clone(),
+            ));
+            match api
+                .edit_file(file_id, content_hash.clone(), size, source)
+                .await
+            {
+                Ok(()) => {
+                    *active_provider = Some((file_id, content_hash));
+                    ControlResponse::Ok
+                }
+                Err(error) => ControlResponse::Error(error),
             }
-            Err(error) => ControlResponse::Error(error),
-        },
+        }
         ControlRequest::FetchFile {
             file_id,
             expected_hash,

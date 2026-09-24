@@ -28,12 +28,9 @@ fn hub_and_spoke() -> (Cluster, harness::NodeId, harness::NodeId, tagsy_core::Ta
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "API uploads are not placed in the uploader's own sync directories (announce_provided); \
-            only a later reconnect sweep places them"]
 async fn upload_on_spoke_reaches_hub() {
-    let (mut cluster, central, phone, phone_tag) = hub_and_spoke();
-    cluster.start_all().await;
-    cluster.wait_connected(central, phone).await;
+    let (mut cluster, _central, phone, phone_tag) = hub_and_spoke();
+    cluster.start_connected().await;
 
     cluster
         .upload(phone, "notes/today.txt", b"hello from the phone", vec![
@@ -48,11 +45,95 @@ async fn upload_on_spoke_reaches_hub() {
     cluster.assert_converged();
 }
 
+/// An API upload on the hub lands in its own Universal directory (and in the
+/// spoke's, since it carries the spoke's tag) — not just in its catalog.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_on_hub_is_stored_locally() {
+    let (mut cluster, central, _phone, phone_tag) = hub_and_spoke();
+    cluster.start_connected().await;
+
+    cluster
+        .upload(central, "from-central.txt", b"uploaded on the hub", vec![
+            phone_tag,
+        ])
+        .await;
+
+    cluster.settle().await;
+    cluster.assert_converged();
+}
+
+/// An API edit overwrites the uploader's own copies, not just the peers'.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_edit_updates_uploaders_directories() {
+    let (mut cluster, _central, phone, phone_tag) = hub_and_spoke();
+    cluster.start_connected().await;
+
+    let file_id = cluster
+        .upload(phone, "draft.txt", b"first draft", vec![phone_tag])
+        .await;
+    cluster.settle().await;
+    cluster.edit(phone, file_id, b"second draft, longer").await;
+
+    cluster.settle().await;
+    cluster.assert_converged();
+}
+
+/// Regression: an API upload used to skip the uploader's own directories, so
+/// the uploader's disk changed on its next reconnect (when the missing-content
+/// sweep placed the file). Live and reconnect must agree.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_upload_state_is_stable_across_reconnect() {
+    let (mut cluster, _central, phone, phone_tag) = hub_and_spoke();
+    cluster.start_connected().await;
+
+    cluster
+        .upload(phone, "notes/today.txt", b"hello from the phone", vec![
+            phone_tag,
+        ])
+        .await;
+    cluster.settle().await;
+    let live = cluster.normalized();
+
+    cluster.restart(phone).await;
+    cluster.wait_all_connected().await;
+    cluster.settle().await;
+
+    assert_same_state("live", &live, "after reconnect", &cluster.normalized());
+    cluster.assert_converged();
+}
+
+/// Assert two [`Cluster::normalized`] results match, printing per-part diffs.
+fn assert_same_state(
+    a_label: &str,
+    a: &[(String, snapshot::Snapshot)],
+    b_label: &str,
+    b: &[(String, snapshot::Snapshot)],
+) {
+    let mut failures = Vec::new();
+    let names: std::collections::BTreeSet<&String> =
+        a.iter().chain(b.iter()).map(|(name, _)| name).collect();
+    for name in names {
+        let find = |side: &[(String, snapshot::Snapshot)]| {
+            side.iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, s)| s.clone())
+                .unwrap_or_default()
+        };
+        if let Some(diff) = find(a).diff(&find(b)) {
+            failures.push(format!("{name} (- {a_label}, + {b_label}):\n{diff}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "states differ:\n\n{}",
+        failures.join("\n")
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn file_written_into_spoke_directory_reaches_hub() {
-    let (mut cluster, central, phone, _) = hub_and_spoke();
-    cluster.start_all().await;
-    cluster.wait_connected(central, phone).await;
+    let (mut cluster, _central, phone, _) = hub_and_spoke();
+    cluster.start_connected().await;
 
     cluster.write_file(phone, "phone", "photos/cat.jpg", b"not really a jpeg");
 
@@ -69,11 +150,8 @@ async fn local_fetch_keeps_catalog_writer_alive() {
 
     let mut cluster = Cluster::new();
     let central = cluster.add_node("central", vec![DirectorySpec::universal("store")]);
-    cluster.start_all().await;
+    cluster.start_connected().await;
 
-    // Dropped into the Universal directory, so the bytes are genuinely local
-    // (an API upload is only served from its provider; see
-    // `announce_provided`).
     let bytes = b"already local";
     cluster.write_file(central, "store", "local.txt", bytes);
     cluster.settle().await;

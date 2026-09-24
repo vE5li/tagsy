@@ -216,11 +216,12 @@ pub enum CatalogCommand {
         /// The announcing peer (stored in `file_versions.origin`).
         origin: ChangeOrigin,
     },
-    /// A locally-provided upload/edit: the client (CLI) holds the bytes and
-    /// serves them on demand (a temporary provider), so there is nothing to
-    /// place in a local sync directory. `handle_changes` records the file (for
-    /// `FileMetadataAdded`) and version, then announces the metadata-only
-    /// change to peers, which pull the bytes from the registered provider.
+    /// A locally-provided upload/edit: the client (CLI / UI) holds the bytes
+    /// and serves them on demand from a temporary provider, registered before
+    /// this is sent. `handle_changes` records the file (for
+    /// `FileMetadataAdded`) and version, announces the metadata-only change to
+    /// peers, and pulls the bytes from the provider into every matching local
+    /// sync directory — the same placement a peer-announced file gets.
     AnnounceProvided {
         file_id: FileId,
         /// `Some(logical_path)` for a new file (`FileMetadataAdded`); `None`

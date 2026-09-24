@@ -91,9 +91,13 @@ impl ApiService {
         // call returns, so `path` must remain readable until the daemon
         // restarts. See the method docs.
         let source = crate::file_bytes::FileBytes::FileToCopy(path);
-        self.edit_file(file_id, edited_hash.clone(), edited_size)?;
-        self.register_provider(file_id, edited_hash, std::sync::Arc::new(source))
-            .await;
+        self.edit_file(
+            file_id,
+            edited_hash,
+            edited_size,
+            std::sync::Arc::new(source),
+        )
+        .await?;
         Ok(EditOutcome { changed: true })
     }
 

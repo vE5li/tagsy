@@ -125,31 +125,65 @@ impl ApiService {
     /// Upload a file whose bytes the client provides on demand.
     ///
     /// The client has already computed `content_hash` (by streaming its own
-    /// file) and will serve the bytes chunk-by-chunk as a temporary provider;
-    /// no bytes are passed here. Mints a `FileId`, records the file + version,
-    /// and announces a metadata-only `FileMetadataAdded` to peers, which then
-    /// pull the content from the provider the control layer registers.
-    pub fn upload_file(
+    /// file) and serves the bytes chunk-by-chunk from `source`, a temporary
+    /// provider; no bytes are passed here. Mints a `FileId`, registers
+    /// `source`, then announces the upload: the catalog records the file and
+    /// version, places the bytes into every matching local sync directory
+    /// (pulled from `source` like from any other holder), and announces a
+    /// metadata-only `FileMetadataAdded` to peers.
+    ///
+    /// The provider is registered **before** the announcement so the local
+    /// placement pull the announcement triggers always finds it.
+    pub async fn upload_file(
         &self,
         path_name: String,
         content_hash: String,
         size: u64,
         tags: Vec<TagId>,
+        source: Arc<dyn ChunkSource>,
     ) -> Result<FileId, ApiError> {
         if path_name.trim().is_empty() {
             return Err(ApiError::InvalidArgument("path is empty".to_owned()));
         }
         let file_id = FileId::new();
-        self.change_sender
-            .send(CatalogCommand::AnnounceProvided {
-                file_id,
-                logical_path: Some(LogicalPath::new(path_name)),
-                content_hash,
-                size,
-                tags,
-            })
-            .map_err(|_| ApiError::Internal("runtime is shutting down".to_owned()))?;
+        self.announce_provided(
+            file_id,
+            Some(LogicalPath::new(path_name)),
+            content_hash,
+            size,
+            tags,
+            source,
+        )
+        .await?;
         Ok(file_id)
+    }
+
+    /// Register `source` for `(file_id, content_hash)`, then enqueue the
+    /// [`CatalogCommand::AnnounceProvided`]. Unregisters again if the runtime
+    /// is gone.
+    async fn announce_provided(
+        &self,
+        file_id: FileId,
+        logical_path: Option<LogicalPath>,
+        content_hash: String,
+        size: u64,
+        tags: Vec<TagId>,
+        source: Arc<dyn ChunkSource>,
+    ) -> Result<(), ApiError> {
+        self.register_provider(file_id, content_hash.clone(), source)
+            .await;
+        let announcement = CatalogCommand::AnnounceProvided {
+            file_id,
+            logical_path,
+            content_hash: content_hash.clone(),
+            size,
+            tags,
+        };
+        if self.change_sender.send(announcement).is_err() {
+            self.unregister_provider(file_id, &content_hash).await;
+            return Err(ApiError::Internal("runtime is shutting down".to_owned()));
+        }
+        Ok(())
     }
 
     /// Register a temporary chunk provider for a file the client is serving on
@@ -173,24 +207,18 @@ impl ApiService {
     }
 
     /// Replace the content of an existing file, provided on demand by the
-    /// client (see [`Self::upload_file`]). Records the new version and
-    /// announces a metadata-only `FileMetadataChanged` to peers, which pull
-    /// from the provider.
-    pub fn edit_file(
+    /// client from `source` (see [`Self::upload_file`]). Records the new
+    /// version, overwrites the file in every local sync directory that holds
+    /// it, and announces a metadata-only `FileMetadataChanged` to peers.
+    pub async fn edit_file(
         &self,
         file_id: FileId,
         content_hash: String,
         size: u64,
+        source: Arc<dyn ChunkSource>,
     ) -> Result<(), ApiError> {
-        self.change_sender
-            .send(CatalogCommand::AnnounceProvided {
-                file_id,
-                logical_path: None,
-                content_hash,
-                size,
-                tags: Vec::new(),
-            })
-            .map_err(|_| ApiError::Internal("runtime is shutting down".to_owned()))
+        self.announce_provided(file_id, None, content_hash, size, Vec::new(), source)
+            .await
     }
 
     /// Delete a file. Enqueues `Change::FileDeleted`, stamped with our wall

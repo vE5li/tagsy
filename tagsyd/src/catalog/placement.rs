@@ -245,20 +245,24 @@ pub(crate) async fn fetch_and_place_deferred(
         change_sender,
         operations,
         file_id,
-        logical_path,
-        file_tags,
+        messages::MaterializePlacement::Create {
+            logical_path,
+            tags: file_tags,
+        },
         latest_version,
     )
     .await;
 }
 
 /// Fetch a file's bytes on demand — keyed by its latest catalog version hash —
-/// and enqueue a [`CatalogCommand::Materialize`] to place them into every
-/// matching sync directory.
+/// and enqueue a [`CatalogCommand::Materialize`] with `placement` (create in
+/// every matching directory, or overwrite where held).
 ///
-/// Shared by the deferred tag-placement path ([`fetch_and_place_deferred`]) and
-/// the connect-time missing-content sweep. Both know a file *should* be local
-/// but hold no bytes, and both recover it the same way: one flood fetch, then
+/// Shared by the deferred tag-placement path ([`fetch_and_place_deferred`]),
+/// the connect-time missing-content sweep, and local placement of an API
+/// upload/edit (`announce_provided`, whose bytes come from the registered
+/// provider the relay asks first). All know a file *should* be local but hold
+/// no (current) bytes, and all recover it the same way: one fetch, then
 /// materialize. Takes only owned, `Send` data so the caller can spawn it off
 /// the single-threaded `handle_changes` consumer (awaiting a `fetch_via_relay`
 /// there would block the loop the resulting `Materialize` must be dequeued on).
@@ -280,8 +284,7 @@ pub(crate) async fn fetch_and_materialize(
     change_sender: &UnboundedSender<CatalogCommand>,
     operations: &Operations,
     file_id: FileId,
-    logical_path: LogicalPath,
-    file_tags: Vec<TagId>,
+    placement: messages::MaterializePlacement,
     latest_version: Option<(String, u64)>,
 ) {
     // Because the catalog is byte-independent, this hash is present for any file
@@ -376,10 +379,7 @@ pub(crate) async fn fetch_and_materialize(
                 origin: ChangeOrigin::Local {
                     directory_path: PathBuf::new(),
                 },
-                placement: messages::MaterializePlacement::Create {
-                    logical_path,
-                    tags: file_tags,
-                },
+                placement,
             }) {
                 log::error!(
                     "fetch_and_materialize: change channel closed; cannot materialize fetched \

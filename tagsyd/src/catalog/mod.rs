@@ -796,8 +796,10 @@ impl CatalogWriter {
                                 &change_sender,
                                 &operations,
                                 file_id,
-                                logical_path,
-                                file_tags,
+                                messages::MaterializePlacement::Create {
+                                    logical_path,
+                                    tags: file_tags,
+                                },
                                 Some((content_hash, size)),
                             )
                             .await;
@@ -1047,6 +1049,10 @@ impl CatalogWriter {
                         &runtime_configuration,
                         &mut database,
                         &event_sender,
+                        &pending_fetches,
+                        &pull_scheduler,
+                        &change_sender,
+                        &operations,
                         file_id,
                         logical_path,
                         content_hash,

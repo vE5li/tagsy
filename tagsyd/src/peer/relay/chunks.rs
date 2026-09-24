@@ -21,7 +21,9 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::configuration::RuntimeConfiguration;
 use crate::peer::relay::{PeerOutbound, RelayProtocol, Waiter, WaiterTable, short_hash};
-use crate::peer::transfer::{ChunkReply, ChunkSource};
+use crate::peer::transfer::{
+    ChunkAnswer, ChunkReply, ChunkSource, VerifiedHashCache, answer_chunk_request,
+};
 
 /// The content key identifying one canonical chunk across all peers.
 type ChunkKey = (FileId, String, u64);
@@ -154,6 +156,14 @@ impl ChunkRelay {
     /// request is directed there; when `None`, it floods to all connected
     /// neighbours. Coalesces onto an existing entry for the same key.
     ///
+    /// A registered provider for the content is asked first: it is simply the
+    /// nearest holder (distance zero), which is how an upload's own bytes reach
+    /// this node's sync directories through the ordinary receive path. Its
+    /// chunks are served inline, so they arrive in the order the receiver asks
+    /// for them — which keeps a remote provider's "last chunk served" release
+    /// signal from firing before the earlier chunks. A provider miss falls
+    /// through to the peers.
+    ///
     /// If there are no connected peers to ask, the reply is immediately a
     /// `ChunkMiss` (the receive then fails, as intended).
     pub async fn request_chunk_local(
@@ -164,6 +174,24 @@ impl ChunkRelay {
         toward: Option<&str>,
         reply_tx: tokio::sync::mpsc::UnboundedSender<ChunkReply>,
     ) {
+        if let Some(provider) = self.provider_for(file_id, &content_hash).await {
+            // Pre-verified by its registration key, exactly as when serving a
+            // peer (`answer_local_chunk`); the hash cache is never consulted.
+            let answer = answer_chunk_request(
+                &provider,
+                None,
+                &VerifiedHashCache::new(),
+                &content_hash,
+                offset,
+                /* pre_verified */ true,
+            )
+            .await;
+            if let ChunkAnswer::Data(bytes) = answer {
+                let _ = reply_tx.send(ChunkReply::Data { offset, bytes });
+                return;
+            }
+        }
+
         let key = (file_id, content_hash.clone(), offset);
 
         // Choose the upstream neighbours to forward to.

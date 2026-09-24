@@ -1124,8 +1124,9 @@ pub(crate) async fn materialize(
     });
 }
 
-/// `CatalogCommand::AnnounceProvided`: a local client (CLI) uploaded/edited a
-/// file it serves on demand — record it locally and announce metadata-only.
+/// `CatalogCommand::AnnounceProvided`: a local client (CLI / UI) uploaded or
+/// edited a file it serves on demand — record it, announce it metadata-only,
+/// and place its bytes into this node's own matching sync directories.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn announce_provided(
     configuration: &Configuration,
@@ -1133,17 +1134,22 @@ pub(crate) async fn announce_provided(
     runtime_configuration: &Arc<RwLock<RuntimeConfiguration>>,
     database: &mut CatalogStore,
     event_sender: &tokio::sync::broadcast::Sender<Change>,
+    pending_fetches: &ChunkRelay,
+    pull_scheduler: &crate::peer::pull_scheduler::PullScheduler,
+    change_sender: &UnboundedSender<CatalogCommand>,
+    operations: &operations::Operations,
     file_id: tagsy_core::FileId,
     logical_path: Option<tagsy_core::LogicalPath>,
     content_hash: String,
     size: u64,
     mut tags: Vec<TagId>,
 ) {
-    // A local client (CLI) uploaded/edited a file it serves on
-    // demand. Record it locally and announce metadata-only to peers;
-    // peers pull the bytes from the registered provider. No local
-    // sync-directory placement: a CLI upload targets peers (files
-    // already in a sync directory are synced without the CLI).
+    // A local client uploaded/edited a file it serves on demand from a
+    // registered provider. Record it, announce metadata-only to peers (who
+    // pull from the provider), and place it into our own matching sync
+    // directories exactly as if a peer had announced it (see the end of this
+    // function) — so the result is the same whether this device later
+    // reconnects or not.
     //
     // This device is the *origin* of the version: stamp `observed_at` once with
     // our wall clock and carry the identical value to both the local
@@ -1232,6 +1238,55 @@ pub(crate) async fn announce_provided(
         );
     }
     super::forward::forward_to_peers(configuration, runtime_configuration, &change, &origin).await;
+
+    // Local placement: pull the bytes from the registered provider (the
+    // relay asks it before any peer) and `Materialize` them, the same
+    // pipeline a peer-announced file takes. A new file is created in every
+    // matching directory; an edit overwrites the directories holding it.
+    //
+    // Skipped when no local directory would take the file: a pull then would
+    // only consume the provider (a remote provider releases itself after one
+    // full transfer) before the peers that do want it get their turn.
+    let (placement, placement_tags) = match &change {
+        Change::FileMetadataAdded {
+            logical_path, tags, ..
+        } => (
+            messages::MaterializePlacement::Create {
+                logical_path: logical_path.clone(),
+                tags: tags.clone(),
+            },
+            tags.clone(),
+        ),
+        _ => (
+            messages::MaterializePlacement::Change,
+            database
+                .tag_ids_for_file(file_id, store::SubtagRule::Exclude)
+                .map(|tags| tags.into_iter().collect())
+                .unwrap_or_default(),
+        ),
+    };
+    if !placement::placements_for(configuration, &origin, file_id, &placement_tags).is_empty() {
+        let pending_fetches = pending_fetches.clone();
+        let pull_scheduler = pull_scheduler.clone();
+        let change_sender = change_sender.clone();
+        let operations = operations.clone();
+        let latest_version = Some((content_hash, size));
+        // Spawned, never awaited: the pull ends by enqueueing a `Materialize`
+        // onto this actor's own inbox (see `ReconcilePlacement`).
+        tokio::spawn(async move {
+            placement::fetch_and_materialize(
+                &pending_fetches,
+                &pull_scheduler,
+                &change_sender,
+                &operations,
+                file_id,
+                placement,
+                latest_version,
+            )
+            .await;
+        });
+    }
+
     // Publish to UI-facing API subscribers so an open file view
     // picks up the new version on the device that *made* the edit.
     // Peers learn of it through the forwarded `Change` above, which
