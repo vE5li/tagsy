@@ -9,6 +9,7 @@
 //! `RUST_LOG=tagsyd=debug` for daemon logs. A failing test keeps its data
 //! directory and prints its path.
 
+mod bench;
 mod harness;
 mod scenarios;
 mod script;

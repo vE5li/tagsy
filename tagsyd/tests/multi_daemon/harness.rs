@@ -39,6 +39,10 @@ const TEST_DEBOUNCE_MS: u64 = 100;
 /// Fast redial so reconnect tests don't wait out the 5 s default.
 const TEST_RECONNECT_INTERVAL_MS: u64 = 100;
 
+/// Messages handled so far by one node's catalog writer, sync-directory
+/// actor and peer sessions: unchanged across two samples means it did nothing.
+type ProcessedCounts = (u64, u64, u64);
+
 /// Handle to a node in a [`Cluster`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeId(usize);
@@ -207,6 +211,10 @@ impl Cluster {
 
     fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
         (0..self.nodes.len()).map(NodeId)
+    }
+
+    pub fn is_running(&self, id: NodeId) -> bool {
+        self.node(id).running.is_some()
     }
 
     fn running_ids(&self) -> Vec<NodeId> {
@@ -418,8 +426,15 @@ impl Cluster {
     /// redial toward a stopped peer), and no message handled anywhere for
     /// [`QUIET_WINDOW`].
     pub async fn settle(&self) {
-        let deadline = Instant::now() + SETTLE_TIMEOUT;
-        let mut quiet_since: Option<(Instant, Vec<(u64, u64, u64)>)> = None;
+        self.settle_within(SETTLE_TIMEOUT).await;
+    }
+
+    /// [`Self::settle`] with an explicit deadline, for benchmark phases that
+    /// legitimately take minutes. Returns when the quiet period *began* — the
+    /// moment the last work finished — so timings exclude the quiet window.
+    pub async fn settle_within(&self, timeout: Duration) -> Instant {
+        let deadline = Instant::now() + timeout;
+        let mut quiet_since: Option<(Instant, Vec<ProcessedCounts>)> = None;
         loop {
             let mut idle = true;
             let mut fingerprint = Vec::new();
@@ -453,7 +468,7 @@ impl Cluster {
                 (_, false) => quiet_since = None,
                 (Some((since, previous)), true) if *previous == fingerprint => {
                     if now.duration_since(*since) >= QUIET_WINDOW {
-                        return;
+                        return *since;
                     }
                 }
                 (_, true) => quiet_since = Some((now, fingerprint)),
@@ -461,10 +476,15 @@ impl Cluster {
 
             assert!(
                 now < deadline,
-                "cluster did not settle within {SETTLE_TIMEOUT:?}:\n{report}"
+                "cluster did not settle within {timeout:?}:\n{report}"
             );
             tokio::time::sleep(POLL_INTERVAL).await;
         }
+    }
+
+    /// A node's main catalog database.
+    pub fn main_db_path(&self, id: NodeId) -> PathBuf {
+        self.node(id).data_dir().join("main.db")
     }
 
     /// Read a node's catalog (works whether or not the node is running).
