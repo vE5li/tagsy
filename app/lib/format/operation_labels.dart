@@ -2,7 +2,7 @@
 // an icon and a human label.
 //
 // The daemon's `OperationKind` is flattened to a stable string at the FFI
-// boundary (`flatten_kind` in tagsy-bridge/src/api.rs); the operations screen
+// boundary (`flatten_kind` in tagsy-bridge/src/api.rs); the status sheet
 // then switches on that string to pick an icon and label. Those were two
 // parallel `switch`es that silently fell through to a generic
 // icon/raw-string if a new kind was added on the Rust side. This one table
@@ -27,6 +27,7 @@ const Map<String, OperationLabel> kOperationLabels = {
   'reconciling_manifest': (Icons.compare_arrows, 'Reconciling manifest'),
   'reconciling_tags': (Icons.compare_arrows, 'Reconciling tags'),
   'placing_file': (Icons.place, 'Placing file'),
+  'scanning_sync_directories': (Icons.manage_search, 'Scanning sync directories'),
 };
 
 /// The icon for [kind], or [Icons.pending] for an unknown kind (a kind the

@@ -24,6 +24,7 @@ const Set<String> _bridgeKinds = {
   'reconciling_manifest',
   'reconciling_tags',
   'placing_file',
+  'scanning_sync_directories',
 };
 
 void main() {

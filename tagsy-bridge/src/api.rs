@@ -575,6 +575,9 @@ fn flatten_kind(kind: &OperationKind) -> (String, Option<String>, Option<String>
         OperationKind::PlacingFile { file_id } => {
             ("placing_file".to_owned(), None, Some(file_id.clone()))
         }
+        OperationKind::ScanningSyncDirectories => {
+            ("scanning_sync_directories".to_owned(), None, None)
+        }
     }
 }
 

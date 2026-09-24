@@ -392,6 +392,7 @@ pub async fn run(
         let paths = paths.clone();
         let change_sender = change_sender.clone();
         let gauges = activity.sync_directories().clone();
+        let operations = operations.clone();
         let shutdown_child = shutdown.token().child_token();
 
         std::thread::Builder::new()
@@ -412,6 +413,7 @@ pub async fn run(
                         change_sender,
                         command_receiver,
                         gauges,
+                        operations,
                         shutdown_child,
                     ),
                 );
@@ -571,6 +573,7 @@ async fn handle_sync_directories(
     change_sender: UnboundedSender<CatalogCommand>,
     command_receiver: UnboundedReceiver<SyncDirectoryCommand>,
     gauges: crate::activity::SyncDirectoryGauges,
+    operations: crate::operations::Operations,
     shutdown: CancellationToken,
 ) {
     let mut manager = SyncDirectories::new(
@@ -587,5 +590,5 @@ async fn handle_sync_directories(
     // handler (which `.await`s file I/O) is never dropped mid-write. Do not
     // wrap this in an outer `select!` that races the token against `run` — that
     // is exactly the abrupt cancellation the cooperative loop exists to avoid.
-    manager.run(last_known_hashes, shutdown).await;
+    manager.run(last_known_hashes, shutdown, operations).await;
 }

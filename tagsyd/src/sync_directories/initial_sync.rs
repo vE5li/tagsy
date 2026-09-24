@@ -22,7 +22,50 @@ use walkdir::WalkDir;
 
 use super::{OpenDirectory, SyncDirectories};
 use crate::configuration::SyncType;
+use crate::operations::{OperationHandle, OperationKind, Operations};
 use crate::store::SyncDirectoryFile;
+
+/// The startup scan as a live operation: counts files checked across every
+/// sync directory, reporting at most every [`ScanProgress::INTERVAL`] so a
+/// large scan does not flood the operation stream with one event per file.
+struct ScanProgress {
+    operations: Operations,
+    handle: OperationHandle,
+    checked: u64,
+    last_report: std::time::Instant,
+}
+
+impl ScanProgress {
+    const INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+    fn begin(operations: &Operations) -> Self {
+        Self {
+            operations: operations.clone(),
+            handle: operations.begin(OperationKind::scanning_sync_directories()),
+            checked: 0,
+            last_report: std::time::Instant::now(),
+        }
+    }
+
+    /// One more file checked.
+    fn tick(&mut self) {
+        self.checked += 1;
+        if self.last_report.elapsed() >= Self::INTERVAL {
+            self.report();
+        }
+    }
+
+    fn report(&mut self) {
+        self.operations
+            .report_progress(self.handle.id(), self.checked, None);
+        self.last_report = std::time::Instant::now();
+    }
+
+    fn complete(mut self) {
+        self.report();
+        self.handle.complete();
+    }
+}
 
 /// How a sync directory names and ingests files — the axis the two initial-sync
 /// passes differ on. Derived from a directory's [`SyncType`].
@@ -48,10 +91,12 @@ impl SyncDirectories {
         files: Vec<SyncDirectoryFile>,
         naming: Naming<'_>,
         last_known_hashes: &HashMap<FileId, String>,
+        progress: &mut ScanProgress,
     ) {
         // Pass 1: tracked files. The only per-kind difference is the on-disk
         // name of a tracked file.
         for sync_file in files {
+            progress.tick();
             let relative_name = match naming {
                 Naming::ById => sync_file.file_id.to_string(),
                 Naming::ByPath { .. } => sync_file.physical_path.as_str().to_owned(),
@@ -141,6 +186,7 @@ impl SyncDirectories {
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().is_file())
         {
+            progress.tick();
             let Ok(relative_path) = entry.path().strip_prefix(&sync_directory.path) else {
                 // Should be impossible: `WalkDir` is rooted at the sync
                 // directory, so every entry is under it.
@@ -233,7 +279,10 @@ impl SyncDirectories {
         &mut self,
         last_known_hashes: &HashMap<FileId, String>,
         shutdown: &CancellationToken,
+        operations: &Operations,
     ) {
+        // Dropped un-completed (→ aborted) if shutdown interrupts the scan.
+        let mut progress = ScanProgress::begin(operations);
         for sync_directory in &self.sync_directories {
             // Cooperative shutdown: the initial sweep can be long (it hashes
             // every tracked file), so honour a shutdown between directories
@@ -262,8 +311,15 @@ impl SyncDirectories {
                 SyncType::Universal { .. } => Naming::ById,
                 SyncType::TagBased { tags } => Naming::ByPath { tags },
             };
-            self.initial_sync(sync_directory, files, naming, last_known_hashes)
-                .await;
+            self.initial_sync(
+                sync_directory,
+                files,
+                naming,
+                last_known_hashes,
+                &mut progress,
+            )
+            .await;
         }
+        progress.complete();
     }
 }

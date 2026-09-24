@@ -397,6 +397,7 @@ fn operation_kind_label(kind: &OperationKind) -> String {
         OperationKind::ReconcilingManifest { .. } => "Reconciling manifest".to_owned(),
         OperationKind::ReconcilingTags { .. } => "Reconciling tags".to_owned(),
         OperationKind::PlacingFile { .. } => "Placing file".to_owned(),
+        OperationKind::ScanningSyncDirectories => "Scanning sync directories".to_owned(),
     }
 }
 
@@ -407,7 +408,9 @@ fn operation_peer(kind: &OperationKind) -> Option<&str> {
         | OperationKind::ReceivingFile { peer_name, .. }
         | OperationKind::ReconcilingManifest { peer_name }
         | OperationKind::ReconcilingTags { peer_name } => Some(peer_name),
-        OperationKind::Fetching { .. } | OperationKind::PlacingFile { .. } => None,
+        OperationKind::Fetching { .. }
+        | OperationKind::PlacingFile { .. }
+        | OperationKind::ScanningSyncDirectories => None,
     }
 }
 
@@ -419,7 +422,8 @@ fn operation_file(kind: &OperationKind) -> Option<&str> {
         | OperationKind::PlacingFile { file_id } => Some(file_id),
         OperationKind::ConnectingToPeer { .. }
         | OperationKind::ReconcilingManifest { .. }
-        | OperationKind::ReconcilingTags { .. } => None,
+        | OperationKind::ReconcilingTags { .. }
+        | OperationKind::ScanningSyncDirectories => None,
     }
 }
 

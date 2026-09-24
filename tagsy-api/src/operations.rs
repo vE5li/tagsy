@@ -72,6 +72,11 @@ pub enum OperationKind {
     ReconcilingTags { peer_name: String },
     /// Fetching a file to place it locally per a tag-based sync directory.
     PlacingFile { file_id: String },
+    /// The startup scan of every sync directory: checking tracked files for
+    /// changes made while the daemon was down, and ingesting new ones. Until it
+    /// completes, the sync directories answer no other request. Progress counts
+    /// files checked; the total is not known up front.
+    ScanningSyncDirectories,
 }
 
 /// Convenience constructors so call sites read naturally at the emit points.
@@ -112,6 +117,10 @@ impl OperationKind {
         OperationKind::PlacingFile {
             file_id: file_id.to_string(),
         }
+    }
+
+    pub fn scanning_sync_directories() -> Self {
+        OperationKind::ScanningSyncDirectories
     }
 }
 

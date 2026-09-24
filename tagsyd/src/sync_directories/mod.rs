@@ -736,6 +736,7 @@ impl SyncDirectories {
         &mut self,
         last_known_hashes: HashMap<FileId, String>,
         shutdown: CancellationToken,
+        operations: crate::operations::Operations,
     ) {
         // The gauge is cloned out so the busy guard does not borrow `self`
         // across the `&mut self` handlers below.
@@ -743,7 +744,8 @@ impl SyncDirectories {
 
         {
             let _busy = inbox.begin(self.queued());
-            self.run_initial_sync(&last_known_hashes, &shutdown).await;
+            self.run_initial_sync(&last_known_hashes, &shutdown, &operations)
+                .await;
         }
         self.gauges
             .initial_scan_complete
@@ -1848,7 +1850,11 @@ mod tests {
         // Delete it out-of-band, then reconcile.
         std::fs::remove_file(sync_dir.join(file_id.to_string())).unwrap();
         manager
-            .run_initial_sync(&HashMap::new(), &CancellationToken::new())
+            .run_initial_sync(
+                &HashMap::new(),
+                &CancellationToken::new(),
+                &crate::operations::Operations::new(),
+            )
             .await;
 
         let deletes: Vec<FileId> = drain(&mut rx).iter().filter_map(deleted_file_id).collect();
@@ -1886,9 +1892,31 @@ mod tests {
         std::fs::write(&path, b"v2-longer").unwrap();
         let last_known: HashMap<FileId, String> =
             HashMap::from([(file_id, blake3::hash(b"v1").to_hex().to_string())]);
+        let operations = crate::operations::Operations::new();
+        let mut operation_events = operations.subscribe();
         manager
-            .run_initial_sync(&last_known, &CancellationToken::new())
+            .run_initial_sync(&last_known, &CancellationToken::new(), &operations)
             .await;
+
+        // The scan surfaces as one operation that ends completed, having
+        // counted the file it checked.
+        let mut events = Vec::new();
+        while let Ok(event) = operation_events.try_recv() {
+            events.push(event.operation().clone());
+        }
+        let last = events
+            .last()
+            .expect("the scan was reported as an operation");
+        assert!(
+            events
+                .iter()
+                .all(|op| op.kind == crate::operations::OperationKind::ScanningSyncDirectories)
+        );
+        assert!(matches!(last.status, tagsy_api::OperationStatus::Completed));
+        assert!(events.iter().any(|op| matches!(
+            op.status,
+            tagsy_api::OperationStatus::Active { progress: Some(progress) } if progress.done >= 1
+        )));
 
         let changed: Vec<FileId> = drain(&mut rx).iter().filter_map(changed_file_id).collect();
         assert_eq!(
@@ -1909,7 +1937,11 @@ mod tests {
 
         std::fs::write(sync_dir.join("dropped.txt"), b"new-bytes").unwrap();
         manager
-            .run_initial_sync(&HashMap::new(), &CancellationToken::new())
+            .run_initial_sync(
+                &HashMap::new(),
+                &CancellationToken::new(),
+                &crate::operations::Operations::new(),
+            )
             .await;
 
         let adds: Vec<Vec<TagId>> = drain(&mut rx).iter().filter_map(added_tags).collect();
@@ -1945,7 +1977,11 @@ mod tests {
 
         std::fs::remove_file(sync_dir.join("notes/todo.md")).unwrap();
         manager
-            .run_initial_sync(&HashMap::new(), &CancellationToken::new())
+            .run_initial_sync(
+                &HashMap::new(),
+                &CancellationToken::new(),
+                &crate::operations::Operations::new(),
+            )
             .await;
 
         let deletes: Vec<FileId> = drain(&mut rx).iter().filter_map(deleted_file_id).collect();
@@ -1968,7 +2004,11 @@ mod tests {
 
         std::fs::write(sync_dir.join("report.md"), b"new-bytes").unwrap();
         manager
-            .run_initial_sync(&HashMap::new(), &CancellationToken::new())
+            .run_initial_sync(
+                &HashMap::new(),
+                &CancellationToken::new(),
+                &crate::operations::Operations::new(),
+            )
             .await;
 
         let adds: Vec<Vec<TagId>> = drain(&mut rx).iter().filter_map(added_tags).collect();
