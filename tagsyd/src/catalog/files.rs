@@ -1052,15 +1052,27 @@ pub(crate) async fn materialize(
         content_hash
     );
 
-    // The file may have been deleted while its bytes were in flight (a user
-    // deletes it while a sweep or pull is fetching it). Placing them now would
-    // resurrect it on disk under a tombstoned catalog entry.
-    if matches!(database.file_deletion_state(file_id), Ok(Some(state)) if state.deleted) {
-        log::debug!(
-            "Materialize: {} was deleted while its bytes were in flight; not placing",
-            file_id.to_string()
-        );
-        return;
+    // The file may have been deleted — or purged, which strips its row
+    // entirely — while its bytes were in flight (e.g. a user deletes it while a
+    // sweep or pull is fetching it). Placing them now would put a file on disk
+    // that the catalog says is gone. Only a live catalog row gets bytes.
+    match database.file_deletion_state(file_id) {
+        Ok(Some(state)) if !state.deleted => {}
+        Ok(state) => {
+            log::debug!(
+                "Materialize: {} is {} in the catalog; not placing its bytes",
+                file_id.to_string(),
+                if state.is_some() { "deleted" } else { "gone" }
+            );
+            return;
+        }
+        Err(error) => {
+            log::error!(
+                "Materialize: failed to read deletion state for {}: {error:?}; not placing",
+                file_id.to_string()
+            );
+            return;
+        }
     }
 
     // Only the catalog's current latest version belongs on disk. Bytes of an
