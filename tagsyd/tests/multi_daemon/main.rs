@@ -10,6 +10,8 @@
 //! directory and prints its path.
 
 mod harness;
+mod scenarios;
+mod script;
 mod snapshot;
 
 use harness::{Cluster, DirectorySpec};
@@ -98,36 +100,8 @@ async fn api_upload_state_is_stable_across_reconnect() {
     cluster.wait_all_connected().await;
     cluster.settle().await;
 
-    assert_same_state("live", &live, "after reconnect", &cluster.normalized());
+    script::assert_same_state("live", &live, "after reconnect", &cluster.normalized());
     cluster.assert_converged();
-}
-
-/// Assert two [`Cluster::normalized`] results match, printing per-part diffs.
-fn assert_same_state(
-    a_label: &str,
-    a: &[(String, snapshot::Snapshot)],
-    b_label: &str,
-    b: &[(String, snapshot::Snapshot)],
-) {
-    let mut failures = Vec::new();
-    let names: std::collections::BTreeSet<&String> =
-        a.iter().chain(b.iter()).map(|(name, _)| name).collect();
-    for name in names {
-        let find = |side: &[(String, snapshot::Snapshot)]| {
-            side.iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, s)| s.clone())
-                .unwrap_or_default()
-        };
-        if let Some(diff) = find(a).diff(&find(b)) {
-            failures.push(format!("{name} (- {a_label}, + {b_label}):\n{diff}"));
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "states differ:\n\n{}",
-        failures.join("\n")
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

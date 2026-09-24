@@ -62,6 +62,17 @@ impl DirectorySpec {
         }
     }
 
+    /// A Universal directory with `keep_deleted_files`: deleted files' bytes
+    /// stay behind as a recovery vault, so a restore can find them.
+    pub fn vault(label: &str) -> Self {
+        Self {
+            label: label.to_owned(),
+            sync_type: SyncType::Universal {
+                keep_deleted_files: true,
+            },
+        }
+    }
+
     pub fn tag_based(label: &str, tags: &[TagId]) -> Self {
         Self {
             label: label.to_owned(),
@@ -619,13 +630,35 @@ fn describe(activity: &ActivityInfo) -> String {
     )
 }
 
-/// Reserve a free loopback port. The daemon binds it moments later; the gap
-/// is racy in principle but loopback ephemeral ports are not reused that fast.
+/// Pick a listen port for a node, kept for the node's lifetime (restarts
+/// rebind it).
+///
+/// Deliberately *below* the kernel's ephemeral range (Linux: 32768–60999):
+/// every outbound peer connection takes a local port from that range, so a
+/// listen port reserved there can be grabbed by some other node's dial before
+/// the daemon binds it — or while it is down for a restart. A process-wide
+/// counter hands out distinct ports, skipping any that are taken right now.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .expect("reserve a free port")
-        .port()
+    const FIRST: u16 = 20_000;
+    const LAST: u16 = 32_000;
+    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    // Offset by pid so concurrently running test binaries rarely overlap.
+    let _ = NEXT.compare_exchange(
+        0,
+        FIRST + (std::process::id() % 400) as u16 * 25,
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    loop {
+        let mut port = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if port > LAST {
+            NEXT.store(FIRST, std::sync::atomic::Ordering::Relaxed);
+            port = FIRST;
+        }
+        if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 fn write_creating_parents(path: &Path, bytes: &[u8]) {

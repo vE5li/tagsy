@@ -3,14 +3,25 @@
 //!
 //! There are two views of the same catalog, for two different comparisons:
 //!
-//! - [`CatalogState::exact`] — every replicated field, keyed by id, including
-//!   LWW timestamps and tombstones. Two nodes of the *same run* must match it
-//!   exactly: reconciliation carries stamps verbatim, and a tombstone that one
-//!   node has and another lacks changes how a future stale write resolves.
+//! - [`CatalogState::exact`] — the replicated state, keyed by id, including the
+//!   LWW clocks that decide it. Two nodes of the *same run* must match it
+//!   exactly: reconciliation carries stamps verbatim, and a relationship
+//!   tombstone one node has and another lacks changes how a future stale write
+//!   resolves.
 //! - [`CatalogState::normalized`] — ids replaced by logical paths / tag names,
 //!   timestamps and tombstones dropped. Two *different runs* of the same script
 //!   (live vs. reconnect) mint different ids and clocks, but must still end in
 //!   the same effective state.
+//!
+//! Two things are deliberately compared by effect only, because nodes are not
+//! meant to agree on them:
+//!
+//! - A file's delete/restore clocks (`deleted_at`, `restored_at`): a node drops
+//!   a peer's delete that it already holds or that loses LWW (`peer/plan.rs`),
+//!   so the clocks may differ while the `deleted` flag agrees.
+//! - A file's version history: concurrent edits on disconnected nodes leave
+//!   each with its own numbering (e.g. `[1, 2:B]` vs `[1, 2:A, 3:B]`). Only the
+//!   latest version — content, size and LWW stamp — must agree.
 //!
 //! The disk is checked per node against that node's own catalog
 //! ([`check_disk`]) rather than across nodes, because each node's directory
@@ -109,14 +120,13 @@ impl CatalogState {
     /// Every replicated field, keyed by id. See the module docs.
     pub fn exact(&self) -> Snapshot {
         let mut snapshot = Snapshot::default();
-        for (id, history, latest_at, path, path_at, deleted, deleted_at, restored_at) in &self.files
-        {
+        for (id, history, latest_at, path, path_at, deleted, ..) in &self.files {
             snapshot.push(format!(
-                "file {} path={} path_at={path_at} latest_at={latest_at} deleted={deleted} \
-                 deleted_at={deleted_at} restored_at={restored_at} history={}",
+                "file {} path={} path_at={path_at} deleted={deleted} latest={} \
+                 latest_at={latest_at}",
                 id.to_string(),
                 path.as_str(),
-                render_history(history),
+                render_latest(history),
             ));
         }
         for (tag, modified_at) in &self.tags {
@@ -163,9 +173,9 @@ impl CatalogState {
         let mut snapshot = Snapshot::default();
         for (_, history, _, path, _, deleted, ..) in &self.files {
             snapshot.push(format!(
-                "file {} deleted={deleted} history={}",
+                "file {} deleted={deleted} latest={}",
                 path.as_str(),
-                render_history(history),
+                render_latest(history),
             ));
         }
         for (tag, _) in &self.tags {
@@ -211,6 +221,15 @@ impl CatalogState {
             .collect()
     }
 
+    /// Tombstoned files as `(id, latest hash)`.
+    fn deleted_files(&self) -> Vec<(String, String)> {
+        self.files
+            .iter()
+            .filter(|row| row.5)
+            .filter_map(|row| Some((row.0.to_string(), row.1.last()?.1.clone())))
+            .collect()
+    }
+
     /// Each file's live *direct* tags — the set TagBased placement tests
     /// against (`SubtagRule::Exclude` in `plan_placement`).
     fn direct_tags(&self) -> BTreeMap<String, BTreeSet<TagId>> {
@@ -233,6 +252,9 @@ impl CatalogState {
 /// - TagBased: exactly the live files whose direct tags include all of the
 ///   directory's tags, at their logical paths, holding the latest bytes.
 ///
+/// A Universal directory with `keep_deleted_files` may additionally hold
+/// deleted files, provided their bytes are the latest version's.
+///
 /// Returns a diff of `expected` (`-`) against `actual` (`+`), or `None`.
 pub fn check_disk(
     catalog: &CatalogState,
@@ -241,10 +263,16 @@ pub fn check_disk(
 ) -> Option<String> {
     let live = catalog.live_files();
     let mut expected = Snapshot::default();
+    let mut actual = disk_contents(directory);
     match sync_type {
-        SyncType::Universal { .. } => {
+        SyncType::Universal { keep_deleted_files } => {
             for (id, (_, hash)) in &live {
                 expected.push(format!("{id} {}", short(hash)));
+            }
+            if *keep_deleted_files {
+                for (id, hash) in catalog.deleted_files() {
+                    actual.lines.remove(&format!("{id} {}", short(&hash)));
+                }
             }
         }
         SyncType::TagBased { tags } => {
@@ -258,7 +286,7 @@ pub fn check_disk(
             }
         }
     }
-    expected.diff(&disk_contents(directory)).map(|diff| {
+    expected.diff(&actual).map(|diff| {
         format!(
             "{} ({sync_type:?}) disagrees with its catalog (- expected, + on disk):\n{diff}",
             directory.display()
@@ -287,12 +315,14 @@ pub fn disk_contents(root: &Path) -> Snapshot {
     snapshot
 }
 
-fn render_history(history: &[(i64, String, i64)]) -> String {
-    let versions: Vec<String> = history
-        .iter()
-        .map(|(number, hash, size)| format!("{number}:{}:{size}", short(hash)))
-        .collect();
-    format!("[{}]", versions.join(","))
+/// The latest version as `hash:size` — deliberately without its number,
+/// which differs between nodes after concurrent edits (see the module docs).
+fn render_latest(history: &[(i64, String, i64)]) -> String {
+    history
+        .last()
+        .map_or("<none>".to_owned(), |(_, hash, size)| {
+            format!("{}:{size}", short(hash))
+        })
 }
 
 fn short(hash: &str) -> &str {
