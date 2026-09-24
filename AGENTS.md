@@ -11,6 +11,16 @@ repo is a Cargo workspace (`tagsy-core`, `tagsyd`, `tagsy`,
 This repo uses [`jj`](https://jj-vcs.github.io/jj/). Use the `jj` CLI for all
 version-control operations; do not invoke `git` directly.
 
+- **One change per self-contained step.** When a step is done and verified,
+  `jj describe -m "…"` then `jj new`. If the working copy mixes concerns, split
+  it with `jj split -m "…" <paths>`.
+- **Keep every change green on its own.** Fold a fix into the change that
+  introduced the problem (`jj squash --into <change> <paths>`), and reorder
+  when a later change is a prerequisite
+  (`jj rebase -r <change> --insert-before <other>`).
+- **Format with `jj fix`** (rustfmt, taplo), not ad-hoc formatter runs.
+- Don't rewrite changes you didn't make.
+
 ## Build / run
 
 Use the helper apps defined in `flake.nix` instead of raw `cargo` / `flutter`
@@ -28,6 +38,25 @@ See `flake.nix` for the full list and required env vars (e.g.
 `TAGSY_CONFIG`, `TAGSY_DEVICE`). `TAGSY_BACKUP_DIR` is where `tagsy backup`
 writes archives; unlike `TAGSY_DATA_DIR` it may be unset, in which case backup
 is unavailable.
+
+## Testing
+
+The **multi-daemon suite is the main indicator that tagsy behaves correctly**:
+`cargo test -p tagsyd --test multi_daemon` (~10 s). It runs real daemons over
+loopback (`tests/multi_daemon/harness.rs`) and checks every scenario twice —
+peers connected live, and peers offline then reconnecting — requiring both runs
+to converge to the same state (`snapshot.rs` defines "converged"; `script.rs`
+and `scenarios.rs` hold the scenarios).
+
+- Add a scenario for any change to sync behavior; a new bug gets a regression
+  test there first.
+- A failing or flaky scenario is a real bug (usually a race) until proven
+  otherwise. Trace it; don't lengthen timeouts, add retries, or loosen the
+  oracle. Anything compared by effect only is documented in `snapshot.rs`.
+- Confirm a fix by temporarily reintroducing the bug and watching the test
+  fail.
+- For performance, measure with the scale benchmark before and after:
+  `cargo test --release -p tagsyd --test multi_daemon scale_benchmark -- --ignored --nocapture`.
 
 ## Architecture
 
