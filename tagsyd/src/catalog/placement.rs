@@ -38,8 +38,11 @@ pub(crate) enum Placement {
         physical_path: PhysicalPath,
         sync_directory_path: PathBuf,
     },
+    /// Put a new version in place: overwrite where the directory holds the
+    /// file, create it at `logical_path`'s placement where it does not.
     Change {
         file_id: FileId,
+        logical_path: LogicalPath,
         sync_directory_path: PathBuf,
     },
 }
@@ -59,9 +62,11 @@ impl Placement {
             },
             Placement::Change {
                 file_id,
+                logical_path,
                 sync_directory_path,
             } => SyncDirectoryCommand::ChangeFile {
                 file_id,
+                logical_path,
                 content,
                 sync_directory_path,
             },
@@ -130,7 +135,8 @@ pub(crate) fn plan_placement(
     database: &CatalogStore,
     file_id: FileId,
 ) -> Option<DeferredPlacement> {
-    let logical_path = match database.logical_path_for_file_id(file_id) {
+    let logical_path = match database.logical_path_for_file_id(file_id, store::DeletedRule::Exclude)
+    {
         Ok(logical_path) => logical_path,
         // A tombstoned or unknown file has no live logical path to place into.
         // This is the expected, benign outcome for every deleted file the
@@ -391,12 +397,55 @@ pub(crate) async fn fetch_and_materialize(
         .await;
 }
 
+/// [`placements_for`] a new version of a *live* file, reading its logical
+/// path and direct tags from the catalog. Empty when the file is tombstoned
+/// (a version that did not overrule the delete places nothing) or unknown.
+pub(crate) fn live_placements(
+    configuration: &Configuration,
+    database: &CatalogStore,
+    change_origin: &ChangeOrigin,
+    file_id: FileId,
+) -> Vec<Placement> {
+    let logical_path = match database.logical_path_for_file_id(file_id, store::DeletedRule::Exclude)
+    {
+        Ok(logical_path) => logical_path,
+        Err(store::DatabaseError::MissingFile) => return Vec::new(),
+        Err(error) => {
+            log::error!(
+                "live_placements: failed to read logical path for {}: {error:?}",
+                file_id.to_string()
+            );
+            return Vec::new();
+        }
+    };
+    let file_tags = database
+        .tag_ids_for_file(file_id, store::SubtagRule::Exclude)
+        .map(|tags| tags.into_iter().collect::<Vec<TagId>>())
+        .unwrap_or_else(|error| {
+            log::error!(
+                "live_placements: failed to read tags for {}: {error:?}",
+                file_id.to_string()
+            );
+            Vec::new()
+        });
+    placements_for(
+        configuration,
+        change_origin,
+        file_id,
+        &logical_path,
+        &file_tags,
+    )
+}
+
 /// Build the list of sync directories that should receive a `ChangeFile`
-/// for `file_id`, applying the origin-skip and tag-match filters.
+/// for `file_id`, applying the origin-skip and tag-match filters. Each target
+/// is a directory that *should* hold the file, whether or not it currently
+/// does (`ChangeFile` creates it where missing, at `logical_path`).
 pub(crate) fn placements_for(
     configuration: &Configuration,
     change_origin: &ChangeOrigin,
     file_id: FileId,
+    logical_path: &LogicalPath,
     file_tags: &[TagId],
 ) -> Vec<Placement> {
     let mut targets = Vec::new();
@@ -417,6 +466,7 @@ pub(crate) fn placements_for(
 
         targets.push(Placement::Change {
             file_id,
+            logical_path: logical_path.clone(),
             sync_directory_path: sync_directory.path.clone(),
         });
     }

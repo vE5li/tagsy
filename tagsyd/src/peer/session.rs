@@ -840,14 +840,18 @@ pub async fn run_peer_session<S>(
                             // Resolve the file's logical identity for the catalog
                             // write: from the placement for a `Create` (the file
                             // is new to us), or from the DB for a `Change` (we
-                            // already know it). A missing logical path for a
-                            // `Change` should not happen, but if it does we skip.
+                            // already know it). A `Change` may target a file we
+                            // hold tombstoned — a newer edit overruling our
+                            // delete — whose row keeps its path, hence `Include`.
                             let logical_path = match &placement {
                                 messages::MaterializePlacement::Create { logical_path, .. } => {
                                     logical_path.clone()
                                 }
                                 messages::MaterializePlacement::Change => {
-                                    match database.logical_path_for_file_id(file_id) {
+                                    match database.logical_path_for_file_id(
+                                        file_id,
+                                        crate::store::DeletedRule::Include,
+                                    ) {
                                         Ok(logical_path) => logical_path,
                                         Err(error) => {
                                             log::error!(

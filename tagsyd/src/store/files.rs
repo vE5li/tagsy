@@ -477,11 +477,20 @@ impl CatalogStore {
     /// Get the logical path for `file_id`.
     ///
     /// The inverse of `file_id_from_logical_path`. Errors with `MissingFile` if
-    /// the file has no row in `files` (unknown or deleted).
-    pub fn logical_path_for_file_id(&self, file_id: FileId) -> Result<LogicalPath, DatabaseError> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT logical_path FROM files_v2 WHERE id = ?1 AND deleted = 0")?;
+    /// the file has no row in `files`, or — under [`DeletedRule::Exclude`] — is
+    /// tombstoned. A tombstoned row keeps its path, so `Include` finds it.
+    pub fn logical_path_for_file_id(
+        &self,
+        file_id: FileId,
+        deleted_rule: DeletedRule,
+    ) -> Result<LogicalPath, DatabaseError> {
+        let sql = match deleted_rule {
+            DeletedRule::Exclude => {
+                "SELECT logical_path FROM files_v2 WHERE id = ?1 AND deleted = 0"
+            }
+            DeletedRule::Include => "SELECT logical_path FROM files_v2 WHERE id = ?1",
+        };
+        let mut statement = self.connection.prepare(sql)?;
 
         let logical_path = statement
             .query_map([file_id], |row| row.get(0))?
@@ -882,7 +891,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            database.logical_path_for_file_id(file_id).unwrap(),
+            database
+                .logical_path_for_file_id(file_id, DeletedRule::Exclude)
+                .unwrap(),
             LogicalPath::new("photos/cat.jpg")
         );
     }
@@ -892,7 +903,7 @@ mod tests {
         let database = memory_db();
         let missing = FileId::new();
         assert!(matches!(
-            database.logical_path_for_file_id(missing),
+            database.logical_path_for_file_id(missing, DeletedRule::Exclude),
             Err(DatabaseError::MissingFile)
         ));
     }
@@ -1373,7 +1384,9 @@ mod tests {
             .unwrap();
         assert!(applied);
         assert_eq!(
-            database.logical_path_for_file_id(file_id).unwrap(),
+            database
+                .logical_path_for_file_id(file_id, DeletedRule::Exclude)
+                .unwrap(),
             LogicalPath::new("new.txt")
         );
         assert_eq!(
@@ -1403,7 +1416,9 @@ mod tests {
         assert!(!equal);
 
         assert_eq!(
-            database.logical_path_for_file_id(file_id).unwrap(),
+            database
+                .logical_path_for_file_id(file_id, DeletedRule::Exclude)
+                .unwrap(),
             LogicalPath::new("current.txt")
         );
         assert_eq!(

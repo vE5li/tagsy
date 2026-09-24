@@ -1005,6 +1005,31 @@ mod tests {
         );
     }
 
+    /// `ChangeFile` for a file this directory does not hold creates it — the
+    /// case of a file a newer edit brought back after a delete removed it
+    /// here — and indexes it, so later lookups find the bytes.
+    #[tokio::test]
+    async fn change_file_creates_file_not_held() {
+        let data_dir = temp_dir("change-missing-data");
+        let sync_dir = temp_dir("change-missing-sync");
+        let mut manager = universal_manager(&data_dir, &sync_dir).await;
+
+        let file_id = FileId::new();
+        manager
+            .handle_command(SyncDirectoryCommand::ChangeFile {
+                file_id,
+                logical_path: LogicalPath::new("doc.txt"),
+                content: FileBytes::InMemory(b"resurrected".to_vec()),
+                sync_directory_path: sync_dir.clone(),
+            })
+            .await
+            .unwrap();
+
+        let destination = sync_dir.join(file_id.to_string());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"resurrected");
+        assert_eq!(manager.first_holding_path(file_id), Some(destination));
+    }
+
     /// `ChangeFile` carrying a `FileToCopy` overwrites the existing bytes at
     /// the file's on-disk location.
     #[tokio::test]
@@ -1027,6 +1052,7 @@ mod tests {
         manager
             .handle_command(SyncDirectoryCommand::ChangeFile {
                 file_id,
+                logical_path: LogicalPath::new("doc.txt"),
                 content: FileBytes::FileToCopy(source.clone()),
                 sync_directory_path: sync_dir.clone(),
             })
@@ -1204,6 +1230,7 @@ mod tests {
         manager
             .handle_command(SyncDirectoryCommand::ChangeFile {
                 file_id,
+                logical_path: LogicalPath::new("doc.txt"),
                 content: FileBytes::InMemory(b"v2".to_vec()),
                 sync_directory_path: sync_dir.clone(),
             })

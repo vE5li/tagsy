@@ -203,7 +203,9 @@ pub(crate) async fn resolve_preview(
 /// answer a client reaches from the same name.
 #[cfg(feature = "preview-generation")]
 pub(crate) fn preview_extension_for(database: &CatalogStore, file_id: FileId) -> Option<String> {
-    let logical_path = database.logical_path_for_file_id(file_id).ok()?;
+    let logical_path = database
+        .logical_path_for_file_id(file_id, crate::store::DeletedRule::Exclude)
+        .ok()?;
 
     let extension = logical_path.extension();
     if extension.is_empty() {

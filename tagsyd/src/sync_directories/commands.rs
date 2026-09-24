@@ -24,8 +24,13 @@ pub enum SyncDirectoryCommand {
         // We currently need that to check which directory this event was meant for.
         sync_directory_path: PathBuf,
     },
+    /// Put a new version of `file_id` in place: overwrite it where this
+    /// directory holds it, otherwise create it at `logical_path`'s placement
+    /// (the catalog only targets directories that should hold the file — e.g.
+    /// one that dropped it on a delete a newer edit has since overruled).
     ChangeFile {
         file_id: FileId,
+        logical_path: LogicalPath,
         content: FileBytes,
         // Maybe a bit weird to have it like this? Not sure.
         // We currently need that to check which directory this event was meant for.
@@ -241,24 +246,43 @@ impl SyncDirectories {
             }
             SyncDirectoryCommand::ChangeFile {
                 file_id,
+                logical_path,
                 content,
                 sync_directory_path,
             } => {
                 let sync_directory = self.sync_directory_for_path(&sync_directory_path)?;
 
-                let physical_path = match &sync_directory.sync_type {
-                    SyncType::Universal { .. } => PhysicalPath::new(file_id.to_string()),
-                    SyncType::TagBased { .. } => {
-                        sync_directory
-                            .database
-                            .get_file(file_id)
-                            .map_err(|error| SyncDirectoryError::FailedChangingFile(error.into()))?
-                            .physical_path
+                // Overwrite where we hold the file; otherwise create it, as
+                // `CreateFile` would (resolving a naming collision first).
+                let held = sync_directory.database.get_file(file_id).ok();
+                let base = sync_directory
+                    .sync_type
+                    .physical_for(&logical_path, file_id);
+                let physical_path = match (&held, &sync_directory.sync_type) {
+                    (Some(file), _) => file.physical_path.clone(),
+                    // A Universal path *is* the file id: whatever sits there
+                    // is this file, never a collision to suffix around.
+                    (None, SyncType::Universal { .. }) => base,
+                    (None, SyncType::TagBased { .. }) => {
+                        self.resolve_unique_physical(sync_directory, &base, file_id)
                     }
                 };
                 let file_path = sync_directory.path.join(physical_path.as_str());
 
-                log::info!("Modifying file at {}", file_path.to_string_lossy());
+                if held.is_some() {
+                    log::info!("Modifying file at {}", file_path.to_string_lossy());
+                } else {
+                    log::info!(
+                        "ChangeFile: {} not held here; creating it at {}",
+                        file_id.to_string(),
+                        file_path.to_string_lossy()
+                    );
+                    if let Some(parent) = file_path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|error| {
+                            SyncDirectoryError::FailedChangingFile(error.into())
+                        })?;
+                    }
+                }
 
                 // Hash before materializing so the resulting `Modify` event can
                 // be matched by content: a user edit landing on the same path
@@ -275,6 +299,13 @@ impl SyncDirectories {
                     );
                     SyncDirectoryError::FailedChangingFile(error.into())
                 })?;
+
+                if held.is_none() {
+                    sync_directory
+                        .database
+                        .add_file(file_id, &physical_path)
+                        .map_err(|error| SyncDirectoryError::FailedChangingFile(error.into()))?;
+                }
 
                 self.record_self_write(file_path, Some(content_hash));
             }

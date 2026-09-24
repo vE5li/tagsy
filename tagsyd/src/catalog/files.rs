@@ -1053,25 +1053,16 @@ pub(crate) async fn materialize(
             targets
         }
         messages::MaterializePlacement::Change => {
-            // Existing file: overwrite it in the sync directories
-            // that already hold it (tag-filtered by current tags).
-            let file_tags = database
-                .tag_ids_for_file(file_id, store::SubtagRule::Exclude)
-                .map(|iter| iter.into_iter().collect::<Vec<TagId>>())
-                .unwrap_or_else(|error| {
-                    log::error!(
-                        "Materialize: failed to read tags for {}: {:?}",
-                        file_id.to_string(),
-                        error
-                    );
-                    Vec::new()
-                });
-            // Peer-origin: no origin directory to skip. Sentinel
-            // empty path never matches a real sync directory.
+            // New version of a known file: put it in place in every sync
+            // directory that should hold it (tag-filtered by current tags) —
+            // overwriting where held, creating where not (e.g. dropped by a
+            // delete this newer version overruled). Nothing if the file is
+            // still tombstoned. Peer-origin: no origin directory to skip; the
+            // sentinel empty path never matches a real sync directory.
             let sentinel = ChangeOrigin::Local {
                 directory_path: std::path::PathBuf::new(),
             };
-            placement::placements_for(configuration, &sentinel, file_id, &file_tags)
+            placement::live_placements(configuration, database, &sentinel, file_id)
         }
     };
     placement::place_content(command_sender, targets, content).await;
@@ -1237,6 +1228,15 @@ pub(crate) async fn announce_provided(
             error
         );
     }
+    // A newer version supersedes an older tombstone (the edit half of the
+    // three-way LWW), exactly as when a peer announces it. No-op otherwise.
+    if let Err(error) = database.restore_file(file_id) {
+        log::error!(
+            "AnnounceProvided: failed to clear tombstone for {}: {:?}",
+            file_id.to_string(),
+            error
+        );
+    }
     super::forward::forward_to_peers(configuration, runtime_configuration, &change, &origin).await;
 
     // Local placement: pull the bytes from the registered provider (the
@@ -1247,7 +1247,7 @@ pub(crate) async fn announce_provided(
     // Skipped when no local directory would take the file: a pull then would
     // only consume the provider (a remote provider releases itself after one
     // full transfer) before the peers that do want it get their turn.
-    let (placement, placement_tags) = match &change {
+    let (placement, wanted_locally) = match &change {
         Change::FileMetadataAdded {
             logical_path, tags, ..
         } => (
@@ -1255,17 +1255,15 @@ pub(crate) async fn announce_provided(
                 logical_path: logical_path.clone(),
                 tags: tags.clone(),
             },
-            tags.clone(),
+            !placement::placements_for(configuration, &origin, file_id, logical_path, tags)
+                .is_empty(),
         ),
         _ => (
             messages::MaterializePlacement::Change,
-            database
-                .tag_ids_for_file(file_id, store::SubtagRule::Exclude)
-                .map(|tags| tags.into_iter().collect())
-                .unwrap_or_default(),
+            !placement::live_placements(configuration, database, &origin, file_id).is_empty(),
         ),
     };
-    if !placement::placements_for(configuration, &origin, file_id, &placement_tags).is_empty() {
+    if wanted_locally {
         let pending_fetches = pending_fetches.clone();
         let pull_scheduler = pull_scheduler.clone();
         let change_sender = change_sender.clone();

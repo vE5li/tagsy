@@ -16,7 +16,7 @@ use crate::catalog::placement::{self, Placement};
 use crate::catalog::previews::maybe_eager_preview;
 use crate::clock;
 use crate::configuration::{CompiledTagRules, Configuration, RuntimeConfiguration, SyncType};
-use crate::store::{self, CatalogStore};
+use crate::store::CatalogStore;
 use crate::sync_directories::SyncDirectoryCommand;
 
 /// `tags`, skipping any the caller already supplied.
@@ -281,24 +281,8 @@ pub(crate) async fn handle_content_change(
                     );
                 }
 
-                let local_file_tags = database
-                    .tag_ids_for_file(file_id, store::SubtagRule::Exclude)
-                    .map(|iter| iter.into_iter().collect::<Vec<TagId>>())
-                    .unwrap_or_else(|error| {
-                        log::error!(
-                            "Failed to read local tags for {}: {:?}",
-                            file_id.to_string(),
-                            error
-                        );
-                        Vec::new()
-                    });
-
-                let targets = placement::placements_for(
-                    configuration,
-                    &change_origin,
-                    file_id,
-                    &local_file_tags,
-                );
+                let targets =
+                    placement::live_placements(configuration, database, &change_origin, file_id);
                 super::forward::dispatch_and_forward(
                     configuration,
                     runtime_configuration,
@@ -325,18 +309,6 @@ pub(crate) async fn handle_content_change(
             size,
             observed_at,
         } => {
-            let file_tags = match database.tag_ids_for_file(file_id, store::SubtagRule::Exclude) {
-                Ok(tags) => tags.into_iter().collect::<Vec<TagId>>(),
-                Err(error) => {
-                    log::error!(
-                        "FileChanged: failed to get tags for {}: {:?}; skipping",
-                        file_id.to_string(),
-                        error
-                    );
-                    return;
-                }
-            };
-
             if let Err(error) = database.record_version_at(
                 file_id,
                 &content_hash,
@@ -361,7 +333,7 @@ pub(crate) async fn handle_content_change(
             }
 
             let targets =
-                placement::placements_for(configuration, &change_origin, file_id, &file_tags);
+                placement::live_placements(configuration, database, &change_origin, file_id);
             super::forward::dispatch_and_forward(
                 configuration,
                 runtime_configuration,
