@@ -1,22 +1,12 @@
 // The home AppBar's overflow menu: a single three-dot button that hosts the
-// low-frequency actions (Operations, deleted-search toggle, the file result
-// view-mode selectors, purge cached previews, copy public key) so they don't
-// clutter the AppBar. The storage indicator stays inline because it's a passive
-// readout, not an action.
-//
-// The Operations item still needs its live active-count badge, so this widget
-// itself subscribes to the operations stream — the badge renders on the
-// three-dot menu button whenever real sync work is in flight (transfers,
-// reconciliation, fetches, connect attempts). Steady-state peer connections are
-// NOT operations any more — they are connection *state*, shown by the AppBar's
-// connection indicator — so the badge is no longer permanently lit whenever a
-// peer is connected. It is now a genuine "something is happening" signal.
+// low-frequency actions (deleted-search toggle, the file result view-mode
+// selectors, purge cached previews, copy public key) so they don't clutter the
+// AppBar. Sync status — peers, operations, activity — lives in the AppBar's
+// status button instead (`features/status/`).
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../../rust/api.dart' as tagsy;
-import '../../screens/operations_screen.dart';
 import '../../session/session.dart';
 import 'view_mode.dart';
 
@@ -59,7 +49,6 @@ class OverflowMenu extends StatefulWidget {
 /// Menu-item identifiers. Kept as a private enum so the switch in `onSelected`
 /// is exhaustive.
 enum _MenuAction {
-  operations,
   toggleDeleted,
   viewModeList,
   viewModeTile,
@@ -70,102 +59,9 @@ enum _MenuAction {
 }
 
 class _OverflowMenuState extends State<OverflowMenu> {
-  /// Currently-active operations, keyed by id. Peer connections are no longer
-  /// operations, so this is now purely real sync work (see [_countsAsWork]).
-  final Map<BigInt, tagsy.OperationEntry> _working = {};
-
   /// True while a preview purge is in flight, so the menu item shows a spinner
   /// and can't be re-invoked.
   bool _purging = false;
-
-  bool _watching = false;
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.session != null) _watch();
-  }
-
-  @override
-  void didUpdateWidget(covariant OverflowMenu oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    // The session arrives asynchronously after connect; start watching once it
-    // first appears.
-    if (oldWidget.session == null && widget.session != null) _watch();
-  }
-
-  @override
-  void dispose() {
-    _watching = false;
-    super.dispose();
-  }
-
-  /// Whether an operation should count toward the badge: any active operation.
-  /// (All operations are now genuine work — connections moved out of this
-  /// stream — so no kind special-casing is needed here.)
-  static bool _countsAsWork(tagsy.OperationEntry op) {
-    return op.status is tagsy.OperationStatusDto_Active;
-  }
-
-  void _apply(tagsy.OperationEntry op) {
-    if (_countsAsWork(op)) {
-      _working[op.id] = op;
-    } else {
-      _working.remove(op.id);
-    }
-  }
-
-  Future<void> _watch() async {
-    final session = widget.session;
-    if (session == null || _watching) return;
-    _watching = true;
-    try {
-      // Seed from a snapshot so an already-in-flight transfer is counted
-      // immediately, then apply live updates on top.
-      final snapshot = await session.repository.listOperations();
-      if (!mounted) return;
-      setState(() {
-        _working.clear();
-        for (final op in snapshot) {
-          _apply(op);
-        }
-      });
-
-      final updates = await session.repository.subscribeOperations();
-      while (mounted && _watching) {
-        final update = await updates.next();
-        if (update == null) break;
-        if (!mounted) break;
-        switch (update) {
-          case tagsy.OperationUpdateDto_Resynced():
-            final refreshed = await session.repository.listOperations();
-            if (!mounted) break;
-            setState(() {
-              _working.clear();
-              for (final op in refreshed) {
-                _apply(op);
-              }
-            });
-          case tagsy.OperationUpdateDto_Started(:final operation):
-            setState(() => _apply(operation));
-          case tagsy.OperationUpdateDto_Updated(:final operation):
-            setState(() => _apply(operation));
-        }
-      }
-    } catch (_) {
-      // Transient stream hiccups are surfaced elsewhere; don't kill the menu.
-    }
-  }
-
-  void _openOperations() {
-    final session = widget.session;
-    if (session == null) return;
-    FocusManager.instance.primaryFocus?.unfocus();
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => OperationsScreen(session: session)),
-    );
-  }
 
   Future<void> _purgePreviews() async {
     final session = widget.session;
@@ -196,8 +92,6 @@ class _OverflowMenuState extends State<OverflowMenu> {
 
   void _onSelected(_MenuAction action) {
     switch (action) {
-      case _MenuAction.operations:
-        _openOperations();
       case _MenuAction.toggleDeleted:
         widget.onToggleShowDeleted();
       case _MenuAction.viewModeList:
@@ -218,19 +112,13 @@ class _OverflowMenuState extends State<OverflowMenu> {
   @override
   Widget build(BuildContext context) {
     final session = widget.session;
-    final activeCount = _working.length;
     final publicKey = widget.publicKey;
 
-    final button = PopupMenuButton<_MenuAction>(
+    return PopupMenuButton<_MenuAction>(
       tooltip: 'More',
       icon: const Icon(Icons.more_vert),
       onSelected: _onSelected,
       itemBuilder: (context) => [
-        PopupMenuItem<_MenuAction>(
-          value: _MenuAction.operations,
-          enabled: session != null,
-          child: _OperationsItem(activeCount: activeCount),
-        ),
         PopupMenuItem<_MenuAction>(
           value: _MenuAction.toggleDeleted,
           child: ListTile(
@@ -314,78 +202,6 @@ class _OverflowMenuState extends State<OverflowMenu> {
             ),
           ),
       ],
-    );
-
-    if (activeCount == 0) return button;
-
-    // Overlay a small count badge on the three-dot button so the
-    // active-operations indicator remains visible without opening the menu —
-    // preserving what the standalone OperationsButton used to show.
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        button,
-        Positioned(
-          top: 8,
-          right: 6,
-          child: IgnorePointer(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.error,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              constraints: const BoxConstraints(minWidth: 16),
-              child: Text(
-                '$activeCount',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.onError,
-                  fontSize: 10,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// The "Operations" menu-item body, with an inline active-count badge next to
-/// the label so users see how many operations are running before opening the
-/// operations screen.
-class _OperationsItem extends StatelessWidget {
-  const _OperationsItem({required this.activeCount});
-
-  final int activeCount;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: const Icon(Icons.sync),
-      title: const Text('Operations'),
-      trailing: activeCount == 0
-          ? null
-          : Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.error,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              constraints: const BoxConstraints(minWidth: 20),
-              child: Text(
-                '$activeCount',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.onError,
-                  fontSize: 11,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
     );
   }
 }

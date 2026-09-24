@@ -57,9 +57,7 @@ class TagRow extends StatelessWidget {
       focusNode: focusNode,
       title: Align(
         alignment: Alignment.centerLeft,
-        child: tag.deleted
-            ? _StrikeThrough(child: chip)
-            : chip,
+        child: tag.deleted ? _StrikeThrough(child: chip) : chip,
       ),
       trailing: const Icon(Icons.chevron_right),
       onTap: onActivate,

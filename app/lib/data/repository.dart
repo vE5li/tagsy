@@ -17,13 +17,14 @@ import 'dart:collection';
 import 'dart:io';
 
 import '../rust/api.dart' as tagsy;
+import 'status_source.dart';
 
 /// A connected backend as a set of named operations.
 ///
 /// Wraps the live [tagsy.Tagsy] handle (in-process engine on Android, daemon
 /// IPC on Linux — the repository does not care which). Held by [TagsySession]
 /// and reached through it by every screen.
-class TagsyRepository {
+class TagsyRepository implements StatusSource {
   TagsyRepository(this._client);
 
   final tagsy.Tagsy _client;
@@ -259,8 +260,7 @@ class TagsyRepository {
 
   /// The daemon's configured home-screen sections (named saved searches shown
   /// on the empty home screen).
-  Future<List<tagsy.HomeSectionEntry>> homeSections() =>
-      _client.homeSections();
+  Future<List<tagsy.HomeSectionEntry>> homeSections() => _client.homeSections();
 
   // --- Previews -------------------------------------------------------------
 
@@ -290,19 +290,32 @@ class TagsyRepository {
   Future<tagsy.EventSubscription> subscribe() => _client.subscribe();
 
   /// Snapshot every currently-active sync operation.
+  @override
   Future<List<tagsy.OperationEntry>> listOperations() =>
       _client.listOperations();
 
   /// Subscribe to the live sync-operation stream.
-  Future<tagsy.OperationSubscription> subscribeOperations() =>
-      _client.subscribeOperations();
+  @override
+  Future<NextUpdate<tagsy.OperationUpdateDto>> operationUpdates() async {
+    final subscription = await _client.subscribeOperations();
+    return subscription.next;
+  }
 
   /// Snapshot every currently-connected peer. A connection is state, not an
   /// operation, so it has its own snapshot/stream distinct from operations.
+  @override
   Future<List<tagsy.ConnectedPeerDto>> connectedPeers() =>
       _client.connectedPeers();
 
   /// Subscribe to the live peer-connection stream.
-  Future<tagsy.ConnectionSubscription> subscribeConnections() =>
-      _client.subscribeConnections();
+  @override
+  Future<NextUpdate<tagsy.ConnectionUpdateDto>> connectionUpdates() async {
+    final subscription = await _client.subscribeConnections();
+    return subscription.next;
+  }
+
+  /// Sample the daemon's activity (queues, transfers, startup scan). There is
+  /// no stream for it; the status indicator polls.
+  @override
+  Future<tagsy.ActivityEntry> activity() => _client.activity();
 }

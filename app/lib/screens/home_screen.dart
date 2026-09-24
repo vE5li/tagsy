@@ -17,12 +17,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../features/search/connection_indicator.dart';
 import '../features/search/overflow_menu.dart';
 import '../features/search/result_rows.dart';
 import '../features/search/search_field.dart';
 import '../features/search/sections_view.dart';
 import '../features/search/storage_stats_indicator.dart';
+import '../features/status/status_indicator.dart';
 import '../features/search/view_mode.dart';
 import '../rust/api.dart' as tagsy;
 import '../session/session.dart';
@@ -323,7 +323,7 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('Tagsy'),
         actions: [
           StorageStatsIndicator(session: widget.session),
-          ConnectionIndicator(session: widget.session),
+          StatusIndicator(source: widget.session?.repository),
           OverflowMenu(
             session: widget.session,
             publicKey: publicKey,
@@ -335,8 +335,7 @@ class _HomeScreenState extends State<HomeScreen> {
               if (_results != null) _runQuery();
             },
             fileViewMode: _fileViewMode,
-            onSelectViewMode: (mode) =>
-                setState(() => _fileViewMode = mode),
+            onSelectViewMode: (mode) => setState(() => _fileViewMode = mode),
           ),
         ],
       ),
@@ -424,8 +423,9 @@ class _HomeScreenState extends State<HomeScreen> {
     // reads the fling velocity so it doesn't fight vertical scrolling.
     return switch (_fileViewMode) {
       FileViewMode.list => _buildListResults(results, hasTags, hasFiles),
-      FileViewMode.tile || FileViewMode.large || FileViewMode.full =>
-        _buildTileResults(results, hasTags, hasFiles),
+      FileViewMode.tile ||
+      FileViewMode.large ||
+      FileViewMode.full => _buildTileResults(results, hasTags, hasFiles),
     };
   }
 
@@ -500,18 +500,13 @@ class _HomeScreenState extends State<HomeScreen> {
       final tagChildren = <Widget>[const SectionHeader('Tags')];
       for (final tag in results.tags) {
         tagChildren.add(
-          TagRow(
-            tag: tag,
-            onActivate: () => _openTag(tag, restoreIndex: 0),
-          ),
+          TagRow(tag: tag, onActivate: () => _openTag(tag, restoreIndex: 0)),
         );
       }
       slivers.add(SliverList(delegate: SliverChildListDelegate(tagChildren)));
     }
     if (hasFiles) {
-      slivers.add(
-        const SliverToBoxAdapter(child: SectionHeader('Files')),
-      );
+      slivers.add(const SliverToBoxAdapter(child: SectionHeader('Files')));
       if (_fileViewMode == FileViewMode.large ||
           _fileViewMode == FileViewMode.full) {
         // One full-width tile per file, stacked; each shows a large preview,
@@ -553,13 +548,12 @@ class _HomeScreenState extends State<HomeScreen> {
           SliverPadding(
             padding: const EdgeInsets.all(8),
             sliver: SliverGrid(
-              gridDelegate:
-                  const SliverGridDelegateWithMaxCrossAxisExtent(
-                    maxCrossAxisExtent: 180,
-                    mainAxisSpacing: 8,
-                    crossAxisSpacing: 8,
-                    childAspectRatio: 0.85,
-                  ),
+              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                maxCrossAxisExtent: 180,
+                mainAxisSpacing: 8,
+                crossAxisSpacing: 8,
+                childAspectRatio: 0.85,
+              ),
               delegate: SliverChildBuilderDelegate((context, i) {
                 final file = results.files[i];
                 return FileTile(
