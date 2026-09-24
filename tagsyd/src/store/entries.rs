@@ -195,16 +195,19 @@ impl CatalogStore {
         Ok(())
     }
 
-    /// Shared soft-delete for the two "remove relationship" paths. Marks the
-    /// row `deleted = 1` and stamps `modified_at`, gated by
-    /// last-writer-wins so a stale untag can't override a newer tag. If the
-    /// relationship was never recorded, this is a no-op (there is no row to
-    /// tombstone; a peer that only knows the untag can still learn "absent"
-    /// once we've seen the tag).
+    /// Shared soft-delete for the two "remove relationship" paths: the mirror
+    /// of [`Self::upsert_entry`]. Marks the row `deleted = 1` and stamps
+    /// `modified_at`, gated by last-writer-wins so a stale untag can't override
+    /// a newer tag.
     ///
-    /// NOTE: Offline untag propagation is only fully correct once the broader
-    /// deletion/tombstone design lands — see roadmap. Today the tombstone is
-    /// created locally and reconciled, but there is no tombstone GC.
+    /// If the relationship was never recorded, the tombstone is *inserted*: an
+    /// untag is an LWW-stamped fact in its own right, not an edit of a row we
+    /// happen to hold. Without it a node that learns only the untag (it was
+    /// offline for the tag) holds no row, and so accepts a later-arriving stale
+    /// tag it should reject; and an untag issued concurrently with a tag
+    /// elsewhere would lose even when it is newer.
+    ///
+    /// There is no tombstone GC yet.
     fn untag_entry(
         &self,
         tag_id: TagId,
@@ -213,10 +216,13 @@ impl CatalogStore {
         modified_at: i64,
     ) -> Result<(), DatabaseError> {
         self.connection.execute(
-            "UPDATE entries_v1 SET deleted = 1, modified_at = ?4
-                 WHERE tag_id = ?1 AND target_id = ?2 AND type = ?3
-                   AND ?4 > modified_at",
-            (&tag_id, &target_id, entry_type, modified_at),
+            "INSERT INTO entries_v1 (id, tag_id, target_id, type, modified_at, deleted)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1)
+                 ON CONFLICT(tag_id, target_id, type) DO UPDATE SET
+                     modified_at = excluded.modified_at,
+                     deleted = 1
+                 WHERE excluded.modified_at > entries_v1.modified_at",
+            (TagId::new(), &tag_id, &target_id, entry_type, modified_at),
         )?;
 
         Ok(())
@@ -648,6 +654,35 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(tags, vec![tag_id]);
+    }
+
+    /// An untag of a relationship we never recorded still lands as a
+    /// tombstone, so an older tag arriving afterwards loses to it.
+    #[test]
+    fn untag_of_unknown_relationship_records_tombstone() {
+        let database = memory_db();
+        let file_id = FileId::new();
+        let tag_id = TagId::new();
+        database
+            .add_file(file_id, &LogicalPath::new("a.txt"), 0)
+            .unwrap();
+
+        database.untag_file(tag_id, file_id, 200).unwrap();
+        let entries = database.relationship_manifest_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].deleted);
+        assert_eq!(entries[0].modified_at, 200);
+
+        // A stale tag (t=100) must not revive it.
+        database.tag_file(tag_id, file_id, 100).unwrap();
+        assert!(
+            database
+                .tag_ids_for_file(file_id, SubtagRule::Exclude)
+                .unwrap()
+                .into_iter()
+                .next()
+                .is_none()
+        );
     }
 
     #[test]
