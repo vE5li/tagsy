@@ -141,7 +141,7 @@ impl CatalogStore {
         // its history and tags. Two-stage to keep the SQL straightforward;
         // manifest construction is a one-shot at connect time so the N+1 here
         // is acceptable.
-        let mut id_statement = self.connection.prepare(
+        let mut id_statement = self.connection.prepare_cached(
             "SELECT id, logical_path, logical_path_modified_at, deleted, deleted_at, restored_at \
              FROM files_v2",
         )?;
@@ -516,7 +516,7 @@ impl CatalogStore {
     ) -> Result<FileId, DatabaseError> {
         let mut statement = self
             .connection
-            .prepare("SELECT id FROM files_v2 WHERE logical_path = ?1 AND deleted = 0")?;
+            .prepare_cached("SELECT id FROM files_v2 WHERE logical_path = ?1 AND deleted = 0")?;
 
         let file_id = statement
             .query_map([logical_path], |row| row.get(0))?
@@ -543,7 +543,7 @@ impl CatalogStore {
             }
             DeletedRule::Include => "SELECT logical_path FROM files_v2 WHERE id = ?1",
         };
-        let mut statement = self.connection.prepare(sql)?;
+        let mut statement = self.connection.prepare_cached(sql)?;
 
         let logical_path = statement
             .query_map([file_id], |row| row.get(0))?
@@ -602,7 +602,7 @@ impl CatalogStore {
                ON agg.file_id = f.id
              WHERE f.id = ?1{extra_clause}"
         );
-        let mut statement = self.connection.prepare(&sql)?;
+        let mut statement = self.connection.prepare_cached(&sql)?;
 
         let mut file = statement
             .query_map([file_id], |row| {
@@ -658,7 +658,7 @@ impl CatalogStore {
              JOIN latest_version AS agg
                ON agg.file_id = f.id{where_clause}"
         );
-        let mut statement = self.connection.prepare(&sql)?;
+        let mut statement = self.connection.prepare_cached(&sql)?;
 
         let mut files = Vec::new();
         let rows = statement.query_map([], |row| {
@@ -728,7 +728,7 @@ impl CatalogStore {
              JOIN latest_version AS agg
                ON agg.file_id = f.id"
         );
-        let mut statement = self.connection.prepare(&sql)?;
+        let mut statement = self.connection.prepare_cached(&sql)?;
         let mut by_id: std::collections::HashMap<FileId, FileInfo> = statement
             .query_map([], |row| {
                 Ok(FileInfo {
@@ -785,7 +785,7 @@ impl CatalogStore {
             "SELECT id FROM files_v2{}",
             super::types::where_deleted_clause(deleted_rule)
         );
-        let mut statement = self.connection.prepare(&sql)?;
+        let mut statement = self.connection.prepare_cached(&sql)?;
         let ids = statement.query_map([], |row| row.get::<_, FileId>(0))?;
         ids.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -805,7 +805,7 @@ impl CatalogStore {
             "SELECT id, logical_path FROM files_v2{}",
             super::types::where_deleted_clause(deleted_rule)
         );
-        let mut statement = self.connection.prepare(&sql)?;
+        let mut statement = self.connection.prepare_cached(&sql)?;
         let rows = statement.query_map([], |row| {
             Ok((row.get::<_, FileId>(0)?, row.get::<_, LogicalPath>(1)?))
         })?;
@@ -944,7 +944,7 @@ impl CatalogStore {
             "SELECT id FROM files_v2 WHERE id LIKE ?1{}",
             and_deleted_clause(deleted_rule),
         );
-        let mut statement = self.connection.prepare(&id_sql)?;
+        let mut statement = self.connection.prepare_cached(&id_sql)?;
         let id_matches = statement.query_map([&id_pattern], |row| row.get::<_, FileId>(0))?;
         id_matches
             .collect::<Result<Vec<_>, _>>()

@@ -106,7 +106,7 @@ impl DirectoryIndex {
     pub fn get_file(&self, file_id: FileId) -> Result<SyncDirectoryFile, DatabaseError> {
         let mut statement = self
             .connection
-            .prepare("SELECT physical_path FROM files_v1 WHERE id = ?1")?;
+            .prepare_cached("SELECT physical_path FROM files_v1 WHERE id = ?1")?;
 
         let file = statement
             .query_map([file_id], |row| {
@@ -136,7 +136,7 @@ impl DirectoryIndex {
     ) -> Result<bool, DatabaseError> {
         let mut statement = self
             .connection
-            .prepare("SELECT 1 FROM files_v1 WHERE physical_path = ?1 AND id != ?2")?;
+            .prepare_cached("SELECT 1 FROM files_v1 WHERE physical_path = ?1 AND id != ?2")?;
 
         let in_use = statement
             .query_map((physical_path, except_file_id), |_row| Ok(()))?
@@ -149,7 +149,7 @@ impl DirectoryIndex {
     pub fn get_file_id(&self, physical_path: &PhysicalPath) -> Result<FileId, DatabaseError> {
         let mut statement = self
             .connection
-            .prepare("SELECT id FROM files_v1 WHERE physical_path = ?1")?;
+            .prepare_cached("SELECT id FROM files_v1 WHERE physical_path = ?1")?;
 
         let id = statement
             .query_map([physical_path], |row| row.get(0))?
@@ -163,7 +163,7 @@ impl DirectoryIndex {
     pub fn get_all_files(&self) -> Result<Vec<SyncDirectoryFile>, DatabaseError> {
         let mut statement = self
             .connection
-            .prepare("SELECT id, physical_path FROM files_v1")?;
+            .prepare_cached("SELECT id, physical_path FROM files_v1")?;
 
         Ok(statement
             .query_map([], |row| {
@@ -182,7 +182,7 @@ impl DirectoryIndex {
     ) -> Result<Vec<SyncDirectoryFile>, DatabaseError> {
         let mut statement = self
             .connection
-            .prepare("SELECT id, physical_path FROM files_v1 WHERE physical_path LIKE ?1")?;
+            .prepare_cached("SELECT id, physical_path FROM files_v1 WHERE physical_path LIKE ?1")?;
 
         let matcher = format!("{}%", physical_path.as_str());
 

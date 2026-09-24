@@ -32,9 +32,9 @@ impl CatalogStore {
     pub fn relationship_manifest_entries(
         &self,
     ) -> Result<Vec<RelationshipManifestEntry>, DatabaseError> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT tag_id, target_id, type, modified_at, deleted FROM entries_v1")?;
+        let mut statement = self.connection.prepare_cached(
+            "SELECT tag_id, target_id, type, modified_at, deleted FROM entries_v1",
+        )?;
         let entries = statement
             .query_map([], |row| {
                 let deleted: i64 = row.get(4)?;
@@ -240,9 +240,9 @@ impl CatalogStore {
             Tag { tag_id: TagId },
         }
 
-        let mut statement = self
-            .connection
-            .prepare("SELECT target_id, type FROM entries_v1 WHERE tag_id = ?1 AND deleted = 0")?;
+        let mut statement = self.connection.prepare_cached(
+            "SELECT target_id, type FROM entries_v1 WHERE tag_id = ?1 AND deleted = 0",
+        )?;
 
         let iterator = statement
             .query_map([tag_id], |row| {
@@ -314,7 +314,7 @@ impl CatalogStore {
         // a tag whose definition hasn't been reconciled yet (`FileTagged` can
         // arrive before `TagAdded`). Such a tag has no `tags_v2` row — keep it
         // (`t.deleted IS NULL`); only exclude tags we *know* are tombstoned.
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT e.tag_id FROM entries_v1 AS e
                  LEFT JOIN tags_v2 AS t ON t.id = e.tag_id
                  WHERE e.target_id = ?1 AND e.type = 0 AND e.deleted = 0
@@ -353,7 +353,7 @@ impl CatalogStore {
         // live subtag), alongside the relationship tombstone. LEFT JOIN so a
         // subtag whose definition hasn't reconciled yet (no `tags_v2` row) is
         // still returned; only known-tombstoned tags are excluded.
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT e.target_id FROM entries_v1 AS e
                  LEFT JOIN tags_v2 AS t ON t.id = e.target_id
                  WHERE e.tag_id = ?1 AND e.type = 1 AND e.deleted = 0
@@ -402,7 +402,7 @@ impl CatalogStore {
         // a live parent), alongside the relationship tombstone. LEFT JOIN so a
         // parent whose definition hasn't reconciled yet (no `tags_v2` row) is
         // still returned; only known-tombstoned tags are excluded.
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT e.tag_id FROM entries_v1 AS e
                  LEFT JOIN tags_v2 AS t ON t.id = e.tag_id
                  WHERE e.target_id = ?1 AND e.type = 1 AND e.deleted = 0

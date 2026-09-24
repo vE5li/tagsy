@@ -51,7 +51,7 @@ impl CatalogStore {
     pub fn tag_manifest_entries(&self) -> Result<Vec<TagManifestEntry>, DatabaseError> {
         let mut statement = self
             .connection
-            .prepare("SELECT id, modified_at, deleted FROM tags_v2")?;
+            .prepare_cached("SELECT id, modified_at, deleted FROM tags_v2")?;
         let entries = statement
             .query_map([], |row| {
                 let deleted: i64 = row.get(2)?;
@@ -277,7 +277,7 @@ impl CatalogStore {
             "SELECT id, name, deleted, {STYLE_COLUMNS} FROM tags_v2{}",
             where_deleted_clause(deleted_rule),
         );
-        let mut statement = self.connection.prepare(&sql)?;
+        let mut statement = self.connection.prepare_cached(&sql)?;
 
         let tag_list = statement
             .query_map([], |row| {
@@ -309,7 +309,7 @@ impl CatalogStore {
             "SELECT name, deleted, {STYLE_COLUMNS} FROM tags_v2 WHERE id = ?1{}",
             and_deleted_clause(deleted_rule),
         );
-        let mut statement = self.connection.prepare(&sql)?;
+        let mut statement = self.connection.prepare_cached(&sql)?;
 
         let tag = statement
             .query_map([tag_id], |row| {
@@ -384,7 +384,7 @@ impl CatalogStore {
             "SELECT id FROM tags_v2 WHERE name LIKE ?1 ESCAPE '\\'{}",
             and_deleted_clause(deleted_rule),
         );
-        let mut statement = self.connection.prepare(&name_sql)?;
+        let mut statement = self.connection.prepare_cached(&name_sql)?;
         let name_matches = statement.query_map([&pattern], |row| row.get::<_, TagId>(0))?;
         for id in name_matches {
             ids.insert(id?);
@@ -419,7 +419,7 @@ impl CatalogStore {
             "SELECT id FROM tags_v2 WHERE id LIKE ?1{}",
             and_deleted_clause(deleted_rule),
         );
-        let mut statement = self.connection.prepare(&id_sql)?;
+        let mut statement = self.connection.prepare_cached(&id_sql)?;
         let id_matches = statement.query_map([&id_pattern], |row| row.get::<_, TagId>(0))?;
         id_matches
             .collect::<Result<Vec<_>, _>>()
@@ -431,7 +431,7 @@ impl CatalogStore {
     pub fn tag_id_from_name(&self, name: &str) -> Result<TagId, DatabaseError> {
         let mut statement = self
             .connection
-            .prepare("SELECT id FROM tags_v2 WHERE name = ?1 AND deleted = 0")?;
+            .prepare_cached("SELECT id FROM tags_v2 WHERE name = ?1 AND deleted = 0")?;
 
         let tag_id = statement
             .query_map([name], |row| row.get(0))?

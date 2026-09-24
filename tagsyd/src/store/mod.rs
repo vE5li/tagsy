@@ -86,6 +86,9 @@ pub(crate) fn open_connection(
     let connection =
         Connection::open(database_path).map_err(|_| DatabaseError::UnableToOpenOrCreate)?;
     connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+    // Reuse parsed statements: the actors run the same few statements per
+    // message, and re-parsing them was a visible share of CPU at scale.
+    connection.set_prepared_statement_cache_capacity(128);
     Ok(connection)
 }
 

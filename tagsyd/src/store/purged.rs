@@ -48,7 +48,7 @@ impl CatalogStore {
     pub fn purged_ids(&self) -> Result<Vec<FileId>, DatabaseError> {
         let mut statement = self
             .connection
-            .prepare("SELECT file_id FROM purged_files_v1")?;
+            .prepare_cached("SELECT file_id FROM purged_files_v1")?;
         let ids = statement
             .query_map([], |row| row.get::<_, FileId>(0))?
             .collect::<Result<Vec<_>, _>>()?;

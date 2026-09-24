@@ -125,7 +125,7 @@ impl CatalogStore {
         // The DESC index on (file_id, version_number) lets SQLite answer this
         // efficiently: for each file_id, take the row with the highest
         // version_number.
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT file_id, content_hash
                  FROM file_versions_v1 AS outer
                  WHERE version_number = (
@@ -208,7 +208,7 @@ impl CatalogStore {
                ON f.id = v.file_id
              WHERE v.content_hash LIKE ?1{deleted_clause}"
         );
-        let mut statement = self.connection.prepare(&sql)?;
+        let mut statement = self.connection.prepare_cached(&sql)?;
         let matches = statement.query_map([&hash_pattern], |row| row.get::<_, FileId>(0))?;
         matches.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -216,7 +216,7 @@ impl CatalogStore {
     /// Return the most recent recorded version for `file_id`, or `None` if the
     /// file has never had a version recorded.
     pub fn latest_version(&self, file_id: FileId) -> Result<Option<FileVersion>, DatabaseError> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT content_hash, observed_at, version_number, origin, size
                  FROM file_versions_v1
                  WHERE file_id = ?1
@@ -248,7 +248,7 @@ impl CatalogStore {
     ///
     /// Used to build `state::ManifestEntry::history`.
     pub fn version_history(&self, file_id: FileId) -> Result<VersionHistory, DatabaseError> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "SELECT version_number, content_hash, size
                  FROM file_versions_v1
                  WHERE file_id = ?1
