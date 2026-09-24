@@ -9,7 +9,8 @@
 //! and local placement copies from it.
 //!
 //! An entry is removed once the content is held elsewhere — in a local sync
-//! directory or on a peer — see [`crate::outbox_release`].
+//! directory or on a peer — or is no longer needed (purged, or superseded by a
+//! newer version); see [`run_release`].
 //!
 //! The outbox is a plain directory under the data dir, with the filesystem as
 //! its only state: an entry is the file `<file_id>.<content_hash>`, written as
@@ -180,6 +181,130 @@ impl Outbox {
     }
 }
 
+/// What the catalog says about an outbox entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogVerdict {
+    /// The content is no longer needed anywhere: drop the entry.
+    Obsolete,
+    /// Still the file's current content (or not yet recorded): keep it until
+    /// another holder has it.
+    Needed,
+}
+
+/// Decide an entry from the catalog alone. Purged or deleted → obsolete: a
+/// delete removes a file's bytes everywhere (short of a `keep_deleted_files`
+/// vault), and the outbox only bridges "not yet held elsewhere", it is no
+/// recycle bin. A version *newer* than the entry's in the history → obsolete:
+/// sync only ever wants the latest content. An entry whose hash is not in the
+/// history yet is still being announced (the ingest raced ahead of the
+/// catalog), and an unknown file may be one whose catalog commit was lost —
+/// both are kept.
+fn catalog_verdict(
+    database: &crate::store::CatalogStore,
+    file_id: FileId,
+    content_hash: &str,
+) -> CatalogVerdict {
+    if database.is_purged(file_id).unwrap_or(false) {
+        return CatalogVerdict::Obsolete;
+    }
+    if matches!(database.file_deletion_state(file_id), Ok(Some(state)) if state.deleted) {
+        return CatalogVerdict::Obsolete;
+    }
+    let Ok(history) = database.version_history(file_id) else {
+        return CatalogVerdict::Needed;
+    };
+    let recorded = history.iter().any(|(_, hash, _)| hash == content_hash);
+    let latest = history.last().map(|(_, hash, _)| hash.as_str());
+    if recorded && latest != Some(content_hash) {
+        CatalogVerdict::Obsolete
+    } else {
+        CatalogVerdict::Needed
+    }
+}
+
+/// Drop every outbox entry that is obsolete or held elsewhere, once.
+async fn release_pass(
+    outbox: &Outbox,
+    relay: &crate::peer::relay::ChunkRelay,
+    command_sender: &tokio::sync::mpsc::UnboundedSender<
+        crate::sync_directories::SyncDirectoryCommand,
+    >,
+    main_db_path: &Path,
+) {
+    let entries = outbox.entries().await;
+    if entries.is_empty() {
+        return;
+    }
+    for (file_id, content_hash) in entries {
+        let verdict = match crate::store::CatalogStore::initialize(main_db_path) {
+            Ok(database) => catalog_verdict(&database, file_id, &content_hash),
+            Err(error) => {
+                log::warn!("Outbox release: cannot read the catalog ({error:?}); keeping entries");
+                return;
+            }
+        };
+        let reason = if verdict == CatalogVerdict::Obsolete {
+            Some("no longer needed")
+        } else if crate::peer::fetch::read_local_if_hash_matches(
+            command_sender,
+            file_id,
+            &content_hash,
+        )
+        .await
+        .is_some()
+        {
+            Some("held in a local sync directory")
+        } else if crate::peer::fetch::probe_availability(relay, file_id, content_hash.clone()).await
+        {
+            Some("held by a peer")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            log::debug!(
+                "Outbox: releasing {} [{}]: {reason}",
+                file_id.to_string(),
+                content_hash.get(..8).unwrap_or(&content_hash)
+            );
+            outbox.remove(file_id, &content_hash).await;
+        }
+    }
+}
+
+/// Keep releasing outbox entries: once at startup, whenever a peer connects
+/// (it may hold, or just have pulled, our uploads), and every `interval` —
+/// which covers a peer that pulls an upload while connected. Recovery on the
+/// same footing as the connect-time missing-content sweep: no per-entry
+/// retries or acknowledgements, just the next pass.
+pub(crate) async fn run_release(
+    outbox: Outbox,
+    relay: crate::peer::relay::ChunkRelay,
+    command_sender: tokio::sync::mpsc::UnboundedSender<
+        crate::sync_directories::SyncDirectoryCommand,
+    >,
+    main_db_path: PathBuf,
+    connections: crate::connections::Connections,
+    interval: std::time::Duration,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    let mut connection_events = connections.subscribe();
+    let mut ticks = tokio::time::interval(interval);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = ticks.tick() => {}
+            event = connection_events.recv() => match event {
+                Ok(tagsy_api::ConnectionEvent::Connected(_))
+                | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            },
+        }
+        release_pass(&outbox, &relay, &command_sender, &main_db_path).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +343,54 @@ mod tests {
         outbox.remove(file_id, &hash).await;
         assert!(outbox.get(file_id, &hash).is_none());
         assert!(outbox.entries().await.is_empty());
+    }
+
+    #[test]
+    fn catalog_verdict_keeps_current_and_pending_content() {
+        let mut database = crate::store::CatalogStore::initialize(":memory:").unwrap();
+        let file_id = FileId::new();
+        database
+            .add_file(file_id, &tagsy_core::LogicalPath::new("a"), 0)
+            .unwrap();
+        database.record_version(file_id, "v1", "local", 1).unwrap();
+
+        // The current version is needed; an unrecorded one is still pending.
+        assert_eq!(
+            catalog_verdict(&database, file_id, "v1"),
+            CatalogVerdict::Needed
+        );
+        assert_eq!(
+            catalog_verdict(&database, file_id, "v2"),
+            CatalogVerdict::Needed
+        );
+        // An unknown file is kept (its catalog commit may have been lost).
+        assert_eq!(
+            catalog_verdict(&database, FileId::new(), "x"),
+            CatalogVerdict::Needed
+        );
+
+        // Once a newer version is recorded, the old content is obsolete.
+        database.record_version(file_id, "v2", "local", 1).unwrap();
+        assert_eq!(
+            catalog_verdict(&database, file_id, "v1"),
+            CatalogVerdict::Obsolete
+        );
+        assert_eq!(
+            catalog_verdict(&database, file_id, "v2"),
+            CatalogVerdict::Needed
+        );
+
+        // A deleted file needs nothing, nor does a purged one.
+        database.remove_file(file_id, i64::MAX).unwrap();
+        assert_eq!(
+            catalog_verdict(&database, file_id, "v2"),
+            CatalogVerdict::Obsolete
+        );
+        database.record_purge(file_id).unwrap();
+        assert_eq!(
+            catalog_verdict(&database, file_id, "v2"),
+            CatalogVerdict::Obsolete
+        );
     }
 
     #[tokio::test]

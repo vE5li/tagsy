@@ -461,6 +461,17 @@ pub async fn run(
         activity: activity.peer_sessions().clone(),
     };
 
+    // Drop outbox entries once some other holder has their content.
+    let outbox_release_handle = tokio::spawn(crate::outbox::run_release(
+        outbox,
+        pending_fetches.clone(),
+        command_sender.clone(),
+        main_db_path.clone(),
+        connections.clone(),
+        std::time::Duration::from_millis(configuration.outbox_release_interval_ms.max(1)),
+        shutdown.token().child_token(),
+    ));
+
     let mut peer_handles = Vec::new();
     for peer in &configuration.peers {
         if peer.address.is_some() {
@@ -541,6 +552,7 @@ pub async fn run(
         // Join the dedicated OS thread now that its runtime has finished.
         let _ = sync_directories_thread.join();
         let _ = changes_handle.await;
+        let _ = outbox_release_handle.await;
         for handle in peer_handles {
             let _ = handle.await;
         }

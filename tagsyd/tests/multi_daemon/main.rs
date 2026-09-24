@@ -116,6 +116,100 @@ async fn file_written_into_spoke_directory_reaches_hub() {
     cluster.assert_converged();
 }
 
+/// An upload no local directory takes waits in the outbox until a peer holds
+/// it, then is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_is_released_from_outbox_after_handoff() {
+    let (mut cluster, _central, phone, _) = hub_and_spoke();
+    cluster.start_connected().await;
+
+    cluster
+        .upload(phone, "archive-only.txt", b"central keeps this", vec![])
+        .await;
+
+    cluster.settle().await;
+    cluster.assert_converged();
+    cluster.wait_for_empty_outbox(phone).await;
+}
+
+/// An upload made while no peer is reachable survives a restart of the
+/// uploader (the outbox holds the only copy) and is handed off once a peer
+/// connects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn offline_upload_survives_restart_and_is_handed_off() {
+    let (mut cluster, central, phone, _) = hub_and_spoke();
+    cluster.start_connected().await;
+    cluster.stop(central).await;
+
+    cluster
+        .upload(phone, "offline.txt", b"uploaded while alone", vec![])
+        .await;
+    assert_eq!(cluster.outbox_entries(phone).len(), 1);
+    cluster.restart(phone).await;
+    assert_eq!(
+        cluster.outbox_entries(phone).len(),
+        1,
+        "the outbox survives a restart"
+    );
+
+    cluster.start(central).await;
+    cluster.wait_all_connected().await;
+    cluster.settle().await;
+    cluster.assert_converged();
+    cluster.wait_for_empty_outbox(phone).await;
+}
+
+/// An upload the uploader places in its own sync directory is released from
+/// the outbox without any peer involved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_placed_locally_is_released_from_outbox() {
+    let (mut cluster, central, _phone, _) = hub_and_spoke();
+    cluster.start_connected().await;
+
+    cluster
+        .upload(
+            central,
+            "stored-here.txt",
+            b"in the universal store",
+            vec![],
+        )
+        .await;
+
+    cluster.settle().await;
+    cluster.assert_converged();
+    cluster.wait_for_empty_outbox(central).await;
+}
+
+/// The CLI's path: upload and edit through the control socket, handing the
+/// daemon a path it copies itself; the source can go right away.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_and_edit_over_the_control_socket() {
+    use tagsy_api::Backend;
+
+    let (mut cluster, _central, phone, phone_tag) = hub_and_spoke();
+    cluster.start_connected().await;
+    let client = cluster.control_client(phone).await;
+
+    let source = cluster.scratch_file(phone, b"sent by the cli");
+    let file_id = client
+        .upload_file(source.clone(), "from-cli.txt".to_owned(), vec![phone_tag])
+        .await
+        .expect("upload over the control socket");
+    std::fs::remove_file(&source).unwrap();
+    cluster.settle().await;
+    cluster.assert_converged();
+
+    let source = cluster.scratch_file(phone, b"edited by the cli, longer");
+    client
+        .edit_file(file_id, source.clone())
+        .await
+        .expect("edit over the control socket");
+    std::fs::remove_file(&source).unwrap();
+    cluster.settle().await;
+    cluster.assert_converged();
+    cluster.wait_for_empty_outbox(phone).await;
+}
+
 /// Regression: an on-demand fetch of content the node already holds used to
 /// `return` out of `CatalogWriter::run`, silently stopping every later catalog
 /// write.

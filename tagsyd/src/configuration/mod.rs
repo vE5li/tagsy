@@ -216,6 +216,12 @@ pub fn default_reconnect_interval_ms() -> u64 {
     5000
 }
 
+/// Default for [`Configuration::outbox_release_interval_ms`]: once a minute.
+/// A pass over an empty outbox is a single directory listing.
+pub fn default_outbox_release_interval_ms() -> u64 {
+    60_000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Configuration {
     /// Synchronized directories on the device itself.
@@ -295,6 +301,12 @@ pub struct Configuration {
     /// tests, which would otherwise spend the full default per reconnect.
     #[serde(default = "default_reconnect_interval_ms")]
     pub reconnect_interval_ms: u64,
+    /// How often, in milliseconds, the daemon checks whether uploads waiting
+    /// in its outbox are now held by another device (and can be dropped); a
+    /// check also runs whenever a peer connects. Defaults to
+    /// [`default_outbox_release_interval_ms`].
+    #[serde(default = "default_outbox_release_interval_ms")]
+    pub outbox_release_interval_ms: u64,
     /// Query → `argv` mapping consulted by the desktop UI's external-edit
     /// action. See [`EditorRule`]. Empty (the default) means no file has an
     /// external editor and the UI reports that rather than guessing. The

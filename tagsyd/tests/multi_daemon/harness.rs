@@ -38,6 +38,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const TEST_DEBOUNCE_MS: u64 = 100;
 /// Fast redial so reconnect tests don't wait out the 5 s default.
 const TEST_RECONNECT_INTERVAL_MS: u64 = 100;
+/// Frequent outbox checks, so a handed-off upload is released promptly — but
+/// comfortably longer than [`QUIET_WINDOW`]: each check of an entry nobody
+/// else holds yet is actor activity, and must leave quiet gaps for `settle`.
+const TEST_OUTBOX_RELEASE_INTERVAL_MS: u64 = 1_500;
 
 /// Messages handled so far by one node's catalog writer, sync-directory
 /// actor and peer sessions: unchanged across two samples means it did nothing.
@@ -101,6 +105,8 @@ struct Node {
 
 struct RunningNode {
     backend: InProcessBackend,
+    /// Kept to serve a control socket on demand ([`Cluster::control_client`]).
+    api: tagsyd::frontend::api::ApiService,
     shutdown: tagsyd::ShutdownSignal,
     thread: std::thread::JoinHandle<()>,
 }
@@ -270,6 +276,7 @@ impl Cluster {
             tag_manifest_batch_size: tagsyd::configuration::default_tag_manifest_batch_size(),
             purge_manifest_batch_size: tagsyd::configuration::default_purge_manifest_batch_size(),
             reconnect_interval_ms: TEST_RECONNECT_INTERVAL_MS,
+            outbox_release_interval_ms: TEST_OUTBOX_RELEASE_INTERVAL_MS,
             editor_rules: Vec::new(),
             tag_rules: Vec::new(),
             home_sections: Vec::new(),
@@ -331,7 +338,8 @@ impl Cluster {
             .expect("node thread reported startup")
             .unwrap_or_else(|error| panic!("{} failed to start: {error}", self.name(id)));
         self.nodes[id.0].running = Some(RunningNode {
-            backend: InProcessBackend::new(api),
+            backend: InProcessBackend::new(api.clone()),
+            api,
             shutdown,
             thread,
         });
@@ -482,6 +490,60 @@ impl Cluster {
         }
     }
 
+    /// Serve a node's control socket and connect to it with the IPC client —
+    /// the CLI's path to the daemon.
+    pub async fn control_client(&self, id: NodeId) -> tagsy_ipc::IpcBackend {
+        let node = self.node(id);
+        let running = node.running.as_ref().expect("node is running");
+        let socket = node.root.join("control.sock");
+        let _ = std::fs::remove_file(&socket);
+        tokio::spawn(tagsyd::control::serve_control(
+            running.api.clone(),
+            socket.clone(),
+            running.shutdown.token().child_token(),
+        ));
+        let deadline = Instant::now() + SETTLE_TIMEOUT;
+        loop {
+            if let Ok(client) = tagsy_ipc::IpcBackend::connect(&socket).await {
+                return client;
+            }
+            assert!(Instant::now() < deadline, "control socket never came up");
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// The node's outbox entries (`<file_id>.<content_hash>`), sorted.
+    pub fn outbox_entries(&self, id: NodeId) -> Vec<String> {
+        let mut entries: Vec<String> = std::fs::read_dir(self.node(id).data_dir().join("outbox"))
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| !name.ends_with(".partial"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        entries.sort();
+        entries
+    }
+
+    /// Wait until a node's outbox has released every entry.
+    pub async fn wait_for_empty_outbox(&self, id: NodeId) {
+        let deadline = Instant::now() + SETTLE_TIMEOUT;
+        loop {
+            let entries = self.outbox_entries(id);
+            if entries.is_empty() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{}'s outbox still holds {entries:?}",
+                self.name(id)
+            );
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
     /// A node's main catalog database.
     pub fn main_db_path(&self, id: NodeId) -> PathBuf {
         self.node(id).data_dir().join("main.db")
@@ -609,7 +671,9 @@ impl Cluster {
         std::fs::remove_file(&source).expect("remove edit source");
     }
 
-    fn scratch_file(&self, id: NodeId, bytes: &[u8]) -> PathBuf {
+    /// A fresh file holding `bytes` in the node's scratch directory (outside
+    /// every sync directory), for use as an upload source.
+    pub fn scratch_file(&self, id: NodeId, bytes: &[u8]) -> PathBuf {
         let path = self
             .node(id)
             .scratch_dir()
