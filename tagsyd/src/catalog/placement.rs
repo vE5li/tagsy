@@ -266,8 +266,8 @@ pub(crate) async fn fetch_and_place_deferred(
 ///
 /// Shared by the deferred tag-placement path ([`fetch_and_place_deferred`]),
 /// the connect-time missing-content sweep, and local placement of an API
-/// upload/edit (`announce_provided`, whose bytes come from the registered
-/// provider the relay asks first). All know a file *should* be local but hold
+/// upload/edit (`announce_upload`, whose bytes come from the outbox,
+/// which the relay asks first). All know a file *should* be local but hold
 /// no (current) bytes, and all recover it the same way: one fetch, then
 /// materialize. Takes only owned, `Send` data so the caller can spawn it off
 /// the single-threaded `handle_changes` consumer (awaiting a `fetch_via_relay`

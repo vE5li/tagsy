@@ -43,6 +43,7 @@ pub mod control;
 pub mod file_bytes;
 pub mod frontend;
 pub mod operations;
+pub mod outbox;
 pub mod paths;
 pub mod peer;
 #[cfg(feature = "preview-generation")]
@@ -275,9 +276,20 @@ pub async fn run(
     // Shared content-keyed chunk relay. Every peer session and `handle_changes`
     // holds a clone: requests forwarded on one session and replies arriving on
     // another share one waiter table, so multi-source pulls and relay coalescing
-    // work across links. Also owns the temporary-provider registry (CLI
-    // uploads). Cheap to clone (Arcs).
-    let pending_fetches = crate::peer::relay::ChunkRelay::new(runtime_configuration.clone());
+    // work across links. Local receives are answered from the outbox first.
+    // Cheap to clone (Arcs).
+    //
+    // Daemon-owned copies of uploads until some other holder has them. The
+    // relay serves from it like any other local source.
+    let outbox = crate::outbox::Outbox::new(paths.outbox_dir());
+    if let Err(error) = outbox.prepare().await {
+        log::error!(
+            "Failed to prepare the outbox at {}: {error}; uploads will fail",
+            outbox.directory().display()
+        );
+    }
+    let pending_fetches =
+        crate::peer::relay::ChunkRelay::new(runtime_configuration.clone(), outbox.clone());
 
     // Sibling of `pending_fetches` for previews: a content-keyed waiter table
     // shared by every peer session and `handle_changes`, so a preview requested

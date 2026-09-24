@@ -100,14 +100,13 @@ class _TagDetailScreenState extends State<TagDetailScreen> {
   ///   related tags (parents, subtags) by row, and a hierarchy edge can touch
   ///   any tag, so rather than track the related-id set we over-approximate
   ///   (tag mutations are rare).
-  /// - `FileChanged` / `FileTagChanged` / `ProviderReleased`: never relevant.
+  /// - `FileChanged` / `FileTagChanged`: never relevant.
   bool _affectsThisTag(tagsy.ApiEventDto event) => switch (event) {
     tagsy.ApiEventDto_Resynced() => true,
     tagsy.ApiEventDto_TagChanged() => true,
     tagsy.ApiEventDto_TagTagChanged() => true,
     tagsy.ApiEventDto_FileChanged() => false,
     tagsy.ApiEventDto_FileTagChanged() => false,
-    tagsy.ApiEventDto_ProviderReleased() => false,
   };
 
   Future<void> _load() async {

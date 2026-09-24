@@ -143,14 +143,9 @@ class _SectionsViewState extends State<SectionsView> {
         final event = await events.next();
         if (event == null) break;
         if (!mounted) break;
-        // `ProviderReleased` is a byte-staging handoff, not a catalog mutation,
-        // so it can't change any section's results — skip it (matches the home
-        // screen's live-search subscription).
-        final relevant = switch (event) {
-          tagsy.ApiEventDto_ProviderReleased() => false,
-          _ => true,
-        };
-        if (relevant) await _load();
+        // Every event is a catalog change (or a `Resynced`), which can alter
+        // any section's results (matches the home screen's live search).
+        await _load();
       }
     } catch (_) {
       // Transient stream errors are surfaced by bootstrap; ignore here so a

@@ -89,7 +89,6 @@ class _StorageStatsIndicatorState extends State<StorageStatsIndicator> {
     tagsy.ApiEventDto_TagChanged() => false,
     tagsy.ApiEventDto_FileTagChanged() => false,
     tagsy.ApiEventDto_TagTagChanged() => false,
-    tagsy.ApiEventDto_ProviderReleased() => false,
   };
 
   @override

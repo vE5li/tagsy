@@ -1373,9 +1373,6 @@ pub enum ApiEventDto {
     /// The stream lagged or reconnected; every subscriber should re-fetch its
     /// state, since intervening changes may have been dropped.
     Resynced,
-    /// A provided file was handed off; a client staging its bytes may release
-    /// them. Pass-through of [`ApiEvent::ProviderReleased`].
-    ProviderReleased { file_id: String },
     /// A file's own state changed (added / moved / content edited / deleted /
     /// restored). A screen showing `file_id` should reload.
     FileChanged { file_id: String },
@@ -1398,11 +1395,6 @@ impl From<ApiEvent> for ApiEventDto {
 
         let change = match event {
             ApiEvent::Resynced => return ApiEventDto::Resynced,
-            ApiEvent::ProviderReleased { file_id } => {
-                return ApiEventDto::ProviderReleased {
-                    file_id: file_id.to_string(),
-                };
-            }
             ApiEvent::Changed(change) => change,
         };
 

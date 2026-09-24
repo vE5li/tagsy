@@ -61,17 +61,8 @@ pub enum ChunkAnswer {
 /// `source`, serving the canonical chunk at `offset`.
 ///
 /// `pre_verified` says the caller has already established that `source`'s bytes
-/// hash to `content_hash` — true for a provider (looked up by its
-/// `(file_id, content_hash)` registration key) and for a sync-directory file
-/// whose `ReadFile` already returned a matching hash. When `pre_verified`, no
-/// hashing is done here.
-///
-/// **Providers must be `pre_verified`.** Re-hashing a [`ProviderSource`] reads
-/// the whole file *through the provider* and, on reaching the end, fires the
-/// provider's `on_complete` — which the daemon interprets as "the transfer is
-/// done, release the file". Hashing it here would therefore release the file
-/// after the first chunk and make every later chunk unavailable. Providers are
-/// trusted by their registration key instead.
+/// hash to `content_hash` (e.g. an outbox entry, named by the hash computed
+/// while ingesting it). When `pre_verified`, no hashing is done here.
 ///
 /// When `!pre_verified` (e.g. a sync-directory file we want to (re)confirm),
 /// verification is cached by `cache` keyed on the source's on-disk path +
@@ -82,8 +73,6 @@ pub enum ChunkAnswer {
 /// [`ChunkAnswer::Miss`]. An out-of-range offset yields an empty
 /// [`ChunkAnswer::Data`] for a matching source (harmless — the receiver
 /// terminates on size), consistent with `read_chunk_at`.
-///
-/// [`ProviderSource`]: crate::peer::transfer::source::ProviderSource
 pub async fn answer_chunk_request<S: ChunkSource>(
     source: &S,
     source_path: Option<&Path>,
@@ -102,7 +91,7 @@ pub async fn answer_chunk_request<S: ChunkSource>(
 
     if !pre_verified {
         // Verify the source matches `content_hash`, using the cache when
-        // possible. Never applied to a provider (see the doc note above).
+        // possible.
         let verified = match source_path {
             Some(path) => {
                 let (mtime, size) = match tokio::fs::metadata(path).await {
@@ -195,7 +184,6 @@ async fn hash_source<S: ChunkSource>(source: &S) -> Option<String> {
 mod tests {
     use super::*;
     use crate::file_bytes::FileBytes;
-    use crate::peer::transfer::source::{ProviderChunkRequest, ProviderSource};
 
     /// The serve side verifies against `content_hash` and serves the canonical
     /// chunk; a misaligned offset is a miss; a wrong hash is a miss.
@@ -224,64 +212,6 @@ mod tests {
         ));
     }
 
-    /// A pre-verified source is served without any hashing — the regression
-    /// guard for the CLI-upload bug: re-hashing a `ProviderSource` streams the
-    /// whole file and fires its `on_complete` at EOF, which released the file
-    /// after the first chunk and made later chunks unavailable. With
-    /// `pre_verified`, `on_complete` never fires from serving, and each chunk
-    /// is served independently.
-    #[tokio::test]
-    async fn provider_pre_verified_serves_all_chunks_without_completing() {
-        let bytes: Vec<u8> = (0..(CHUNK_SIZE * 3 + 9)).map(|i| i as u8).collect();
-        let hash = blake3::hash(&bytes).to_hex().to_string();
-
-        // Wire a fake provider client that answers chunk requests from `bytes`.
-        let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<ProviderChunkRequest>();
-        let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let provider = ProviderSource::new(req_tx, done_tx);
-
-        let serve_bytes = bytes.clone();
-        tokio::spawn(async move {
-            while let Some((offset, reply)) = req_rx.recv().await {
-                let start = (offset as usize).min(serve_bytes.len());
-                let end = (start + CHUNK_SIZE).min(serve_bytes.len());
-                let last = end >= serve_bytes.len();
-                let _ = reply.send(Ok((serve_bytes[start..end].to_vec(), last)));
-            }
-        });
-
-        let cache = VerifiedHashCache::new();
-        // Serve every chunk pre-verified (as the daemon does for a registered
-        // provider); each must return the right bytes.
-        let mut offset = 0u64;
-        while offset < bytes.len() as u64 {
-            match answer_chunk_request(&provider, None, &cache, &hash, offset, true).await {
-                ChunkAnswer::Data(chunk) => {
-                    let start = offset as usize;
-                    let end = (start + CHUNK_SIZE).min(bytes.len());
-                    assert_eq!(chunk, bytes[start..end], "chunk at {offset} mismatched");
-                }
-                ChunkAnswer::Miss => panic!("chunk at {offset} unexpectedly missed"),
-            }
-            offset += CHUNK_SIZE as u64;
-        }
-
-        // `on_complete` fires exactly once — when the *final* chunk is served
-        // (its provider reply carried `last = true`) — not during any earlier
-        // verification. Crucially it did not fire before the last chunk, so no
-        // chunk was ever unavailable.
-        assert!(
-            done_rx.try_recv().is_ok(),
-            "expected one on_complete at EOF"
-        );
-        assert!(
-            done_rx.try_recv().is_err(),
-            "on_complete must fire only once"
-        );
-    }
-
-    /// The verified-hash cache invalidates on mtime/size change: a file edited
-    /// after being cached stops matching its old hash.
     #[tokio::test]
     async fn verified_cache_invalidates_on_change() {
         let dir = std::env::temp_dir().join(format!(

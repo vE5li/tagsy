@@ -18,7 +18,6 @@ use tagsy_api::{
     OperationStream, PurgeOutcome, RetagSummary, SearchResults, StorageStats, SubtagRule, Tag,
     TagRuleReport,
 };
-use tagsy_core::content::hash_and_len;
 use tagsy_core::{FileId, FileInfo, FileKind, Preview, TagId, TagStyle};
 use tokio::net::UnixStream;
 use tokio::sync::{Mutex, oneshot};
@@ -45,41 +44,6 @@ pub struct IpcBackend {
     inner: Arc<IpcClientInner>,
 }
 
-/// Read the chunk of `path` starting at `offset` (bounded by the transfer chunk
-/// size), returning the bytes and whether it reached end-of-file. Client side
-/// of the provider protocol.
-async fn read_provider_chunk(path: &Path, offset: u64) -> (Vec<u8>, bool) {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    let chunk_size = tagsy_core::content::CHUNK_SIZE;
-    let file = match tokio::fs::File::open(path).await {
-        Ok(file) => file,
-        Err(error) => {
-            log::warn!("Provider: failed to open {}: {error}", path.display());
-            return (Vec::new(), true);
-        }
-    };
-    let total = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-    let mut file = file;
-    if file.seek(std::io::SeekFrom::Start(offset)).await.is_err() {
-        return (Vec::new(), true);
-    }
-    let mut buffer = vec![0u8; chunk_size];
-    let mut filled = 0;
-    while filled < chunk_size {
-        match file.read(&mut buffer[filled..]).await {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(error) => {
-                log::warn!("Provider: read error on {}: {error}", path.display());
-                return (Vec::new(), true);
-            }
-        }
-    }
-    buffer.truncate(filled);
-    let last = offset + filled as u64 >= total;
-    (buffer, last)
-}
-
 struct IpcClientInner {
     /// Write half of the control socket, behind a mutex so concurrent API
     /// calls serialize their frames without interleaving bytes.
@@ -96,10 +60,6 @@ struct IpcClientInner {
     /// Broadcast of connection events received on this connection.
     /// `subscribe_connections` taps it.
     connection_events: tokio::sync::broadcast::Sender<ConnectionEvent>,
-    /// The local file this client is currently serving as a temporary provider
-    /// (an in-flight upload/edit). The reader task answers the daemon's
-    /// `ProviderChunkRequest`s by reading chunks from this path.
-    provider_path: Mutex<Option<PathBuf>>,
 }
 
 impl IpcBackend {
@@ -145,7 +105,6 @@ impl IpcBackend {
             events: events.clone(),
             operation_events: operation_events.clone(),
             connection_events: connection_events.clone(),
-            provider_path: Mutex::new(None),
         });
 
         // Reader task: demultiplex responses (to waiters) and events (to the
@@ -194,37 +153,7 @@ impl IpcBackend {
                         // Best-effort: if no one is subscribed, drop.
                         let _ = reader_inner.connection_events.send(event);
                     }
-                    // The daemon is pulling a chunk of the file we're currently
-                    // providing (an in-flight upload/edit). Read it from the
-                    // local file and reply.
-                    ControlFrame::ProviderChunkRequest { chunk_id, offset } => {
-                        let path = reader_inner.provider_path.lock().await.clone();
-                        let (bytes, last) = match path {
-                            Some(path) => read_provider_chunk(&path, offset).await,
-                            None => {
-                                log::warn!("Provider chunk requested but no active provider file");
-                                (Vec::new(), true)
-                            }
-                        };
-                        let reply = ControlFrame::ProviderChunkReply {
-                            chunk_id,
-                            bytes,
-                            last,
-                        };
-                        let message = match encode_frame(&reply) {
-                            Ok(message) => message,
-                            Err(error) => {
-                                log::warn!("serialize provider chunk reply: {error}");
-                                continue;
-                            }
-                        };
-                        let mut writer = reader_inner.writer.lock().await;
-                        if let Err(error) = writer.send(message).await {
-                            log::debug!("Failed to send provider chunk reply: {error}");
-                            break;
-                        }
-                    }
-                    ControlFrame::Request { .. } | ControlFrame::ProviderChunkReply { .. } => {
+                    ControlFrame::Request { .. } => {
                         log::warn!("Daemon sent an unexpected frame to a client; ignoring");
                     }
                 }
@@ -292,22 +221,12 @@ impl IpcBackend {
     }
 }
 
-/// Block until the daemon reports `file_id` has been handed off
-/// ([`ApiEvent::ProviderReleased`]), or the event stream ends.
-async fn wait_for_release(
-    events: &mut tokio::sync::broadcast::Receiver<ApiEvent>,
-    file_id: FileId,
-) {
-    loop {
-        match events.recv().await {
-            Ok(ApiEvent::ProviderReleased { file_id: released }) if released == file_id => {
-                return;
-            }
-            Ok(_) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-        }
-    }
+/// `path` made absolute against this process's working directory, for a
+/// request the daemon resolves on its own.
+fn absolute(path: PathBuf) -> Result<PathBuf, ApiError> {
+    std::path::absolute(&path).map_err(|error| {
+        ApiError::InvalidArgument(format!("cannot resolve {}: {error}", path.display()))
+    })
 }
 
 /// Collapse a [`ControlResponse`] error variant into the `Result` the
@@ -501,63 +420,40 @@ impl Backend for IpcBackend {
         }
     }
 
-    /// Upload a file by serving it as a temporary chunk provider (no bytes are
-    /// loaded into memory or sent up front). Computes the content hash by
-    /// streaming `path`, registers `path` as the file this connection serves,
-    /// sends the metadata upload request, then blocks until the daemon reports
-    /// the content has been handed off (a peer completed pulling it), or the
-    /// connection ends.
+    /// Upload a file by handing the daemon its absolute path: client and
+    /// daemon share the host and user, so the daemon copies the file into its
+    /// outbox itself and answers once it holds its own copy.
     async fn upload_file(
         &self,
         path: PathBuf,
         path_name: String,
         tags: Vec<TagId>,
     ) -> Result<FileId, ApiError> {
-        let (content_hash, size) = hash_and_len(&path).await?;
-        // Subscribe before sending so we cannot miss the release event.
-        let mut events = self.inner.events.subscribe();
-        *self.inner.provider_path.lock().await = Some(path);
-
-        let file_id = match self
+        // The daemon reads the file itself, so it needs a path that does not
+        // depend on this process's working directory.
+        let path = absolute(path)?;
+        match self
             .call(ControlRequest::UploadFile {
+                path,
                 path_name,
-                content_hash,
-                size,
                 tags,
             })
             .await?
         {
-            ControlResponse::FileId(file_id) => file_id,
-            other => return Err(unexpected(other)),
-        };
-
-        wait_for_release(&mut events, file_id).await;
-        *self.inner.provider_path.lock().await = None;
-        Ok(file_id)
+            ControlResponse::FileId(file_id) => Ok(file_id),
+            other => Err(unexpected(other)),
+        }
     }
 
-    /// Edit (replace) a file's content, serving the new bytes as a temporary
-    /// provider. Same handoff semantics as [`Self::upload_file`].
     async fn edit_file(&self, file_id: FileId, path: PathBuf) -> Result<(), ApiError> {
-        let (content_hash, size) = hash_and_len(&path).await?;
-        let mut events = self.inner.events.subscribe();
-        *self.inner.provider_path.lock().await = Some(path);
-
+        let path = absolute(path)?;
         match self
-            .call(ControlRequest::EditFile {
-                file_id,
-                content_hash,
-                size,
-            })
+            .call(ControlRequest::EditFile { file_id, path })
             .await?
         {
-            ControlResponse::Ok => {}
-            other => return Err(unexpected(other)),
+            ControlResponse::Ok => Ok(()),
+            other => Err(unexpected(other)),
         }
-
-        wait_for_release(&mut events, file_id).await;
-        *self.inner.provider_path.lock().await = None;
-        Ok(())
     }
 
     async fn fetch_file(
@@ -579,10 +475,8 @@ impl Backend for IpcBackend {
 
     /// Start an external edit. Thin IPC wrapper: the daemon does the actual
     /// work (local-path check or on-demand fetch into a per-request temp) and
-    /// returns the path. No chunk-provider setup is needed here — unlike
-    /// [`Self::edit_file`], the client does not stream bytes in either
-    /// direction. The daemon reads the edited bytes off its own filesystem
-    /// when [`Self::finish_edit`] runs (client and daemon share it).
+    /// returns the path. The daemon reads the edited bytes off the shared
+    /// filesystem when [`Self::finish_edit`] runs.
     async fn begin_edit(&self, file_id: FileId) -> Result<PathBuf, ApiError> {
         match self.call(ControlRequest::BeginEdit { file_id }).await? {
             ControlResponse::FilePath(path) => Ok(path),

@@ -216,19 +216,18 @@ pub enum CatalogCommand {
         /// The announcing peer (stored in `file_versions.origin`).
         origin: ChangeOrigin,
     },
-    /// A locally-provided upload/edit: the client (CLI / UI) holds the bytes
-    /// and serves them on demand from a temporary provider, registered before
-    /// this is sent. `handle_changes` records the file (for
+    /// A local upload/edit (CLI / UI) whose bytes are already in the outbox
+    /// (see [`crate::outbox`]). `handle_changes` records the file (for
     /// `FileMetadataAdded`) and version, announces the metadata-only change to
-    /// peers, and pulls the bytes from the provider into every matching local
+    /// peers, and pulls the bytes from the outbox into every matching local
     /// sync directory — the same placement a peer-announced file gets.
-    AnnounceProvided {
+    AnnounceUpload {
         file_id: FileId,
         /// `Some(logical_path)` for a new file (`FileMetadataAdded`); `None`
         /// for an edit of an existing file (`FileMetadataChanged`).
         logical_path: Option<LogicalPath>,
         content_hash: String,
-        /// Content size in bytes, read at hash time by the provider (CLI).
+        /// Content size in bytes, as ingested into the outbox.
         size: u64,
         tags: Vec<TagId>,
     },

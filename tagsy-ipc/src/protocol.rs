@@ -96,28 +96,21 @@ pub enum ControlRequest {
         tag_id: TagId,
         style: TagStyle,
     },
-    /// Upload a file the client provides on demand. The client does *not* send
-    /// the bytes; it sends the logical name, the precomputed BLAKE3
-    /// `content_hash`, and tags, then serves chunks via the provider protocol
-    /// (see [`ControlFrame::ProviderChunkRequest`]). Answered with
-    /// [`ControlResponse::FileId`] once the upload has been handed off to every
-    /// connected storing peer (or there were none to serve).
+    /// Upload the file at `path` — an absolute path on this host, which the
+    /// daemon reads itself (clients run as the daemon's user) and copies into
+    /// its outbox before answering. Answered with [`ControlResponse::FileId`];
+    /// the client may delete `path` afterwards.
     UploadFile {
+        path: PathBuf,
         path_name: String,
-        content_hash: String,
-        /// The file's content size in bytes, computed by the client alongside
-        /// `content_hash`.
-        size: u64,
         tags: Vec<TagId>,
     },
-    /// Replace an existing file's content, provided on demand like
-    /// [`ControlRequest::UploadFile`]. Answered with [`ControlResponse::Ok`]
-    /// once the new content has been handed off.
+    /// Replace an existing file's content with the file at `path`, ingested
+    /// like [`ControlRequest::UploadFile`]. Answered with
+    /// [`ControlResponse::Ok`].
     EditFile {
         file_id: FileId,
-        content_hash: String,
-        /// The file's new content size in bytes, computed by the client.
-        size: u64,
+        path: PathBuf,
     },
     /// Start an external edit. The daemon returns the path the client should
     /// hand to an editor — either the file's real sync-dir path (edit in
@@ -348,30 +341,14 @@ pub enum ControlFrame {
     /// Daemon -> client: an unsolicited peer-connection event on a connection
     /// that sent [`ControlRequest::SubscribeConnections`].
     ConnectionEvent(tagsy_api::ConnectionEvent),
-
-    // Reverse-direction request/reply used while the client is serving an
-    // upload/edit's bytes on demand. Correlated by `chunk_id` (per connection).
-    /// Daemon -> client: send the chunk of the in-flight upload/edit at
-    /// `offset` (the client knows which file it is currently providing).
-    ProviderChunkRequest { chunk_id: u64, offset: u64 },
-    /// Client -> daemon: the requested chunk. `last` marks end of file.
-    ProviderChunkReply {
-        chunk_id: u64,
-        #[serde(with = "serde_bytes")]
-        bytes: Vec<u8>,
-        last: bool,
-    },
 }
 
 /// Encode a [`ControlFrame`] to a binary WebSocket message.
 ///
 /// The control protocol uses **binary msgpack** (via `rmp_serde`), not JSON
-/// text. This matters for the provider protocol: JSON encodes a `Vec<u8>` chunk
-/// as an array of decimal numbers (~4-6x blow-up), producing multi-hundred-KB
-/// frames that are both slow and fragile. msgpack encodes bytes compactly —
-/// provided the field is marked `#[serde(with = "serde_bytes")]`; a plain
-/// `Vec<u8>` still becomes an array of integers. It also mirrors the peer
-/// `Frame` wire format (also `rmp`).
+/// text, mirroring the peer `Frame` wire format (also `rmp`). A byte payload
+/// must be marked `#[serde(with = "serde_bytes")]` to be encoded compactly; a
+/// plain `Vec<u8>` becomes an array of integers.
 pub fn encode_frame(frame: &ControlFrame) -> Result<Message, String> {
     let bytes = rmp_serde::to_vec_named(frame).map_err(|error| format!("serialize: {error}"))?;
     Ok(Message::binary(bytes))
@@ -391,9 +368,6 @@ mod tests {
     use super::*;
 
     /// Every control frame must round-trip through the binary codec unchanged.
-    /// The provider chunk reply is exercised explicitly at a realistic chunk
-    /// size because a JSON codec would serialize its `Vec<u8>` as a giant
-    /// number-array, which is exactly the failure the binary codec prevents.
     #[test]
     fn frames_round_trip_through_binary_codec() {
         let file_id = FileId::new();
@@ -403,31 +377,20 @@ mod tests {
                 id: 7,
                 request: ControlRequest::EditFile {
                     file_id,
-                    content_hash: "deadbeef".to_owned(),
-                    size: 123,
+                    path: PathBuf::from("/home/user/notes.txt"),
                 },
             },
             ControlFrame::Request {
                 id: 8,
                 request: ControlRequest::UploadFile {
+                    path: PathBuf::from("/home/user/notes.txt"),
                     path_name: "notes.txt".to_owned(),
-                    content_hash: "cafef00d".to_owned(),
-                    size: 456,
                     tags: vec![TagId::new()],
                 },
             },
             ControlFrame::Response {
                 id: 7,
                 response: ControlResponse::FileId(file_id),
-            },
-            ControlFrame::ProviderChunkRequest {
-                chunk_id: 3,
-                offset: 65536,
-            },
-            ControlFrame::ProviderChunkReply {
-                chunk_id: 3,
-                bytes: vec![0xABu8; tagsy_core::content::CHUNK_SIZE],
-                last: true,
             },
         ];
 
@@ -436,43 +399,6 @@ mod tests {
             let decoded = decode_frame(&message).expect("decode");
             // Compare via debug repr (ControlFrame has no PartialEq).
             assert_eq!(format!("{frame:?}"), format!("{decoded:?}"));
-        }
-    }
-
-    /// A chunk reply encodes its bytes as one binary blob: the frame is the
-    /// payload plus a small constant, not an integer array (~1.5x larger and
-    /// far slower to encode).
-    #[test]
-    fn chunk_reply_bytes_are_encoded_as_binary() {
-        let payload = vec![0xABu8; tagsy_core::content::CHUNK_SIZE];
-        let message = encode_frame(&ControlFrame::ProviderChunkReply {
-            chunk_id: 1,
-            bytes: payload.clone(),
-            last: false,
-        })
-        .expect("encode");
-        assert!(
-            message.len() < payload.len() + 64,
-            "{} bytes",
-            message.len()
-        );
-    }
-
-    /// A large chunk reply must not be mis-decoded as another variant (the
-    /// original bug surfaced as "missing field content_hash" when a big frame
-    /// was parsed against a request shape). msgpack is length-prefixed and
-    /// self-describing, so a reply decodes only as a reply.
-    #[test]
-    fn large_chunk_reply_does_not_alias_a_request() {
-        let reply = ControlFrame::ProviderChunkReply {
-            chunk_id: 0,
-            bytes: vec![0x00u8; 475_000],
-            last: false,
-        };
-        let message = encode_frame(&reply).expect("encode");
-        match decode_frame(&message).expect("decode") {
-            ControlFrame::ProviderChunkReply { .. } => {}
-            other => panic!("large chunk reply decoded as {other:?}"),
         }
     }
 }

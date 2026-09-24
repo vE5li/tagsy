@@ -3,7 +3,7 @@
 //!
 //! The preview analogue of the [chunk relay](super::chunks), but simpler: a
 //! preview is one small blob, not a windowed byte stream, so there is no
-//! offset, no chunking, no integrity re-hashing, and no provider registry. A
+//! offset, no chunking, no integrity re-hashing, and no outbox. A
 //! preview's request identity is `(file_id, content_hash)`; a holder either
 //! produces a preview of that exact content ([`Sync::PreviewData`]) or misses
 //! ([`Sync::PreviewMiss`]).

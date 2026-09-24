@@ -579,8 +579,8 @@ impl Cluster {
     }
 
     /// Upload `bytes` under `logical_path` through the node's API (the path the
-    /// CLI / UI take). The source stays in the node's scratch dir so peers can
-    /// pull it on demand.
+    /// CLI / UI take). The source is deleted as soon as the call returns, as
+    /// the CLI does: from then on the daemon must serve its own copy.
     pub async fn upload(
         &self,
         id: NodeId,
@@ -589,19 +589,24 @@ impl Cluster {
         tags: Vec<TagId>,
     ) -> FileId {
         let source = self.scratch_file(id, bytes);
-        self.backend(id)
-            .upload_file(source, logical_path.to_owned(), tags)
+        let file_id = self
+            .backend(id)
+            .upload_file(source.clone(), logical_path.to_owned(), tags)
             .await
-            .expect("upload_file")
+            .expect("upload_file");
+        std::fs::remove_file(&source).expect("remove upload source");
+        file_id
     }
 
-    /// Replace a file's content through the node's API.
+    /// Replace a file's content through the node's API; the source is deleted
+    /// as soon as the call returns, like [`Self::upload`].
     pub async fn edit(&self, id: NodeId, file_id: FileId, bytes: &[u8]) {
         let source = self.scratch_file(id, bytes);
         self.backend(id)
-            .edit_file(file_id, source)
+            .edit_file(file_id, source.clone())
             .await
             .expect("edit_file");
+        std::fs::remove_file(&source).expect("remove edit source");
     }
 
     fn scratch_file(&self, id: NodeId, bytes: &[u8]) -> PathBuf {

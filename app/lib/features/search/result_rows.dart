@@ -482,14 +482,13 @@ class _FileTagStripState extends State<FileTagStrip> {
   ///   reload unconditionally (an over-approximation — we don't track which
   ///   tags this file carries here).
   /// - `Resynced`: reload; intervening changes may have been missed.
-  /// - `FileChanged` / `ProviderReleased`: never affect the tag set.
+  /// - `FileChanged`: never affects the tag set.
   bool _affectsThisFile(tagsy.ApiEventDto event) => switch (event) {
     tagsy.ApiEventDto_Resynced() => true,
     tagsy.ApiEventDto_FileTagChanged(:final fileId) => fileId == widget.fileId,
     tagsy.ApiEventDto_TagChanged() => true,
     tagsy.ApiEventDto_TagTagChanged() => true,
     tagsy.ApiEventDto_FileChanged() => false,
-    tagsy.ApiEventDto_ProviderReleased() => false,
   };
 
   @override

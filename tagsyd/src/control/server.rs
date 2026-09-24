@@ -2,20 +2,17 @@
 //! decode [`ControlRequest`]s, dispatch each to the in-process [`ApiService`],
 //! and stream [`ApiEvent`]s / operation events back.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use tagsy_core::FileId;
 use tagsy_ipc::{ControlFrame, ControlRequest, ControlResponse, decode_frame, encode_frame};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_util::sync::CancellationToken;
 
-use crate::frontend::api::{ApiEvent, ApiService};
+use crate::frontend::api::ApiService;
 use crate::transport::{
     ConnectionStream, ConnectionUpdate, EventStream, OperationStream, OperationUpdate,
 };
@@ -121,21 +118,6 @@ async fn handle_control_connection(
     // two subscriptions above.
     let mut connection_events: Option<ConnectionStream> = None;
 
-    // Provider protocol state for this connection. A `ProviderSource` (held by
-    // the transfer subsystem) asks for a chunk by sending `(offset, reply)` on
-    // `provider_req`; we assign a `chunk_id`, remember the reply oneshot, and
-    // send a `ProviderChunkRequest` to the client. The client's
-    // `ProviderChunkReply` resolves it. `active_provider` records what this
-    // connection is currently serving so we can unregister it on disconnect.
-    let (provider_req_tx, mut provider_req_rx) =
-        mpsc::unbounded_channel::<crate::peer::transfer::ProviderChunkRequest>();
-    let (provider_done_tx, mut provider_done_rx) = mpsc::unbounded_channel::<()>();
-    let mut provider_pending: HashMap<u64, crate::peer::transfer::ProviderChunkReply> =
-        HashMap::new();
-    let mut next_chunk_id: u64 = 0;
-    // (file_id, content_hash) currently registered as a provider on this conn.
-    let mut active_provider: Option<(FileId, String)> = None;
-
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -200,40 +182,6 @@ async fn handle_control_connection(
                     None => break,
                 }
             }
-            // A provider source wants a chunk from the client: forward it as a
-            // `ProviderChunkRequest` and remember where to route the reply.
-            request = provider_req_rx.recv() => {
-                let Some((offset, reply)) = request else { continue; };
-                let chunk_id = next_chunk_id;
-                next_chunk_id += 1;
-                provider_pending.insert(chunk_id, reply);
-                if let Err(error) = send_control(
-                    &mut outgoing,
-                    &ControlFrame::ProviderChunkRequest { chunk_id, offset },
-                )
-                .await
-                {
-                    log::debug!("Failed to send provider chunk request: {error}");
-                    break;
-                }
-            }
-            // A transfer of the provided file completed: tell the client it may
-            // release the file (via an event), and unregister the provider.
-            done = provider_done_rx.recv() => {
-                if done.is_none() { continue; }
-                if let Some((file_id, content_hash)) = active_provider.take() {
-                    api.unregister_provider(file_id, &content_hash).await;
-                    if let Err(error) = send_control(
-                        &mut outgoing,
-                        &ControlFrame::Event(ApiEvent::ProviderReleased { file_id }),
-                    )
-                    .await
-                    {
-                        log::debug!("Failed to send provider-released event: {error}");
-                        break;
-                    }
-                }
-            }
             inbound = incoming.next() => {
                 let Some(message) = inbound else {
                     log::debug!("Control client closed the connection");
@@ -263,25 +211,13 @@ async fn handle_control_connection(
                     }
                 };
                 match frame {
-                    ControlFrame::ProviderChunkReply { chunk_id, bytes, last } => {
-                        if let Some(reply) = provider_pending.remove(&chunk_id) {
-                            let _ = reply.send(Ok((bytes, last)));
-                        } else {
-                            log::warn!("Provider reply for unknown chunk id {chunk_id}");
-                        }
-                    }
                     ControlFrame::Request { id, request } => {
-                        // Uploads/edits register a provider for this connection;
-                        // capture the provider source + what it serves.
                         let response = dispatch(
                             &api,
                             request,
                             &mut events,
                             &mut operation_events,
                             &mut connection_events,
-                            &provider_req_tx,
-                            &provider_done_tx,
-                            &mut active_provider,
                         )
                         .await;
                         if let Err(error) =
@@ -299,12 +235,6 @@ async fn handle_control_connection(
         }
     }
 
-    // Connection closing: drop any provider we registered so stale entries do
-    // not linger.
-    if let Some((file_id, content_hash)) = active_provider.take() {
-        api.unregister_provider(file_id, &content_hash).await;
-    }
-
     log::debug!("Control client disconnected");
 }
 
@@ -317,16 +247,12 @@ async fn handle_control_connection(
 /// into the daemon), so this function is `async`. Nothing holds a
 /// `&CatalogStore` across an `.await`. `Subscribe` mutates the caller's
 /// `events` slot.
-#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     api: &ApiService,
     request: ControlRequest,
     events: &mut Option<EventStream>,
     operation_events: &mut Option<OperationStream>,
     connection_events: &mut Option<ConnectionStream>,
-    provider_req_tx: &mpsc::UnboundedSender<crate::peer::transfer::ProviderChunkRequest>,
-    provider_done_tx: &mpsc::UnboundedSender<()>,
-    active_provider: &mut Option<(FileId, String)>,
 ) -> ControlResponse {
     match request {
         ControlRequest::ResolveFileId { term, deleted_rule } => {
@@ -409,48 +335,17 @@ async fn dispatch(
             Err(error) => ControlResponse::Error(error),
         },
         ControlRequest::UploadFile {
+            path,
             path_name,
-            content_hash,
-            size,
             tags,
-        } => {
-            // This connection is the temporary provider: the daemon (for local
-            // placement) and peers pull the bytes from it on demand.
-            let source = std::sync::Arc::new(crate::peer::transfer::ProviderSource::new(
-                provider_req_tx.clone(),
-                provider_done_tx.clone(),
-            ));
-            match api
-                .upload_file(path_name, content_hash.clone(), size, tags, source)
-                .await
-            {
-                Ok(file_id) => {
-                    *active_provider = Some((file_id, content_hash));
-                    ControlResponse::FileId(file_id)
-                }
-                Err(error) => ControlResponse::Error(error),
-            }
-        }
-        ControlRequest::EditFile {
-            file_id,
-            content_hash,
-            size,
-        } => {
-            let source = std::sync::Arc::new(crate::peer::transfer::ProviderSource::new(
-                provider_req_tx.clone(),
-                provider_done_tx.clone(),
-            ));
-            match api
-                .edit_file(file_id, content_hash.clone(), size, source)
-                .await
-            {
-                Ok(()) => {
-                    *active_provider = Some((file_id, content_hash));
-                    ControlResponse::Ok
-                }
-                Err(error) => ControlResponse::Error(error),
-            }
-        }
+        } => match api.upload_file(path, path_name, tags).await {
+            Ok(file_id) => ControlResponse::FileId(file_id),
+            Err(error) => ControlResponse::Error(error),
+        },
+        ControlRequest::EditFile { file_id, path } => match api.edit_file(file_id, path).await {
+            Ok(()) => ControlResponse::Ok,
+            Err(error) => ControlResponse::Error(error),
+        },
         ControlRequest::FetchFile {
             file_id,
             expected_hash,

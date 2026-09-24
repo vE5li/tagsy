@@ -4,7 +4,7 @@
 //! These are the entry points that are *not* a live peer-session pull: a
 //! `CatalogCommand::Fetch` (from `tagsy edit`), deferred TagBased placement,
 //! the restore availability probe, and the holder side that answers a peer's
-//! `ChunkRequest` from local bytes or a registered provider. Moved out of
+//! `ChunkRequest` from local bytes or the outbox. Moved out of
 //! `lib.rs` (restructure 4.2) so `lib.rs` is just the runtime wiring; each was
 //! already a free function taking every dependency explicitly.
 
@@ -68,9 +68,8 @@ pub(crate) async fn read_local_if_hash_matches(
 /// node holds `file_id`/`content_hash`.
 ///
 /// Resolves a source in priority order — a matching file in our sync
-/// directories, then a temporary provider (a local client serving on demand,
-/// e.g. the CLI uploading) — and serves the canonical chunk at `offset` via
-/// [`transfer::answer_chunk_request`].
+/// directories, then the outbox (an upload's own copy) — and serves the
+/// canonical chunk at `offset` via [`transfer::answer_chunk_request`].
 ///
 /// The sync-directory case resolves only the file's *path* (via `LocalPath`,
 /// which does **not** read or hash the bytes) and lets
@@ -79,11 +78,7 @@ pub(crate) async fn read_local_if_hash_matches(
 /// subsequent chunk request is a cache hit plus a bounded seek/read. This keeps
 /// serving a large file O(size) rather than O(size²/chunk): the previous
 /// `ReadFile`-per-chunk path re-hashed the whole file on *every* request (the
-/// cause of large-file download timeouts). A provider is looked up by its
-/// `(file_id, content_hash)` registration key, which *is* its verification, and
-/// is served **pre-verified** (re-hashing a provider would fire its
-/// `on_complete` mid-serve and release the file — see
-/// [`transfer::answer_chunk_request`]).
+/// cause of large-file download timeouts).
 ///
 /// Returns `Some(ChunkAnswer::Data)` when we served bytes, `Some(Miss)` when we
 /// hold the file but it does not match or the offset is malformed, and `None`
@@ -124,23 +119,23 @@ pub(crate) async fn answer_local_chunk(
             ChunkAnswer::Data(bytes) => return Some(ChunkAnswer::Data(bytes)),
             // We hold the file, but at another version — typically the one
             // a local upload/edit is replacing, before its own placement has
-            // landed. The provider below may hold the requested content.
+            // landed. The outbox below may hold the requested content.
             ChunkAnswer::Miss => held_other_content = true,
         }
     }
 
-    // 2. A temporary provider (CLI upload/edit in flight), trusted by its
-    // registration key — served pre-verified so we never re-hash it (which
-    // would release the file after the first chunk).
-    if let Some(provider) = pending_fetches.provider_for(file_id, content_hash).await {
+    // 2. The outbox: an upload's own copy until some other holder has it.
+    // Verified through the same cache as a sync-directory file (hashed once).
+    if let Some(path) = pending_fetches.outbox().get(file_id, content_hash) {
+        let source = FileBytes::FileToCopy(path.clone());
         return Some(
             transfer::answer_chunk_request(
-                &provider,
-                None,
+                &source,
+                Some(&path),
                 verified_hashes,
                 content_hash,
                 offset,
-                true,
+                /* pre_verified */ false,
             )
             .await,
         );
@@ -341,8 +336,10 @@ pub(crate) async fn fetch_via_relay(
 /// whose returned bytes are discarded. Any `ChunkData` proves availability;
 /// exhaustion (`ChunkMiss` from all directions) or the TTL proves absence.
 ///
-/// Used by restore before clearing a tombstone, so we never announce a restore
-/// whose bytes cannot be recovered.
+/// Asks **peers only**: this node's own outbox never answers it. Used by
+/// restore before clearing a tombstone (after checking local copies itself),
+/// so we never announce a restore whose bytes cannot be recovered; and by the
+/// outbox release to learn another device now holds an upload.
 pub(crate) async fn probe_availability(
     pending_fetches: &ChunkRelay,
     file_id: FileId,
@@ -352,7 +349,7 @@ pub(crate) async fn probe_availability(
     // Direction unknown: flood. The relay registers this as a `Local` waiter for
     // offset 0 and forwards to all neighbours.
     pending_fetches
-        .request_chunk_local(file_id, content_hash, 0, None, reply_tx)
+        .request_chunk_from_peers(file_id, content_hash, 0, None, reply_tx)
         .await;
 
     matches!(reply_rx.recv().await, Some(ChunkReply::Data { .. }))

@@ -95,9 +95,8 @@ pub async fn run(
             // Fail fast: on the first upload error we stop, leaving any
             // already-uploaded files in place.
             for item in &planned {
-                // Serve the file to the daemon as a temporary chunk provider: no
-                // bytes are read into memory here. This call blocks until the
-                // daemon has handed the content off to the storing peer(s).
+                // The daemon copies the file into its outbox before answering,
+                // so the source may be deleted as soon as this returns.
                 let file_id = backend
                     .upload_file(
                         item.disk_path.clone(),

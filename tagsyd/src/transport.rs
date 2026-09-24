@@ -179,30 +179,13 @@ impl Backend for InProcessBackend {
         path_name: String,
         tags: Vec<TagId>,
     ) -> Result<FileId, ApiError> {
-        // Hash by streaming the file, announce the upload, then register the
-        // on-disk path as a `FileToCopy` chunk provider so peers pull the bytes
-        // on demand straight from disk (never buffering the whole file). This is
-        // the same provider mechanism the IPC/CLI path uses, sourced from the
-        // local filesystem instead of the control socket.
-        let (content_hash, size) = crate::file_bytes::hash_and_len(&path).await?;
-        let source = crate::file_bytes::FileBytes::FileToCopy(path);
-        self.api
-            .upload_file(
-                path_name,
-                content_hash,
-                size,
-                tags,
-                std::sync::Arc::new(source),
-            )
-            .await
+        // The daemon copies the file into its outbox (see `crate::outbox`):
+        // once this returns it holds its own copy.
+        self.api.upload_file(path, path_name, tags).await
     }
 
     async fn edit_file(&self, file_id: FileId, path: PathBuf) -> Result<(), ApiError> {
-        let (content_hash, size) = crate::file_bytes::hash_and_len(&path).await?;
-        let source = crate::file_bytes::FileBytes::FileToCopy(path);
-        self.api
-            .edit_file(file_id, content_hash, size, std::sync::Arc::new(source))
-            .await
+        self.api.edit_file(file_id, path).await
     }
 
     async fn begin_edit(&self, file_id: FileId) -> Result<PathBuf, ApiError> {

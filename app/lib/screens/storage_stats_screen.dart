@@ -83,7 +83,6 @@ class _StorageStatsScreenState extends State<StorageStatsScreen> {
     tagsy.ApiEventDto_TagChanged() => false,
     tagsy.ApiEventDto_FileTagChanged() => false,
     tagsy.ApiEventDto_TagTagChanged() => false,
-    tagsy.ApiEventDto_ProviderReleased() => false,
   };
 
   @override

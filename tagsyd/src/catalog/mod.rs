@@ -25,7 +25,7 @@
 //!   1. bottom-of-loop fall-through   — every `Ingest::Meta` change (this is
 //!      how a device learns about peer edits)
 //!   2. `Change::FileRestored` arm    — `continue`s
-//!   3. `CatalogCommand::AnnounceProvided` arm — `continue`s; the local client
+//!   3. `CatalogCommand::AnnounceUpload` arm — `continue`s; the local client
 //!      upload/edit path (`ApiService::upload_file` / `ApiService::edit_file`)
 //!   4. `CatalogCommand::Materialize` arm — `continue`s; "bytes are now on
 //!      disk"
@@ -282,15 +282,20 @@ impl CatalogWriter {
                     let pending_fetches_probe = pending_fetches.clone();
                     let change_sender_probe = change_sender.clone();
                     tokio::spawn(async move {
-                        // Local vault (or any local copy) first: cheap and avoids a
-                        // network round-trip when we kept the bytes ourselves.
-                        let locally_available = crate::peer::fetch::read_local_if_hash_matches(
-                            &command_sender_probe,
-                            file_id,
-                            &content_hash,
-                        )
-                        .await
-                        .is_some();
+                        // Local copies first — the outbox (an upload not yet held
+                        // elsewhere) or a sync directory, e.g. the vault: cheap,
+                        // and the peer probe below never looks at our own bytes.
+                        let locally_available = pending_fetches_probe
+                            .outbox()
+                            .get(file_id, &content_hash)
+                            .is_some()
+                            || crate::peer::fetch::read_local_if_hash_matches(
+                                &command_sender_probe,
+                                file_id,
+                                &content_hash,
+                            )
+                            .await
+                            .is_some();
 
                         let available = if locally_available {
                             true
@@ -1036,14 +1041,14 @@ impl CatalogWriter {
                     .await;
                     continue;
                 }
-                CatalogCommand::AnnounceProvided {
+                CatalogCommand::AnnounceUpload {
                     file_id,
                     logical_path,
                     content_hash,
                     size,
                     tags,
                 } => {
-                    files::announce_provided(
+                    files::announce_upload(
                         &configuration,
                         &tag_rules,
                         &runtime_configuration,

@@ -95,7 +95,10 @@ async fn backup_bundles_databases_sync_files_and_manifest() {
     let (change_sender, _change_receiver) = tokio::sync::mpsc::unbounded_channel();
     let (command_sender, mut command_receiver) = tokio::sync::mpsc::unbounded_channel();
     let (event_sender, _event_receiver) = tokio::sync::broadcast::channel(64);
-    let pending_fetches = ChunkRelay::new(runtime_configuration.clone());
+    let pending_fetches = ChunkRelay::new(
+        runtime_configuration.clone(),
+        tagsyd::outbox::Outbox::new(data_dir.join("outbox")),
+    );
 
     let api = ApiService::new(
         main_db_path,
@@ -235,7 +238,10 @@ async fn backup_without_backup_dir_errors() {
     let (change_sender, _change_receiver) = tokio::sync::mpsc::unbounded_channel();
     let (command_sender, _command_receiver) = tokio::sync::mpsc::unbounded_channel();
     let (event_sender, _event_receiver) = tokio::sync::broadcast::channel(64);
-    let pending_fetches = ChunkRelay::new(runtime_configuration.clone());
+    let pending_fetches = ChunkRelay::new(
+        runtime_configuration.clone(),
+        tagsyd::outbox::Outbox::new(data_dir.join("outbox")),
+    );
 
     let api = ApiService::new(
         main_db_path,

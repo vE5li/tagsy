@@ -1,7 +1,7 @@
 //! The file-lifecycle arms of the catalog's metadata dispatch:
 //! `FileMetadataAdded`/`FileMetadataChanged` (peer announcements),
 //! `FileMoved`, `FileDeleted`, `FileRestored`, plus the three command arms that
-//! catalog bytes/versions (`CatalogFile`, `Materialize`, `AnnounceProvided`).
+//! catalog bytes/versions (`CatalogFile`, `Materialize`, `AnnounceUpload`).
 //!
 //! Each returns `Some(publish)` when it handled the change (`publish` = whether
 //! the shared UI event should fire), or `None` for a non-file change (so the
@@ -1206,11 +1206,11 @@ pub(crate) async fn materialize(
     });
 }
 
-/// `CatalogCommand::AnnounceProvided`: a local client (CLI / UI) uploaded or
+/// `CatalogCommand::AnnounceUpload`: a local client (CLI / UI) uploaded or
 /// edited a file it serves on demand — record it, announce it metadata-only,
 /// and place its bytes into this node's own matching sync directories.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn announce_provided(
+pub(crate) async fn announce_upload(
     configuration: &Configuration,
     tag_rules: &crate::configuration::CompiledTagRules,
     runtime_configuration: &Arc<RwLock<RuntimeConfiguration>>,
@@ -1226,9 +1226,9 @@ pub(crate) async fn announce_provided(
     size: u64,
     mut tags: Vec<TagId>,
 ) {
-    // A local client uploaded/edited a file it serves on demand from a
-    // registered provider. Record it, announce metadata-only to peers (who
-    // pull from the provider), and place it into our own matching sync
+    // A local client uploaded/edited a file, whose bytes are already in the
+    // outbox. Record it, announce metadata-only to peers (who pull from the
+    // outbox), and place it into our own matching sync
     // directories exactly as if a peer had announced it (see the end of this
     // function) — so the result is the same whether this device later
     // reconnects or not.
@@ -1247,7 +1247,7 @@ pub(crate) async fn announce_provided(
             if let Err(error) = database.add_file(file_id, &logical_path, logical_path_modified_at)
             {
                 log::error!(
-                    "AnnounceProvided: failed to add file {} ({}): {:?}",
+                    "AnnounceUpload: failed to add file {} ({}): {:?}",
                     file_id.to_string(),
                     logical_path,
                     error
@@ -1259,7 +1259,7 @@ pub(crate) async fn announce_provided(
             // is the local `ContentChange::FileAdded` branch in
             // `handle_content_change`), and therefore one of
             // exactly two places rules may run. An
-            // `AnnounceProvided` is always local — a peer's
+            // `AnnounceUpload` is always local — a peer's
             // announcement arrives as `Change::FileMetadataAdded`
             // and is handled further down, deliberately without
             // rules.
@@ -1279,7 +1279,7 @@ pub(crate) async fn announce_provided(
             for tag_id in &tags {
                 if let Err(error) = database.tag_file(*tag_id, file_id, logical_path_modified_at) {
                     log::error!(
-                        "AnnounceProvided: failed to tag file {} with {}: {:?}",
+                        "AnnounceUpload: failed to tag file {} with {}: {:?}",
                         file_id.to_string(),
                         tag_id.to_string(),
                         error
@@ -1314,7 +1314,7 @@ pub(crate) async fn announce_provided(
         observed_at,
     ) {
         log::error!(
-            "AnnounceProvided: failed to record version for {}: {:?}",
+            "AnnounceUpload: failed to record version for {}: {:?}",
             file_id.to_string(),
             error
         );
@@ -1323,21 +1323,18 @@ pub(crate) async fn announce_provided(
     // three-way LWW), exactly as when a peer announces it. No-op otherwise.
     if let Err(error) = database.restore_file(file_id) {
         log::error!(
-            "AnnounceProvided: failed to clear tombstone for {}: {:?}",
+            "AnnounceUpload: failed to clear tombstone for {}: {:?}",
             file_id.to_string(),
             error
         );
     }
     super::forward::forward_to_peers(configuration, runtime_configuration, &change, &origin).await;
 
-    // Local placement: pull the bytes from the registered provider (the
-    // relay asks it before any peer) and `Materialize` them, the same
-    // pipeline a peer-announced file takes. A new file is created in every
-    // matching directory; an edit overwrites the directories holding it.
-    //
-    // Skipped when no local directory would take the file: a pull then would
-    // only consume the provider (a remote provider releases itself after one
-    // full transfer) before the peers that do want it get their turn.
+    // Local placement: pull the bytes from the outbox (the relay asks it
+    // before any peer) and `Materialize` them, the same pipeline a
+    // peer-announced file takes. A new file is created in every matching
+    // directory; an edit puts it in place where it belongs. Skipped when no
+    // local directory would take the file; the outbox keeps it for peers.
     let (placement, wanted_locally) = match &change {
         Change::FileMetadataAdded {
             logical_path, tags, ..

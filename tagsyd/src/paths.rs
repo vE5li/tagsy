@@ -88,6 +88,13 @@ impl Paths {
         self.data_dir.join("fetch-temp")
     }
 
+    /// The outbox: daemon-owned copies of uploaded content not yet held
+    /// anywhere else (see [`crate::outbox`]). Never cleared wholesale — an
+    /// entry may be the only copy of its content.
+    pub(crate) fn outbox_dir(&self) -> PathBuf {
+        self.data_dir.join("outbox")
+    }
+
     /// Remove any orphaned files left in the fetch-temp directory by callers
     /// that crashed before consuming their fetched file, then ensure the
     /// directory exists. Best-effort: called on daemon start.

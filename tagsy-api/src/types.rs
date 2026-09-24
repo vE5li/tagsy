@@ -236,10 +236,6 @@ pub enum ApiEvent {
     Resynced,
     /// A change was applied to the store.
     Changed(Change),
-    /// A file this connection was temporarily providing (an upload/edit) has
-    /// been handed off (a peer completed pulling it); the client may release
-    /// the local file. Produced by the control layer, not the change bus.
-    ProviderReleased { file_id: FileId },
 }
 
 /// What a retag did, or (under `dry_run`) would do.

@@ -174,14 +174,12 @@ class _FileDetailScreenState extends State<FileDetailScreen> {
   ///   relevant; we do not track the applied-id set here, so this is a
   ///   deliberate over-approximation (tag mutations are rare next to file
   ///   sync).
-  /// - `ProviderReleased`: never relevant (a byte-staging handoff).
   bool _affectsThisFile(tagsy.ApiEventDto event) => switch (event) {
     tagsy.ApiEventDto_Resynced() => true,
     tagsy.ApiEventDto_FileChanged(:final fileId) => fileId == widget.fileId,
     tagsy.ApiEventDto_FileTagChanged(:final fileId) => fileId == widget.fileId,
     tagsy.ApiEventDto_TagChanged() => true,
     tagsy.ApiEventDto_TagTagChanged() => true,
-    tagsy.ApiEventDto_ProviderReleased() => false,
   };
 
   Future<void> _load() async {

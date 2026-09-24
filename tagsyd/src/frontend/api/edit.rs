@@ -53,21 +53,9 @@ impl ApiService {
     /// edit whose save was already ingested by the watcher no-ops here
     /// automatically.
     ///
-    /// # Temp file lifetime
-    ///
-    /// When the bytes changed, the daemon registers `path` as a chunk provider
-    /// (via `FileToCopy`) so peers can pull the new content **on demand** —
-    /// reads happen after this call returns, from `path` on disk. The temp
-    /// is therefore **not deleted here**: doing so would break peers mid-pull
-    /// with a "No such file or directory" error. The temp is left in place
-    /// and cleaned up in bulk on the next daemon start (see
-    /// [`crate::paths::Paths::clean_fetch_temp_dir`]), matching the "provider
-    /// outlives the API call" semantics that
-    /// [`crate::transport::Backend::upload_file`] has always had.
-    ///
-    /// The no-op branch (bytes unchanged) still cleans up: no provider was
-    /// registered, no peer will ever read from `path`, so the temp is safe to
-    /// remove immediately.
+    /// Either way the temp file under `fetch_temp_dir` is cleaned up before
+    /// returning: a changed file has been copied into the outbox by then (see
+    /// [`crate::outbox`]), so nothing reads `path` afterwards.
     pub async fn finish_edit(
         &self,
         file_id: FileId,
@@ -77,7 +65,7 @@ impl ApiService {
         // If they match there is nothing to publish — either the editor
         // produced no change, or the watcher already ingested the in-place
         // save and updated the DB.
-        let (edited_hash, edited_size) = crate::file_bytes::hash_and_len(&path).await?;
+        let (edited_hash, _) = crate::file_bytes::hash_and_len(&path).await?;
         let current_hash = self.get_file(file_id, DeletedRule::Include)?.content_hash;
 
         if edited_hash == current_hash {
@@ -86,18 +74,11 @@ impl ApiService {
             return Ok(EditOutcome { changed: false });
         }
 
-        // Publish the new content by streaming it from `path` via the
-        // usual chunk-provider protocol. Peers pull on demand *after* this
-        // call returns, so `path` must remain readable until the daemon
-        // restarts. See the method docs.
-        let source = crate::file_bytes::FileBytes::FileToCopy(path);
-        self.edit_file(
-            file_id,
-            edited_hash,
-            edited_size,
-            std::sync::Arc::new(source),
-        )
-        .await?;
+        // Publish the new content: copied into the outbox, after which the
+        // temp is no longer needed.
+        let published = self.edit_file(file_id, path.clone()).await;
+        self.cleanup_edit_path(&path);
+        published?;
         Ok(EditOutcome { changed: true })
     }
 

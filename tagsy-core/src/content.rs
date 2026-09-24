@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 use tokio::io::AsyncReadExt;
 
 /// The unit of transfer, in bytes: the size of one content chunk moved between
-/// peers and read by the IPC provider protocol. Both the peer transfer
-/// subsystem and the control-socket client agree on this number.
+/// peers.
 pub const CHUNK_SIZE: usize = 64 * 1024;
 
 /// Buffer size for streaming a file while hashing. Independent of

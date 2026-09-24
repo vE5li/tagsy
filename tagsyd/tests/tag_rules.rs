@@ -100,7 +100,10 @@ impl Harness {
         let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (event_sender, event_receiver) = tokio::sync::broadcast::channel(64);
         let shutdown = CancellationToken::new();
-        let pending_fetches = ChunkRelay::new(runtime_configuration.clone());
+        let pending_fetches = ChunkRelay::new(
+            runtime_configuration.clone(),
+            tagsyd::outbox::Outbox::new(data_dir.join("outbox")),
+        );
         let operations = Operations::new();
         let pull_scheduler = tagsyd::peer::pull_scheduler::PullScheduler::new(
             tagsyd::configuration::default_max_concurrent_pulls(),
@@ -161,7 +164,7 @@ impl Harness {
     /// and the tags the announcement carried.
     async fn upload(&mut self, path: &str, tags: Vec<TagId>) -> (FileId, Vec<TagId>) {
         let file_id = FileId::new();
-        self.send(CatalogCommand::AnnounceProvided {
+        self.send(CatalogCommand::AnnounceUpload {
             file_id,
             logical_path: Some(LogicalPath::new(path)),
             content_hash: format!("hash-{path}"),
@@ -247,7 +250,7 @@ async fn upload_applies_a_matching_rule() {
     let mut harness = Harness::new(markdown_rule(tag_id));
     let file_id = FileId::new();
 
-    harness.send(CatalogCommand::AnnounceProvided {
+    harness.send(CatalogCommand::AnnounceUpload {
         file_id,
         logical_path: Some(LogicalPath::new("notes/todo.md")),
         content_hash: "hash".to_owned(),
@@ -269,7 +272,7 @@ async fn upload_without_a_match_is_untouched() {
     let mut harness = Harness::new(markdown_rule(TagId::new()));
     let file_id = FileId::new();
 
-    harness.send(CatalogCommand::AnnounceProvided {
+    harness.send(CatalogCommand::AnnounceUpload {
         file_id,
         logical_path: Some(LogicalPath::new("notes/todo.txt")),
         content_hash: "hash".to_owned(),
@@ -293,7 +296,7 @@ async fn upload_merges_rule_tags_with_caller_tags() {
     let mut harness = Harness::new(markdown_rule(rule_tag));
     let file_id = FileId::new();
 
-    harness.send(CatalogCommand::AnnounceProvided {
+    harness.send(CatalogCommand::AnnounceUpload {
         file_id,
         logical_path: Some(LogicalPath::new("notes/todo.md")),
         content_hash: "hash".to_owned(),
@@ -316,7 +319,7 @@ async fn upload_does_not_duplicate_an_already_supplied_tag() {
     let mut harness = Harness::new(markdown_rule(tag_id));
     let file_id = FileId::new();
 
-    harness.send(CatalogCommand::AnnounceProvided {
+    harness.send(CatalogCommand::AnnounceUpload {
         file_id,
         logical_path: Some(LogicalPath::new("notes/todo.md")),
         content_hash: "hash".to_owned(),
@@ -410,7 +413,7 @@ async fn moving_a_file_into_a_matching_path_does_not_apply_rules() {
     let file_id = FileId::new();
 
     // Create it under a name no rule matches.
-    harness.send(CatalogCommand::AnnounceProvided {
+    harness.send(CatalogCommand::AnnounceUpload {
         file_id,
         logical_path: Some(LogicalPath::new("notes/todo.txt")),
         content_hash: "hash".to_owned(),
@@ -452,7 +455,7 @@ async fn editing_content_does_not_apply_rules() {
     let mut harness = Harness::new(markdown_rule(tag_id));
     let file_id = FileId::new();
 
-    harness.send(CatalogCommand::AnnounceProvided {
+    harness.send(CatalogCommand::AnnounceUpload {
         file_id,
         logical_path: Some(LogicalPath::new("notes/todo.md")),
         content_hash: "hash".to_owned(),
@@ -466,7 +469,7 @@ async fn editing_content_does_not_apply_rules() {
         .await;
 
     // A content-only republication (`ApiService::edit_file`): no logical path.
-    harness.send(CatalogCommand::AnnounceProvided {
+    harness.send(CatalogCommand::AnnounceUpload {
         file_id,
         logical_path: None,
         content_hash: "hash2".to_owned(),
@@ -691,7 +694,7 @@ async fn a_broken_rule_does_not_disable_the_others() {
     ]);
     let file_id = FileId::new();
 
-    harness.send(CatalogCommand::AnnounceProvided {
+    harness.send(CatalogCommand::AnnounceUpload {
         file_id,
         logical_path: Some(LogicalPath::new("notes/todo.md")),
         content_hash: "hash".to_owned(),

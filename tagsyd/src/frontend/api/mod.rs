@@ -81,9 +81,8 @@ pub struct ApiService {
     /// `change_sender` and the `handle_changes` pipeline.
     command_sender: UnboundedSender<SyncDirectoryCommand>,
     events: broadcast::Sender<Change>,
-    /// Fetch/transfer subsystem, used by the control layer to register a
-    /// temporary chunk provider for an upload/edit (the client serves the bytes
-    /// on demand).
+    /// Fetch/transfer subsystem; its outbox is where uploads and edits are
+    /// ingested (see [`crate::outbox`]).
     pending_fetches: ChunkRelay,
     /// Directory for daemon-owned temp files produced by `fetch_file`. A
     /// completed fetch materializes here and the path is handed to the caller

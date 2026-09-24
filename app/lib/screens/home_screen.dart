@@ -163,17 +163,12 @@ class _HomeScreenState extends State<HomeScreen> {
         if (event == null) break;
         if (!mounted) break;
         // The search results span every file and tag, so any catalog change
-        // can alter them — re-run on all of them. The one event that never
-        // affects search is `ProviderReleased` (a byte-staging handoff, not a
-        // catalog mutation), so skip it. On `Resynced` we may have missed
-        // changes, so re-run too.
-        final relevant = switch (event) {
-          tagsy.ApiEventDto_ProviderReleased() => false,
-          _ => true,
-        };
+        // can alter them — re-run on every event. On `Resynced` we may have
+        // missed changes, so re-run too.
+        //
         // Only re-run if the user has actually issued a query. We must never
         // fabricate an empty-query listing here (see class doc).
-        if (relevant && _results != null) await _runQuery();
+        if (_results != null) await _runQuery();
       }
     } catch (_) {
       // Stream errors are surfaced elsewhere (bootstrap) — ignore here so a

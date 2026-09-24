@@ -148,11 +148,11 @@ pub trait Backend {
 
     /// Upload a file from a path on disk; returns the freshly-minted id.
     ///
-    /// The bytes are never buffered whole: the backend hashes `path` by
-    /// streaming it and then serves the content chunk-by-chunk on demand (the
-    /// IPC backend over the control socket; the in-process backend straight
-    /// from disk). `path_name` is the file's logical identity; `path` is
-    /// where the bytes currently live.
+    /// The daemon copies `path` into its outbox (streamed, never buffered
+    /// whole) before this returns, so the caller may delete `path` afterwards;
+    /// peers pull from the outbox whenever they connect. `path_name` is the
+    /// file's logical identity; `path` is where the bytes currently live, on
+    /// the daemon's host (a local client shares it).
     fn upload_file(
         &self,
         path: PathBuf,
@@ -160,8 +160,8 @@ pub trait Backend {
         tags: Vec<TagId>,
     ) -> impl Future<Output = Result<FileId, ApiError>> + Send;
 
-    /// Replace the content of an existing file with the bytes at `path`, served
-    /// on demand exactly like [`upload_file`](Self::upload_file).
+    /// Replace the content of an existing file with the bytes at `path`,
+    /// ingested exactly like [`upload_file`](Self::upload_file).
     fn edit_file(
         &self,
         file_id: FileId,
@@ -202,8 +202,8 @@ pub trait Backend {
     /// - if equal → nothing to do (either the editor produced no change, or the
     ///   file was edited in place and the watcher already published the
     ///   change);
-    /// - if different → publish a new version by streaming `path` to peers via
-    ///   the same provider protocol as [`edit_file`](Self::edit_file).
+    /// - if different → publish a new version from `path`, ingested exactly
+    ///   like [`edit_file`](Self::edit_file).
     ///
     /// After that the daemon deletes `path` **only if it lives under** the
     /// daemon's fetch temp dir (the isolated per-request subdirectory it

@@ -9,7 +9,6 @@ tagsy-core = { workspace = true }
 futures-util = { workspace = true }
 log = { workspace = true }
 rmp-serde = { workspace = true }
-serde_bytes = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["net", "sync", "rt"] }
 tokio-tungstenite = { workspace = true }

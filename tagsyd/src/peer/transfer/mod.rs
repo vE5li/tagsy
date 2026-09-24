@@ -20,7 +20,7 @@
 //! - [`answer_chunk_request`] — the stateless holder side. It answers a single
 //!   `ChunkRequest` from a [`ChunkSource`] after verifying (via a
 //!   [`VerifiedHashCache`]) that the source's content matches `content_hash`.
-//! - [`ChunkSource`] / [`ProviderSource`] — where servable bytes live.
+//! - [`ChunkSource`] — where servable bytes live.
 //!
 //! Integrity is **end-to-end**: only the origin receiver verifies the
 //! accumulated hash against `content_hash`. Relays (see [`relay`]) hold no
@@ -45,9 +45,7 @@ pub mod source;
 
 pub use receive::receive;
 pub use serve::{ChunkAnswer, VerifiedHashCache, answer_chunk_request};
-pub use source::{
-    ChunkFuture, ChunkSource, ProviderChunkReply, ProviderChunkRequest, ProviderSource,
-};
+pub use source::{ChunkFuture, ChunkSource};
 
 /// A sink for byte-transfer progress.
 ///

@@ -947,7 +947,7 @@ pub async fn run_peer_session<S>(
                     }
                     // A peer asks us for the canonical chunk at `offset` of
                     // `file_id`/`content_hash`. If a local source (a sync
-                    // directory or a temporary provider) verifies against
+                    // directory or the outbox) verifies against
                     // `content_hash`, answer `ChunkData` directly; otherwise
                     // relay the request to our other neighbours (the relay fans
                     // the eventual reply back). A relay holds no bytes.

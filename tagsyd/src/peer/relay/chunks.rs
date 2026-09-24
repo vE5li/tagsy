@@ -1,6 +1,6 @@
 //! The content-keyed **chunk** relay: [`ChunkRelay`] wraps the generic
-//! [`WaiterTable`] with the chunk-specific protocol and the temporary-provider
-//! registry.
+//! [`WaiterTable`] with the chunk-specific protocol, and answers a local
+//! receiver from the [`Outbox`] before asking any peer.
 //!
 //! A chunk's identity *is* `(file_id, content_hash, offset)`; nothing else
 //! correlates a request to its reply. Local receivers (files this node is
@@ -8,28 +8,24 @@
 //! coalescing fall out for free: the receiver's `ChunkRequest`s go through the
 //! same table as relayed ones.
 //!
-//! The provider registry (temporary local chunk sources, e.g. the CLI serving
-//! an in-flight upload) lives here too, since providers are "things that can
-//! answer a `ChunkRequest`".
+//! The outbox is the one local source a *receive* can hit (sync directories
+//! never need to fetch what they already hold): the nearest holder, at
+//! distance zero.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tagsy_core::FileId;
 use tagsy_core::state::{Frame, Sync as SyncMessage};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 use crate::configuration::RuntimeConfiguration;
+use crate::file_bytes::FileBytes;
+use crate::outbox::Outbox;
 use crate::peer::relay::{PeerOutbound, RelayProtocol, Waiter, WaiterTable, short_hash};
-use crate::peer::transfer::{
-    ChunkAnswer, ChunkReply, ChunkSource, VerifiedHashCache, answer_chunk_request,
-};
+use crate::peer::transfer::{ChunkAnswer, ChunkReply, VerifiedHashCache, answer_chunk_request};
 
 /// The content key identifying one canonical chunk across all peers.
 type ChunkKey = (FileId, String, u64);
-
-/// A registered temporary chunk provider (e.g. the CLI serving an upload).
-type ProviderRegistry = HashMap<(FileId, String), Arc<dyn ChunkSource>>;
 
 /// The chunk-specific protocol supplied to the generic waiter table.
 #[derive(Clone)]
@@ -88,8 +84,8 @@ impl RelayProtocol for ChunkProtocol {
     }
 }
 
-/// The content-keyed chunk relay: the shared waiter table plus the provider
-/// registry.
+/// The content-keyed chunk relay: the shared waiter table plus the outbox it
+/// consults first.
 ///
 /// Cheap to clone (every field is an `Arc`); every peer session holds a clone
 /// so requests forwarded on one session and replies arriving on another share
@@ -97,53 +93,20 @@ impl RelayProtocol for ChunkProtocol {
 #[derive(Clone)]
 pub struct ChunkRelay {
     table: WaiterTable<ChunkProtocol>,
-    providers: Arc<Mutex<ProviderRegistry>>,
+    outbox: Outbox,
 }
 
 impl ChunkRelay {
-    pub fn new(runtime_configuration: Arc<RwLock<RuntimeConfiguration>>) -> Self {
+    pub fn new(runtime_configuration: Arc<RwLock<RuntimeConfiguration>>, outbox: Outbox) -> Self {
         Self {
             table: WaiterTable::new(runtime_configuration),
-            providers: Arc::new(Mutex::new(HashMap::new())),
+            outbox,
         }
     }
 
-    // ---- Provider registry ------------------------------------------------
-
-    /// Register a temporary chunk provider (the CLI) for
-    /// `file_id`/`content_hash`. A `ChunkRequest` for this file that no sync
-    /// directory can serve will stream chunks from `source`.
-    pub async fn register_provider(
-        &self,
-        file_id: FileId,
-        content_hash: String,
-        source: Arc<dyn ChunkSource>,
-    ) {
-        self.providers
-            .lock()
-            .await
-            .insert((file_id, content_hash), source);
-    }
-
-    /// Remove a temporary provider (the client released the file).
-    pub async fn unregister_provider(&self, file_id: FileId, content_hash: &str) {
-        self.providers
-            .lock()
-            .await
-            .remove(&(file_id, content_hash.to_owned()));
-    }
-
-    /// Look up a registered provider for `file_id`/`content_hash`.
-    pub async fn provider_for(
-        &self,
-        file_id: FileId,
-        content_hash: &str,
-    ) -> Option<Arc<dyn ChunkSource>> {
-        self.providers
-            .lock()
-            .await
-            .get(&(file_id, content_hash.to_owned()))
-            .cloned()
+    /// The outbox this relay answers local receives from.
+    pub fn outbox(&self) -> &Outbox {
+        &self.outbox
     }
 
     // ---- Local receiver requests ------------------------------------------
@@ -156,16 +119,11 @@ impl ChunkRelay {
     /// request is directed there; when `None`, it floods to all connected
     /// neighbours. Coalesces onto an existing entry for the same key.
     ///
-    /// A registered provider for the content is asked first: it is simply the
-    /// nearest holder (distance zero), which is how an upload's own bytes reach
-    /// this node's sync directories through the ordinary receive path. Its
-    /// chunks are served inline, so they arrive in the order the receiver asks
-    /// for them — which keeps a remote provider's "last chunk served" release
-    /// signal from firing before the earlier chunks. A provider miss falls
-    /// through to the peers.
-    ///
-    /// If there are no connected peers to ask, the reply is immediately a
-    /// `ChunkMiss` (the receive then fails, as intended).
+    /// The outbox is asked first: an entry there is simply the nearest holder
+    /// (distance zero) — how an upload's bytes reach this node's own sync
+    /// directories through the ordinary receive path, and how a placement or
+    /// restore finds content no peer holds yet. Otherwise see
+    /// [`Self::request_chunk_from_peers`].
     pub async fn request_chunk_local(
         &self,
         file_id: FileId,
@@ -174,11 +132,12 @@ impl ChunkRelay {
         toward: Option<&str>,
         reply_tx: tokio::sync::mpsc::UnboundedSender<ChunkReply>,
     ) {
-        if let Some(provider) = self.provider_for(file_id, &content_hash).await {
-            // Pre-verified by its registration key, exactly as when serving a
-            // peer (`answer_local_chunk`); the hash cache is never consulted.
+        if let Some(path) = self.outbox.get(file_id, &content_hash) {
+            // Named by the hash computed while ingesting it; the receiver
+            // verifies the whole file end to end regardless.
+            let source = FileBytes::FileToCopy(path);
             let answer = answer_chunk_request(
-                &provider,
+                &source,
                 None,
                 &VerifiedHashCache::new(),
                 &content_hash,
@@ -191,7 +150,29 @@ impl ChunkRelay {
                 return;
             }
         }
+        self.request_chunk_from_peers(file_id, content_hash, offset, toward, reply_tx)
+            .await;
+    }
 
+    /// Route a local `ChunkRequest` to peers only, never answering it from
+    /// this node's own outbox — the availability probe asks "does anyone
+    /// *else* hold this?".
+    ///
+    /// `toward` is the routing policy: the neighbour most likely to hold the
+    /// content (the announcing origin / last-good direction). When `Some`, the
+    /// request is directed there; when `None`, it floods to all connected
+    /// neighbours. Coalesces onto an existing entry for the same key.
+    ///
+    /// If there are no connected peers to ask, the reply is immediately a
+    /// `ChunkMiss` (the receive then fails, as intended).
+    pub async fn request_chunk_from_peers(
+        &self,
+        file_id: FileId,
+        content_hash: String,
+        offset: u64,
+        toward: Option<&str>,
+        reply_tx: tokio::sync::mpsc::UnboundedSender<ChunkReply>,
+    ) {
         let key = (file_id, content_hash.clone(), offset);
 
         // Choose the upstream neighbours to forward to.
@@ -225,7 +206,7 @@ impl ChunkRelay {
 
     /// Handle an inbound `ChunkRequest` from `from_public_key` that this node
     /// could not serve locally (the caller already checked its sync directories
-    /// / providers). Coalesce onto an existing entry, or forward to all
+    /// and the outbox). Coalesce onto an existing entry, or forward to all
     /// neighbours except the sender. With no other neighbours, answer
     /// `ChunkMiss` straight back.
     pub async fn relay_chunk_request(
@@ -308,8 +289,20 @@ mod tests {
     use crate::peer::relay::testing::{engine_with_peers, runtime_for_test};
     use crate::peer::transfer::HOP_TIMEOUT;
 
+    /// An outbox under a fresh temp directory.
+    fn test_outbox() -> Outbox {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "tagsy-relay-outbox-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        Outbox::new(directory)
+    }
+
     fn engine() -> ChunkRelay {
-        ChunkRelay::new(runtime_for_test())
+        ChunkRelay::new(runtime_for_test(), test_outbox())
     }
 
     async fn engine_with_n_peers(
@@ -319,7 +312,7 @@ mod tests {
         Vec<(String, tokio::sync::mpsc::UnboundedReceiver<Frame>)>,
     ) {
         let (runtime, peers) = engine_with_peers(count).await;
-        (ChunkRelay::new(runtime), peers)
+        (ChunkRelay::new(runtime, test_outbox()), peers)
     }
 
     /// With no connected peers, a local request immediately misses.
@@ -336,23 +329,37 @@ mod tests {
         }
     }
 
-    /// Provider register / lookup / unregister round-trips.
+    /// A local request is answered from the outbox before any peer is
+    /// asked; a peers-only request never is.
     #[tokio::test]
-    async fn provider_registry_roundtrip() {
-        let engine = engine();
+    async fn local_request_is_answered_from_the_outbox_first() {
+        let (engine, mut peers) = engine_with_n_peers(1).await;
+        let source = engine
+            .outbox()
+            .directory()
+            .join("..")
+            .join(format!("relay-outbox-source-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&source, b"outbox bytes").unwrap();
         let file_id = FileId::new();
-        let source: Arc<dyn ChunkSource> =
-            Arc::new(crate::file_bytes::FileBytes::InMemory(b"x".to_vec()));
+        let (hash, _) = engine.outbox().ingest(&source, file_id).await.unwrap();
+
+        let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel();
         engine
-            .register_provider(file_id, "hash".to_owned(), source)
+            .request_chunk_local(file_id, hash.clone(), 0, None, reply_tx)
             .await;
-        assert!(engine.provider_for(file_id, "hash").await.is_some());
-        engine.unregister_provider(file_id, "hash").await;
-        assert!(engine.provider_for(file_id, "hash").await.is_none());
+        match reply_rx.recv().await {
+            Some(ChunkReply::Data { bytes, .. }) => assert_eq!(bytes, b"outbox bytes"),
+            other => panic!("expected outbox data, got {other:?}"),
+        }
+        assert!(peers[0].1.try_recv().is_err(), "no peer was asked");
+
+        let (reply_tx, _reply_rx) = tokio::sync::mpsc::unbounded_channel();
+        engine
+            .request_chunk_from_peers(file_id, hash, 0, None, reply_tx)
+            .await;
+        assert!(peers[0].1.try_recv().is_ok(), "the peer was asked");
     }
 
-    /// Coalescing: two downstream waiters for the same key cause exactly one
-    /// upstream fetch, and a single `ChunkData` fans out to both.
     #[tokio::test]
     async fn coalesces_and_fans_out() {
         let (engine, mut peers) = engine_with_n_peers(1).await;

@@ -2217,7 +2217,6 @@ dependencies = [
  "log",
  "rmp-serde",
  "serde",
- "serde_bytes",
  "tagsy-api",
  "tagsy-core",
  "tokio",
