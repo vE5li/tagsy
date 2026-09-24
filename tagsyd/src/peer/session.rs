@@ -107,6 +107,9 @@ pub struct PeerContext {
     /// Delay between outbound dial attempts (`connect_to_peer`). From
     /// `Configuration::reconnect_interval_ms`. Unused by the session itself.
     pub reconnect_interval: std::time::Duration,
+    /// Activity gauge shared by all sessions (see [`crate::activity`]): the
+    /// read loop marks itself busy per message, the writer reports its queue.
+    pub activity: crate::activity::SessionGauge,
 }
 
 /// Drive a fully-handshaken WebSocket connection until it closes.
@@ -148,6 +151,7 @@ pub async fn run_peer_session<S>(
         tag_manifest_batch_size,
         purge_manifest_batch_size,
         reconnect_interval: _,
+        activity,
     } = context;
 
     // Register this peer as connected for the life of the session. A connection
@@ -388,10 +392,12 @@ pub async fn run_peer_session<S>(
         let pong_requested = pong_requested.clone();
         let link_dead = link_dead.clone();
         let peer_name = peer_name.to_owned();
+        let outbound = activity.outbound();
         tokio::spawn(async move {
             run_writer(
                 outgoing,
                 peer_rx,
+                outbound,
                 session_start,
                 last_activity,
                 pong_requested,
@@ -518,6 +524,7 @@ pub async fn run_peer_session<S>(
                     // All command senders dropped (peer removed from runtime).
                     continue;
                 };
+                let _busy = activity.begin();
                 match command {
                     messages::PeerCommand::StartReceive {
                         file_id,
@@ -547,6 +554,7 @@ pub async fn run_peer_session<S>(
                     // lives (we hold a sender clone), so `None` only at teardown.
                     continue;
                 };
+                let _busy = activity.begin();
                 let content = match outcome {
                     ReceiveOutcome::Complete(content) => content,
                     ReceiveOutcome::Failed(error) => {
@@ -583,6 +591,9 @@ pub async fn run_peer_session<S>(
                     log::info!("Peer {peer_name} closed the connection");
                     break;
                 };
+                // Busy until this frame is fully handled (e.g. a manifest
+                // planned and its changes enqueued), whichever way the arm exits.
+                let _busy = activity.begin();
                 let message = match message {
                     Ok(message) => message,
                     Err(error) => {
@@ -1267,9 +1278,11 @@ pub async fn run_peer_session<S>(
 /// any parked pong, and — if the peer has been silent past `LIVENESS_TIMEOUT` —
 /// cancels `link_dead` to end the session. Any socket write failure likewise
 /// cancels `link_dead`, which breaks the reader loop and triggers teardown.
+#[allow(clippy::too_many_arguments)]
 async fn run_writer<S>(
     mut outgoing: SplitSink<WebSocketStream<S>, Message>,
     mut peer_rx: tokio::sync::mpsc::UnboundedReceiver<Frame>,
+    mut outbound_gauge: crate::activity::OutboundReporter,
     session_start: tokio::time::Instant,
     last_activity: Arc<std::sync::atomic::AtomicU64>,
     pong_requested: Arc<std::sync::atomic::AtomicBool>,
@@ -1310,11 +1323,14 @@ async fn run_writer<S>(
                     // All senders dropped (teardown / replaced); done.
                     break;
                 };
+                // The frame in hand counts as queued until it is written.
+                outbound_gauge.report(peer_rx.len() + 1);
                 if let Err(error) = send_frame(&mut outgoing, &frame).await {
                     log::warn!("Outbound send to {peer_name} failed: {error}");
                     link_dead.cancel();
                     break;
                 }
+                outbound_gauge.report(peer_rx.len());
                 last_write = tokio::time::Instant::now();
             }
             _ = tick.tick() => {

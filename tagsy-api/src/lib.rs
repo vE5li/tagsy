@@ -18,7 +18,7 @@ mod error;
 pub mod operations;
 mod types;
 
-pub use activity::{ActivityInfo, InboxActivity};
+pub use activity::{ActivityInfo, InboxActivity, SessionActivity};
 pub use backend::{
     Backend, ConnectionStream, ConnectionUpdate, EventStream, OperationStream, OperationUpdate,
 };

@@ -627,8 +627,9 @@ pub async fn run(
             emit_scalar(
                 output_mode,
                 format!(
-                    "{}\ncatalog:          {}\nsync directories: {}{}\nfilesystem events \
-                     debouncing: {}\npulls: {} running, {} queued",
+                    "{}\ncatalog:          {}\nsync directories: {}{}\npeer sessions:    {} busy, \
+                     {} frames queued, {} processed\nfilesystem events debouncing: {}\npulls: {} \
+                     running, {} queued",
                     if activity.is_idle() { "idle" } else { "busy" },
                     inbox(&activity.catalog),
                     inbox(&activity.sync_directories),
@@ -637,6 +638,9 @@ pub async fn run(
                     } else {
                         " [startup scan running]"
                     },
+                    activity.peer_sessions.busy,
+                    activity.peer_sessions.outbound_queued,
+                    activity.peer_sessions.processed,
                     activity.pending_filesystem_events,
                     activity.pulls_running,
                     activity.pulls_queued,

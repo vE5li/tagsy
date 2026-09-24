@@ -419,7 +419,7 @@ impl Cluster {
     /// [`QUIET_WINDOW`].
     pub async fn settle(&self) {
         let deadline = Instant::now() + SETTLE_TIMEOUT;
-        let mut quiet_since: Option<(Instant, Vec<(u64, u64)>)> = None;
+        let mut quiet_since: Option<(Instant, Vec<(u64, u64, u64)>)> = None;
         loop {
             let mut idle = true;
             let mut fingerprint = Vec::new();
@@ -439,6 +439,7 @@ impl Cluster {
                 fingerprint.push((
                     activity.catalog.processed,
                     activity.sync_directories.processed,
+                    activity.peer_sessions.processed,
                 ));
                 report.push_str(&format!(
                     "  {}: {} operations={busy_operations:?}\n",
@@ -616,13 +617,17 @@ impl Drop for Cluster {
 fn describe(activity: &ActivityInfo) -> String {
     format!(
         "catalog(busy={} queued={} processed={}) sync_directories(busy={} queued={} processed={}) \
-         fs_pending={} scan_done={} pulls(queued={} running={})",
+         sessions(busy={} outbound={} processed={}) fs_pending={} scan_done={} pulls(queued={} \
+         running={})",
         activity.catalog.busy,
         activity.catalog.queued,
         activity.catalog.processed,
         activity.sync_directories.busy,
         activity.sync_directories.queued,
         activity.sync_directories.processed,
+        activity.peer_sessions.busy,
+        activity.peer_sessions.outbound_queued,
+        activity.peer_sessions.processed,
         activity.pending_filesystem_events,
         activity.initial_scan_complete,
         activity.pulls_queued,

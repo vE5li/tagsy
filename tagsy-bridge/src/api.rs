@@ -167,12 +167,31 @@ impl From<tagsyd::frontend::api::InboxActivity> for InboxActivityEntry {
     }
 }
 
+/// The peer sessions' summed activity, flattened for the Dart UI (see
+/// `tagsyd::frontend::api::SessionActivity`).
+pub struct SessionActivityEntry {
+    pub busy: i64,
+    pub outbound_queued: i64,
+    pub processed: i64,
+}
+
+impl From<tagsyd::frontend::api::SessionActivity> for SessionActivityEntry {
+    fn from(sessions: tagsyd::frontend::api::SessionActivity) -> Self {
+        Self {
+            busy: sessions.busy as i64,
+            outbound_queued: sessions.outbound_queued as i64,
+            processed: sessions.processed as i64,
+        }
+    }
+}
+
 /// The daemon's activity sample, flattened for the Dart UI (see
 /// `tagsyd::frontend::api::ActivityInfo`). `idle` is precomputed so the UI need
 /// not reimplement the rule.
 pub struct ActivityEntry {
     pub catalog: InboxActivityEntry,
     pub sync_directories: InboxActivityEntry,
+    pub peer_sessions: SessionActivityEntry,
     pub pending_filesystem_events: i64,
     pub initial_scan_complete: bool,
     pub pulls_queued: i64,
@@ -185,6 +204,7 @@ impl From<tagsyd::frontend::api::ActivityInfo> for ActivityEntry {
         Self {
             catalog: activity.catalog.into(),
             sync_directories: activity.sync_directories.into(),
+            peer_sessions: activity.peer_sessions.into(),
             pending_filesystem_events: activity.pending_filesystem_events as i64,
             initial_scan_complete: activity.initial_scan_complete,
             pulls_queued: activity.pulls_queued as i64,

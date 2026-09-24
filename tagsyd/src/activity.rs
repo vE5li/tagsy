@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use tagsy_api::{ActivityInfo, InboxActivity};
+use tagsy_api::{ActivityInfo, InboxActivity, SessionActivity};
 
 use crate::peer::pull_scheduler::PullScheduler;
 
@@ -69,6 +69,84 @@ impl Drop for BusyGuard<'_> {
     }
 }
 
+/// Gauges shared by every peer session (one per socket), summed.
+#[derive(Clone, Default)]
+pub struct SessionGauge {
+    state: Arc<SessionGaugeState>,
+}
+
+#[derive(Default)]
+struct SessionGaugeState {
+    busy: AtomicU64,
+    outbound_queued: AtomicU64,
+    processed: AtomicU64,
+}
+
+impl SessionGauge {
+    /// Mark one session busy with one inbound frame or command until the
+    /// guard drops.
+    pub fn begin(&self) -> SessionBusyGuard<'_> {
+        self.state.busy.fetch_add(1, Ordering::AcqRel);
+        SessionBusyGuard { gauge: self }
+    }
+
+    /// A per-session reporter for that session's outbound queue length; it
+    /// withdraws whatever it last reported when dropped (session teardown).
+    pub fn outbound(&self) -> OutboundReporter {
+        OutboundReporter {
+            gauge: self.clone(),
+            reported: 0,
+        }
+    }
+
+    pub fn snapshot(&self) -> SessionActivity {
+        SessionActivity {
+            busy: self.state.busy.load(Ordering::Acquire),
+            outbound_queued: self.state.outbound_queued.load(Ordering::Acquire),
+            processed: self.state.processed.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Held by a session for the duration of one inbound frame or command.
+pub struct SessionBusyGuard<'a> {
+    gauge: &'a SessionGauge,
+}
+
+impl Drop for SessionBusyGuard<'_> {
+    fn drop(&mut self) {
+        let state = &self.gauge.state;
+        state.processed.fetch_add(1, Ordering::Relaxed);
+        state.busy.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// One session's contribution to [`SessionActivity::outbound_queued`].
+pub struct OutboundReporter {
+    gauge: SessionGauge,
+    reported: u64,
+}
+
+impl OutboundReporter {
+    /// This session now has `queued` frames waiting (or being written).
+    pub fn report(&mut self, queued: usize) {
+        let queued = queued as u64;
+        let total = &self.gauge.state.outbound_queued;
+        if queued > self.reported {
+            total.fetch_add(queued - self.reported, Ordering::AcqRel);
+        } else {
+            total.fetch_sub(self.reported - queued, Ordering::AcqRel);
+        }
+        self.reported = queued;
+    }
+}
+
+impl Drop for OutboundReporter {
+    fn drop(&mut self) {
+        self.report(0);
+    }
+}
+
 /// Gauges owned by the `SyncDirectories` actor and its watcher.
 #[derive(Clone, Default)]
 pub struct SyncDirectoryGauges {
@@ -89,6 +167,7 @@ pub struct Activity {
 struct Inner {
     catalog: InboxGauge,
     sync_directories: SyncDirectoryGauges,
+    peer_sessions: SessionGauge,
     pulls: PullScheduler,
 }
 
@@ -98,6 +177,7 @@ impl Activity {
             inner: Arc::new(Inner {
                 catalog: InboxGauge::default(),
                 sync_directories: SyncDirectoryGauges::default(),
+                peer_sessions: SessionGauge::default(),
                 pulls,
             }),
         }
@@ -113,12 +193,18 @@ impl Activity {
         &self.inner.sync_directories
     }
 
+    /// The gauge every peer session updates.
+    pub fn peer_sessions(&self) -> &SessionGauge {
+        &self.inner.peer_sessions
+    }
+
     pub async fn snapshot(&self) -> ActivityInfo {
         let inner = &self.inner;
         let (pulls_queued, pulls_running) = inner.pulls.load().await;
         ActivityInfo {
             catalog: inner.catalog.snapshot(),
             sync_directories: inner.sync_directories.inbox.snapshot(),
+            peer_sessions: inner.peer_sessions.snapshot(),
             pending_filesystem_events: inner
                 .sync_directories
                 .pending_filesystem_events
@@ -136,6 +222,28 @@ impl Activity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_gauge_sums_sessions_and_withdraws_on_teardown() {
+        let gauge = SessionGauge::default();
+        let mut first = gauge.outbound();
+        let mut second = gauge.outbound();
+        first.report(3);
+        second.report(2);
+        assert_eq!(gauge.snapshot().outbound_queued, 5);
+        first.report(1);
+        assert_eq!(gauge.snapshot().outbound_queued, 3);
+        drop(second);
+        assert_eq!(gauge.snapshot().outbound_queued, 1);
+
+        {
+            let _one = gauge.begin();
+            let _two = gauge.begin();
+            assert_eq!(gauge.snapshot().busy, 2);
+        }
+        let sample = gauge.snapshot();
+        assert_eq!((sample.busy, sample.processed), (0, 2));
+    }
 
     #[test]
     fn guard_marks_busy_then_counts_processed() {

@@ -41,6 +41,26 @@ impl InboxActivity {
     }
 }
 
+/// A snapshot of every live peer session, summed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SessionActivity {
+    /// Sessions in the middle of handling an inbound frame or a command
+    /// (e.g. planning a received manifest).
+    pub busy: u64,
+    /// Frames queued to be written to peers, including any being written.
+    pub outbound_queued: u64,
+    /// Monotonic count of inbound frames and commands handled, across every
+    /// session since startup.
+    pub processed: u64,
+}
+
+impl SessionActivity {
+    /// No session handling anything and nothing waiting to be sent.
+    pub fn is_idle(&self) -> bool {
+        self.busy == 0 && self.outbound_queued == 0
+    }
+}
+
 /// A snapshot of everything a daemon currently has in flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ActivityInfo {
@@ -49,6 +69,8 @@ pub struct ActivityInfo {
     /// The `SyncDirectories` inbox: commands from the catalog plus settled
     /// filesystem events from the watcher.
     pub sync_directories: InboxActivity,
+    /// The peer sessions, one per connected socket.
+    pub peer_sessions: SessionActivity,
     /// Raw filesystem events still inside the debounce window, not yet
     /// delivered to the sync-directory inbox.
     pub pending_filesystem_events: u64,
@@ -70,6 +92,7 @@ impl ActivityInfo {
     pub fn is_idle(&self) -> bool {
         self.catalog.is_idle()
             && self.sync_directories.is_idle()
+            && self.peer_sessions.is_idle()
             && self.pending_filesystem_events == 0
             && self.initial_scan_complete
             && self.pulls_queued == 0

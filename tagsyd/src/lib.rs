@@ -446,6 +446,7 @@ pub async fn run(
         tag_manifest_batch_size: configuration.tag_manifest_batch_size,
         purge_manifest_batch_size: configuration.purge_manifest_batch_size,
         reconnect_interval: std::time::Duration::from_millis(configuration.reconnect_interval_ms),
+        activity: activity.peer_sessions().clone(),
     };
 
     let mut peer_handles = Vec::new();

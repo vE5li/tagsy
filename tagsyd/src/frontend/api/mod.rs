@@ -54,7 +54,7 @@ use std::sync::Arc;
 // `error` still owns the `From<internal error>` conversions onto `ApiError`.
 pub use tagsy_api::{
     ActivityInfo, ApiError, ApiEvent, BackupOutcome, EditOutcome, InboxActivity, PurgeOutcome,
-    RetagSummary, SearchResults, StorageStats, TagRuleReport,
+    RetagSummary, SearchResults, SessionActivity, StorageStats, TagRuleReport,
 };
 use tagsy_core::state::Change;
 use tokio::sync::broadcast;
