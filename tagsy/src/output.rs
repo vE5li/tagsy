@@ -326,6 +326,12 @@ fn format_style(style: &tagsy_api::TagStyle) -> String {
     )
 }
 
+/// The `Deleted` column of the file and tag tables: whether the entry is
+/// tombstoned (soft-deleted, still restorable).
+fn deleted_label(deleted: bool) -> &'static str {
+    if deleted { "yes" } else { "no" }
+}
+
 /// The single tag table used by *every* command that prints tags — listings
 /// (`search`, `tags-for-file`, `subtags`) and every tag mutation alike.
 ///
@@ -335,7 +341,9 @@ fn format_style(style: &tagsy_api::TagStyle) -> String {
 /// for the tag commands.
 ///
 /// The `Tags` column shows the tags applied to each tag (the tags it is a
-/// subtag of), the tag analogue of the file table's per-file tags.
+/// subtag of), the tag analogue of the file table's per-file tags. The
+/// `Deleted` column tells a tombstoned tag from a live one, as in the file
+/// table.
 /// `tags_by_tag` supplies those names; a tag absent from the map renders
 /// with an empty column.
 fn tag_table(tags: &[Tag], tags_by_tag: &HashMap<TagId, Vec<String>>) -> Table {
@@ -345,7 +353,7 @@ fn tag_table(tags: &[Tag], tags_by_tag: &HashMap<TagId, Vec<String>>) -> Table {
     table
         .load_preset(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec!["Tag id", "Name", "Style", "Tags"]);
+        .set_header(vec!["Tag id", "Name", "Style", "Tags", "Deleted"]);
 
     for tag in tags {
         let id = tag.id.to_string();
@@ -361,6 +369,7 @@ fn tag_table(tags: &[Tag], tags_by_tag: &HashMap<TagId, Vec<String>>) -> Table {
             Cell::new(format_style(&tag.style)),
             // TODO: Store the ids instead of the names.
             Cell::new(tags_column),
+            Cell::new(deleted_label(tag.deleted)),
         ]);
     }
 
@@ -372,12 +381,16 @@ fn tag_table(tags: &[Tag], tags_by_tag: &HashMap<TagId, Vec<String>>) -> Table {
 /// convenience handle to display, though any id prefix or a name resolves
 /// equally well. `tags_by_file` supplies the human-readable tag names shown
 /// per file; a file absent from the map renders with an empty tag column.
+/// The `Deleted` column tells a tombstoned file (e.g. just deleted, or found
+/// by `search --deleted`) from a live one.
 fn file_table(files: &[FileInfo], tags_by_file: &HashMap<FileId, Vec<String>>) -> Table {
     let mut table = Table::new();
     table
         .load_preset(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec!["File id", "Path", "Kind", "Version", "Size", "Tags"]);
+        .set_header(vec![
+            "File id", "Path", "Kind", "Version", "Size", "Tags", "Deleted",
+        ]);
 
     for file in files {
         let id = file.file_id.to_string();
@@ -393,6 +406,7 @@ fn file_table(files: &[FileInfo], tags_by_file: &HashMap<FileId, Vec<String>>) -
             Cell::new(format!("v{}", file.version_number)),
             Cell::new(format!("{}b", file.size)),
             Cell::new(tags),
+            Cell::new(deleted_label(file.deleted)),
         ]);
     }
 
@@ -686,6 +700,44 @@ mod tests {
             unique_prefix_length("deadbeef", &["deadbeef".to_owned()]),
             1
         );
+    }
+
+    // ---- table columns ----
+
+    #[test]
+    fn deleted_label_names_both_states() {
+        assert_eq!(deleted_label(true), "yes");
+        assert_eq!(deleted_label(false), "no");
+    }
+
+    #[test]
+    fn tables_show_whether_each_entry_is_deleted() {
+        let file = |deleted| FileInfo {
+            file_id: FileId::new(),
+            logical_path: tagsy_core::LogicalPath::new("a.txt"),
+            content_hash: String::new(),
+            version_number: 1,
+            size: 1,
+            short_id_length: 4,
+            deleted,
+            first_recorded_at: 0,
+            latest_change_at: 0,
+        };
+        let table = file_table(&[file(true)], &HashMap::new());
+        assert_eq!(table.header().unwrap().cell_count(), 7);
+        let row = table.row(0).unwrap().cell_iter().last().unwrap().content();
+        assert_eq!(row, "yes");
+
+        let tag = Tag {
+            id: TagId::new(),
+            name: "work".to_owned(),
+            style: tagsy_api::TagStyle::default(),
+            metadata: None,
+            deleted: false,
+        };
+        let table = tag_table(&[tag], &HashMap::new());
+        let row = table.row(0).unwrap().cell_iter().last().unwrap().content();
+        assert_eq!(row, "no");
     }
 
     // ---- row DTOs: field mapping ----
