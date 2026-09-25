@@ -662,6 +662,25 @@ mod tests {
         assert_eq!(queued_kinds(&debouncer), vec![create("b")]);
     }
 
+    /// Replacing a file by renaming a fresh one over it (git's `index.lock` →
+    /// `index`, an editor's atomic save): the temp file's create, its split
+    /// rename pair and the combined rename coalesce (rules 6, 4, 5) into a
+    /// single `Create` of the target. The events are identical to renaming
+    /// onto a *new* name — nothing reports the file being replaced — so the
+    /// debouncer cannot tell a replacement from a creation and leaves it a
+    /// `Create`; the sync-directory handler decides by consulting its index.
+    #[test]
+    fn rename_over_a_file_coalesces_to_a_create_of_the_target() {
+        let debouncer = debouncer_of([
+            create("index.lock"),
+            modify("index.lock"),
+            move_from("index.lock"),
+            move_to("index"),
+            move_both("index.lock", "index"),
+        ]);
+        assert_eq!(queued_kinds(&debouncer), vec![create("index")]);
+    }
+
     /// Rule 6 (create + modify): a modify of a just-created file is dropped —
     /// the create already implies the content.
     #[test]
