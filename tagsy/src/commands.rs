@@ -92,7 +92,7 @@ pub enum Commands {
         #[arg(long = "many")]
         many: bool,
     },
-    /// Create a tag; prints the newly-minted tag id.
+    /// Create a tag; prints the new tag.
     ///
     /// Unset style flags take their defaults (see `StyleArgs`); the dot color
     /// defaults to `#F44336`, matching the Flutter app's palette so CLI- and

@@ -95,6 +95,23 @@ impl TagRow {
     }
 }
 
+/// The [`FileRow`] for `file`, with its tag names from `tags_by_file` (none if
+/// absent).
+fn file_row(file: &FileInfo, tags_by_file: &HashMap<FileId, Vec<String>>) -> FileRow {
+    FileRow::new(
+        file,
+        tags_by_file.get(&file.file_id).cloned().unwrap_or_default(),
+    )
+}
+
+/// [`file_row`] for each of `files`.
+fn file_rows(files: &[FileInfo], tags_by_file: &HashMap<FileId, Vec<String>>) -> Vec<FileRow> {
+    files
+        .iter()
+        .map(|file| file_row(file, tags_by_file))
+        .collect()
+}
+
 /// Print a serializable value as pretty JSON to stdout.
 pub fn print_json(value: &impl Serialize) {
     match serde_json::to_string_pretty(value) {
@@ -106,12 +123,11 @@ pub fn print_json(value: &impl Serialize) {
 /// Emit a one-shot scalar result: a human sentence in [`OutputMode::Human`], a
 /// JSON value in [`OutputMode::Json`].
 ///
-/// This is the single home for the ~dozen command arms whose whole output is
-/// "print a confirmation line, or the equivalent JSON object" (`Deleted file
-/// …`, `Moved file …`, `Purged N previews`). Each used to inline the same
-/// `match output_mode { Human => println!(..), Json => print_json(&json!(..))
-/// }`; routing them here keeps the two renderings adjacent so they can't drift,
-/// and leaves the dispatch arms as one line.
+/// Only for commands whose result is not an entry — counts and status
+/// (`Purged N previews`, `backup`, `activity`, `retag`). A command that
+/// touches files or tags prints them with [`emit_files`] / [`emit_tags`]
+/// instead, so every such command looks the same. Routing these here keeps the
+/// two renderings adjacent so they can't drift.
 ///
 /// `human` is computed by the caller (usually a `format!`); `json` is any
 /// serializable value (typically a `serde_json::json!({..})`). Both are always
@@ -124,120 +140,140 @@ pub fn emit_scalar(output_mode: OutputMode, human: impl AsRef<str>, json: serde_
     }
 }
 
-/// Emit the result of a purge command (`purge-broken` / `purge-deleted`).
-///
-/// Shared by every purge that returns a [`PurgeOutcome`]: renders a
-/// dry-run-vs-applied human summary listing the affected ids, or the equivalent
-/// JSON object. `noun` names the class of files purged ("broken", "deleted") so
-/// the one renderer serves each command without drift.
-pub fn emit_purge_outcome(output_mode: OutputMode, noun: &str, outcome: &PurgeOutcome) {
-    let count = outcome.purged.len();
-    let ids: Vec<String> = outcome
+/// Emit the result of a purge command (`purge-broken` / `purge-deleted`): a
+/// dry-run-vs-applied header over the shared [`file_table`] of the files
+/// purged, or the equivalent JSON object with [`FileRow`]s. `noun` names the
+/// class of files purged ("broken", "deleted") so the one renderer serves each
+/// command without drift. `tags_by_file` supplies each file's tag names, as in
+/// [`emit_files`].
+pub fn emit_purge_outcome(
+    output_mode: OutputMode,
+    noun: &str,
+    outcome: &PurgeOutcome,
+    tags_by_file: &HashMap<FileId, Vec<String>>,
+) {
+    let files: Vec<FileInfo> = outcome
         .purged
         .iter()
-        .map(|purged| purged.file.file_id.to_string())
+        .map(|purged| purged.file.clone())
         .collect();
+    let count = files.len();
 
-    let human = if count == 0 {
-        if outcome.dry_run {
-            format!("No {noun} files found; nothing would be purged")
-        } else {
-            format!("No {noun} files found; nothing purged")
+    match output_mode {
+        OutputMode::Human => {
+            if count == 0 {
+                if outcome.dry_run {
+                    println!("No {noun} files found; nothing would be purged");
+                } else {
+                    println!("No {noun} files found; nothing purged");
+                }
+                return;
+            }
+            if outcome.dry_run {
+                println!("{count} {noun} file(s) would be purged (dry run, nothing changed):");
+            } else {
+                println!("Permanently purged {count} {noun} file(s):");
+            }
+            println!("{}", file_table(&files, tags_by_file));
         }
-    } else {
-        let header = if outcome.dry_run {
-            format!("{count} {noun} file(s) would be purged (dry run, nothing changed):")
-        } else {
-            format!("Permanently purged {count} {noun} file(s):")
-        };
-        let mut lines = vec![header];
-        lines.extend(ids.iter().map(|id| format!("  {id}")));
-        lines.join("\n")
-    };
-
-    emit_scalar(
-        output_mode,
-        human,
-        serde_json::json!({
+        OutputMode::Json => print_json(&json!({
             "dry_run": outcome.dry_run,
-            "purged": ids,
             "count": count,
-        }),
-    );
+            "purged": file_rows(&files, tags_by_file),
+        })),
+    }
 }
 
-/// Emit the result of `delete-duplicates`: one block per duplicate set naming
-/// the kept file, the deleted ones, and the tags merged onto the kept file, or
-/// the equivalent JSON object. `count` is the number of files deleted.
+/// The tag names [`emit_duplicate_deletion_outcome`] shows: every member's
+/// direct tags, and per group (in order) the names of the tags merged onto
+/// the survivor.
+pub struct DuplicateGroupTags {
+    pub files: HashMap<FileId, Vec<String>>,
+    pub merged: Vec<Vec<String>>,
+}
+
+/// Emit the result of `delete-duplicates`: the survivors and the deleted
+/// duplicates, each as a shared [`file_table`], or the equivalent JSON object
+/// with one entry per duplicate set. `count` is the number of files deleted.
+///
+/// A survivor's Tags column shows its tags as they stand. On a dry run the
+/// merge has not happened yet, so the tags it would gain are appended with a
+/// leading `+`.
 pub fn emit_duplicate_deletion_outcome(
     output_mode: OutputMode,
     outcome: &DuplicateDeletionOutcome,
+    tags: &DuplicateGroupTags,
 ) {
-    let ids = |files: &[FileInfo]| {
-        files
-            .iter()
-            .map(|file| file.file_id.to_string())
-            .collect::<Vec<_>>()
-    };
-    let tag_ids = |ids: &[TagId]| ids.iter().map(TagId::to_string).collect::<Vec<_>>();
     let count: usize = outcome.groups.iter().map(|group| group.deleted.len()).sum();
+    let merged = |index: usize| tags.merged.get(index).cloned().unwrap_or_default();
 
-    let human = if outcome.groups.is_empty() {
-        if outcome.dry_run {
-            "No duplicate files found; nothing would be deleted".to_owned()
-        } else {
-            "No duplicate files found; nothing deleted".to_owned()
-        }
-    } else {
-        let sets = outcome.groups.len();
-        let header = if outcome.dry_run {
-            format!(
-                "{count} duplicate file(s) in {sets} set(s) would be deleted (dry run, nothing \
-                 changed):"
-            )
-        } else {
-            format!("Deleted {count} duplicate file(s) in {sets} set(s):")
-        };
-        let mut lines = vec![header];
-        for group in &outcome.groups {
-            lines.push(format!("  {} ({})", group.logical_path, group.content_hash));
-            lines.push(format!("    keep    {}", group.kept.file_id.to_string()));
-            lines.extend(
-                ids(&group.deleted)
-                    .into_iter()
-                    .map(|id| format!("    delete  {id}")),
-            );
-            lines.extend(
-                tag_ids(&group.tags_merged)
-                    .into_iter()
-                    .map(|id| format!("    add tag {id}")),
-            );
-        }
-        lines.join("\n")
-    };
+    match output_mode {
+        OutputMode::Human => {
+            if outcome.groups.is_empty() {
+                if outcome.dry_run {
+                    println!("No duplicate files found; nothing would be deleted");
+                } else {
+                    println!("No duplicate files found; nothing deleted");
+                }
+                return;
+            }
+            let sets = outcome.groups.len();
+            if outcome.dry_run {
+                println!(
+                    "{count} duplicate file(s) in {sets} set(s) would be deleted (dry run, \
+                     nothing changed):"
+                );
+            } else {
+                println!("Deleted {count} duplicate file(s) in {sets} set(s):");
+            }
 
-    let groups: Vec<serde_json::Value> = outcome
-        .groups
-        .iter()
-        .map(|group| {
-            json!({
-                "logical_path": group.logical_path.as_str(),
-                "content_hash": group.content_hash,
-                "kept": group.kept.file_id.to_string(),
-                "deleted": ids(&group.deleted),
-                "tags_merged": tag_ids(&group.tags_merged),
-            })
-        })
-        .collect();
-    emit_scalar(
-        output_mode,
-        human,
-        json!({
-            "dry_run": outcome.dry_run,
-            "groups": groups,
-            "count": count,
-        }),
-    );
+            let kept: Vec<FileInfo> = outcome
+                .groups
+                .iter()
+                .map(|group| group.kept.clone())
+                .collect();
+            let mut kept_tags = tags.files.clone();
+            if outcome.dry_run {
+                for (index, group) in outcome.groups.iter().enumerate() {
+                    kept_tags
+                        .entry(group.kept.file_id)
+                        .or_default()
+                        .extend(merged(index).into_iter().map(|name| format!("+{name}")));
+                }
+            }
+            let deleted: Vec<FileInfo> = outcome
+                .groups
+                .iter()
+                .flat_map(|group| group.deleted.iter().cloned())
+                .collect();
+
+            println!("Kept:");
+            println!("{}", file_table(&kept, &kept_tags));
+            println!("Deleted:");
+            println!("{}", file_table(&deleted, &tags.files));
+        }
+        OutputMode::Json => {
+            let groups: Vec<serde_json::Value> = outcome
+                .groups
+                .iter()
+                .enumerate()
+                .map(|(index, group)| {
+                    json!({
+                        "logical_path": group.logical_path.as_str(),
+                        "content_hash": group.content_hash,
+                        "kept": file_row(&group.kept, &tags.files),
+                        "deleted": file_rows(&group.deleted, &tags.files),
+                        "tags_merged": merged(index),
+                    })
+                })
+                .collect();
+            print_json(&json!({
+                "dry_run": outcome.dry_run,
+                "count": count,
+                "groups": groups,
+            }));
+        }
+    }
 }
 
 /// Number of leading characters needed to uniquely identify `target` among
@@ -290,8 +326,8 @@ fn format_style(style: &tagsy_api::TagStyle) -> String {
     )
 }
 
-/// The single tag table used by *every* command that prints a set of tags
-/// (`search`, `tags-for-file`, `subtags`).
+/// The single tag table used by *every* command that prints tags — listings
+/// (`search`, `tags-for-file`, `subtags`) and every tag mutation alike.
 ///
 /// Short-id prefixes are highlighted the way `jj`/`git` show change ids.
 /// The prefix length is computed against `tags`, so pass the full set
@@ -402,19 +438,7 @@ pub fn emit_files(
                 println!("{}", file_table(files, tags_by_file));
             }
         }
-        OutputMode::Json => {
-            let rows: Vec<FileRow> = files
-                .iter()
-                .map(|file| {
-                    FileRow::new(
-                        file,
-                        tags_by_file.get(&file.file_id).cloned().unwrap_or_default(),
-                    )
-                })
-                .collect();
-
-            print_json(&rows);
-        }
+        OutputMode::Json => print_json(&file_rows(files, tags_by_file)),
     }
 }
 
@@ -436,17 +460,7 @@ pub fn emit_tags_and_files(
                 .map(|tag| TagRow::new(tag, tags_by_tag.get(&tag.id).cloned().unwrap_or_default()))
                 .collect();
 
-            let file_rows: Vec<FileRow> = files
-                .iter()
-                .map(|file| {
-                    FileRow::new(
-                        file,
-                        tags_by_file.get(&file.file_id).cloned().unwrap_or_default(),
-                    )
-                })
-                .collect();
-
-            print_json(&json!({ "tags": tag_rows, "files": file_rows }));
+            print_json(&json!({ "tags": tag_rows, "files": file_rows(files, tags_by_file) }));
         }
     }
 }

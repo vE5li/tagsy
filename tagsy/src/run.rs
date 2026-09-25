@@ -4,17 +4,99 @@
 use std::collections::HashMap;
 
 use serde_json::json;
-use tagsy_api::{Backend, BorderStyle, DeletedRule, SubtagRule, Tag, TagShape, TagStyle};
+use tagsy_api::{
+    Backend, BorderStyle, DeletedRule, DuplicateDeletionOutcome, PurgeOutcome, SubtagRule, Tag,
+    TagShape, TagStyle,
+};
 use tagsy_core::FileInfo;
 use tagsy_ipc::IpcBackend;
 
 use crate::commands::{Commands, StyleArgs};
 use crate::output::{
-    OutputMode, emit_connected_peers, emit_duplicate_deletion_outcome, emit_files, emit_operations,
-    emit_purge_outcome, emit_scalar, emit_tags, emit_tags_and_files, print_json,
-    print_tag_rule_report,
+    DuplicateGroupTags, OutputMode, emit_connected_peers, emit_duplicate_deletion_outcome,
+    emit_files, emit_operations, emit_purge_outcome, emit_scalar, emit_tags, emit_tags_and_files,
+    print_json, print_tag_rule_report,
 };
 use crate::{common, upload};
+
+/// Print `files` the way every command that shows files does: the shared file
+/// table (or `FileRow` JSON), each row with its direct tags.
+async fn show_files(
+    backend: &IpcBackend,
+    output_mode: OutputMode,
+    files: &[FileInfo],
+) -> Result<(), String> {
+    let mut name_cache = common::NameCache::new();
+    let file_tags =
+        common::tags_by_file(backend, &mut name_cache, files, SubtagRule::Exclude).await?;
+    emit_files(output_mode, files, &file_tags);
+    Ok(())
+}
+
+/// Print `tags` the way every command that shows tags does: the shared tag
+/// table (or `TagRow` JSON), each row with the tags applied to it.
+async fn show_tags(
+    backend: &IpcBackend,
+    output_mode: OutputMode,
+    tags: &[Tag],
+) -> Result<(), String> {
+    let mut name_cache = common::NameCache::new();
+    let tag_tags = common::tags_by_tag(backend, &mut name_cache, tags, SubtagRule::Exclude).await?;
+    emit_tags(output_mode, tags, &tag_tags);
+    Ok(())
+}
+
+/// Print a purge's files. Their tags come with the outcome: once purged, a
+/// file's tag relations are gone, so they cannot be looked up afterwards.
+async fn show_purge_outcome(
+    backend: &IpcBackend,
+    output_mode: OutputMode,
+    noun: &str,
+    outcome: &PurgeOutcome,
+) -> Result<(), String> {
+    let mut name_cache = common::NameCache::new();
+    let mut file_tags = HashMap::with_capacity(outcome.purged.len());
+    for purged in &outcome.purged {
+        let names = common::resolve_tag_names(backend, &mut name_cache, &purged.tags).await?;
+        file_tags.insert(purged.file.file_id, names);
+    }
+    emit_purge_outcome(output_mode, noun, outcome, &file_tags);
+    Ok(())
+}
+
+/// Print `delete-duplicates`' sets, every file with its direct tags as they
+/// now stand, plus the names of the tags merged onto each survivor.
+async fn show_duplicate_deletion_outcome(
+    backend: &IpcBackend,
+    output_mode: OutputMode,
+    outcome: &DuplicateDeletionOutcome,
+) -> Result<(), String> {
+    let mut name_cache = common::NameCache::new();
+    let files: Vec<FileInfo> = outcome
+        .groups
+        .iter()
+        .flat_map(|group| std::iter::once(&group.kept).chain(&group.deleted))
+        .cloned()
+        .collect();
+    let file_tags =
+        common::tags_by_file(backend, &mut name_cache, &files, SubtagRule::Exclude).await?;
+    let mut merged = Vec::with_capacity(outcome.groups.len());
+    for group in &outcome.groups {
+        merged.push(common::resolve_tag_names(backend, &mut name_cache, &group.tags_merged).await?);
+    }
+    emit_duplicate_deletion_outcome(output_mode, outcome, &DuplicateGroupTags {
+        files: file_tags,
+        merged,
+    });
+    Ok(())
+}
+
+/// A side note for the human at the terminal (a download's destination, an
+/// edit that changed nothing). Goes to stderr in both output modes, so it
+/// never breaks the uniform stdout output or a JSON consumer.
+fn note(message: impl AsRef<str>) {
+    eprintln!("{}", message.as_ref());
+}
 
 /// Apply the CLI's optional style flags on top of a base [`TagStyle`], leaving
 /// any unspecified property untouched. `create-tag` passes
@@ -89,89 +171,45 @@ pub async fn run(
                     .push(common::resolve_tag_id(backend, tag, DeletedRule::Exclude).await?);
             }
 
-            let mut name_cache = common::NameCache::new();
-            let mut file_tags = HashMap::new();
             let mut files = Vec::with_capacity(planned.len());
 
             // Fail fast: on the first upload error we stop, leaving any
             // already-uploaded files in place.
             for item in &planned {
                 // The daemon copies the file into its outbox before answering,
-                // so the source may be deleted as soon as this returns.
-                let file_id = backend
+                // so the source may be deleted as soon as this returns. It
+                // answers with the file as recorded.
+                let file = backend
                     .upload_file(
                         item.disk_path.clone(),
                         item.path_name.clone(),
                         resolved_tags.clone(),
                     )
                     .await
-                    .map_err(|error| error.to_string())?
-                    .file_id;
+                    .map_err(|error| error.to_string())?;
 
                 if !keep {
                     std::fs::remove_file(&item.disk_path).map_err(|error| {
                         format!(
                             "uploaded as file {}, but failed to delete {}: {error}",
-                            file_id.to_string(),
+                            file.file_id.to_string(),
                             item.disk_path.display()
                         )
                     })?;
                 }
 
-                // Render the full entry from locally-known data rather than
-                // fetching it back (the metadata write is enqueued
-                // asynchronously and would race). We know the id, logical path,
-                // applied tags, and that this is the first version. The content
-                // hash is computed daemon-side and is not known here, so it
-                // renders empty in JSON output.
-                let file = FileInfo {
-                    file_id,
-                    logical_path: tagsy_core::LogicalPath::new(item.path_name.clone()),
-                    content_hash: String::new(),
-                    version_number: 1,
-                    // The size is computed daemon-side and is not known here.
-                    size: 0,
-                    // Only one id is known locally; highlight the whole id.
-                    short_id_length: file_id.to_string().len(),
-                    // A freshly-added file is live by construction.
-                    deleted: false,
-                    // Freshly added: its only version was recorded just now. The
-                    // authoritative timestamps are stamped daemon-side;
-                    // approximate with now for this optimistic local render.
-                    first_recorded_at: tagsy_core::clock::now_millis(),
-                    latest_change_at: tagsy_core::clock::now_millis(),
-                };
-
-                let tag_names =
-                    common::resolve_tag_names(backend, &mut name_cache, &resolved_tags).await?;
-                file_tags.insert(file_id, tag_names);
                 files.push(file);
             }
 
-            emit_files(output_mode, &files, &file_tags);
+            show_files(backend, output_mode, &files).await?;
         }
         Commands::CreateTag { name, style } => {
             let style = apply_style_args(TagStyle::default(), &style);
-            let tag_id = backend
-                .create_tag(name.clone(), style.clone())
+            let tag = backend
+                .create_tag(name, style)
                 .await
-                .map_err(|error| error.to_string())?
-                .id;
-
-            // Persistence is async (the write is enqueued), so we can't fetch the
-            // row back yet without racing the pipeline. Render the full entry from
-            // what we just sent instead — the id is authoritative and the
-            // name/style are exactly what the daemon will persist. A fresh tag
-            // has no applied tags, so that column is empty.
-            let tag = Tag {
-                id: tag_id,
-                name,
-                style,
-                metadata: None,
-                // A freshly-created tag is live by construction.
-                deleted: false,
-            };
-            emit_tags(output_mode, std::slice::from_ref(&tag), &HashMap::new());
+                .map_err(|error| error.to_string())?;
+            show_tags(backend, output_mode, &[tag]).await?;
         }
         Commands::Search {
             query,
@@ -239,13 +277,10 @@ pub async fn run(
                 .await
                 .map_err(|error| error.to_string())?;
 
-            match (output_mode, outcome.changed) {
-                (OutputMode::Human, true) => println!("Edited file {}", file_id.to_string()),
-                (OutputMode::Human, false) => println!("No changes"),
-                (OutputMode::Json, changed) => {
-                    print_json(&json!({ "id": file_id, "edited": changed }))
-                }
+            if !outcome.changed {
+                note("No changes");
             }
+            show_files(backend, output_mode, &[outcome.file]).await?;
         }
 
         // Shares its start with the edit flow: locate the file's bytes — reading
@@ -297,7 +332,7 @@ pub async fn run(
                 })?;
             } else {
                 let temp_path = backend
-                    .fetch_file(file_id, file.content_hash)
+                    .fetch_file(file_id, file.content_hash.clone())
                     .await
                     .map_err(|error| error.to_string())?;
 
@@ -338,124 +373,79 @@ pub async fn run(
                 }
             }
 
-            emit_scalar(
-                output_mode,
-                format!("Downloaded to {file_name}"),
-                json!({ "id": file_id, "path": file_name }),
-            );
+            note(format!("Downloaded to {file_name}"));
+            show_files(backend, output_mode, &[file]).await?;
         }
         Commands::DeleteFile { id } => {
             let file_id = common::resolve_file_id(backend, &id, DeletedRule::Exclude).await?;
-
-            backend
+            let file = backend
                 .delete_file(file_id)
                 .await
                 .map_err(|error| error.to_string())?;
-
-            emit_scalar(
-                output_mode,
-                format!("Deleted file {}", file_id.to_string()),
-                json!({ "deleted": file_id }),
-            );
+            show_files(backend, output_mode, &[file]).await?;
         }
         Commands::RestoreFile { id } => {
             // The restore path names a *deleted* file, so resolution must see
             // tombstoned rows.
             let file_id = common::resolve_file_id(backend, &id, DeletedRule::Include).await?;
-
-            backend
+            let file = backend
                 .restore_file(file_id)
                 .await
                 .map_err(|error| error.to_string())?;
-
-            emit_scalar(
-                output_mode,
-                format!("Restored file {}", file_id.to_string()),
-                json!({ "restored": file_id }),
-            );
+            show_files(backend, output_mode, &[file]).await?;
         }
         Commands::DeleteTag { tag_id } => {
             let tag_id = common::resolve_tag_id(backend, &tag_id, DeletedRule::Exclude).await?;
-
-            backend
+            let tag = backend
                 .delete_tag(tag_id)
                 .await
                 .map_err(|error| error.to_string())?;
-
-            emit_scalar(
-                output_mode,
-                format!("Deleted tag {}", tag_id.to_string()),
-                json!({ "deleted": tag_id }),
-            );
+            show_tags(backend, output_mode, &[tag]).await?;
         }
         Commands::RestoreTag { tag_id } => {
             // Same as RestoreFile: a deleted tag must be resolvable.
             let tag_id = common::resolve_tag_id(backend, &tag_id, DeletedRule::Include).await?;
-
-            backend
+            let tag = backend
                 .restore_tag(tag_id)
                 .await
                 .map_err(|error| error.to_string())?;
-
-            emit_scalar(
-                output_mode,
-                format!("Restored tag {}", tag_id.to_string()),
-                json!({ "restored": tag_id }),
-            );
+            show_tags(backend, output_mode, &[tag]).await?;
         }
         Commands::Tag { id, tag_ids } => {
             let file_id = common::resolve_file_id(backend, &id, DeletedRule::Exclude).await?;
 
-            let mut applied = Vec::new();
+            // Each call answers with the file as it stands after that tag; the
+            // last answer carries them all.
+            let mut file = None;
             for tag in &tag_ids {
                 let tag_id = common::resolve_tag_id(backend, tag, DeletedRule::Exclude).await?;
-
-                backend
-                    .tag_file(tag_id, file_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-
-                if output_mode == OutputMode::Human {
-                    println!(
-                        "Tagged file {} with tag {}",
-                        file_id.to_string(),
-                        tag_id.to_string()
-                    );
-                }
-
-                applied.push(tag_id);
+                file = Some(
+                    backend
+                        .tag_file(tag_id, file_id)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                );
             }
 
-            if output_mode == OutputMode::Json {
-                print_json(&json!({ "file": file_id, "tagged": applied }));
-            }
+            let files: Vec<FileInfo> = file.into_iter().collect();
+            show_files(backend, output_mode, &files).await?;
         }
         Commands::Untag { id, tag_ids } => {
             let file_id = common::resolve_file_id(backend, &id, DeletedRule::Exclude).await?;
 
-            let mut removed = Vec::new();
+            let mut file = None;
             for tag in &tag_ids {
                 let tag_id = common::resolve_tag_id(backend, tag, DeletedRule::Exclude).await?;
-
-                backend
-                    .untag_file(tag_id, file_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-
-                if output_mode == OutputMode::Human {
-                    println!(
-                        "Removed tag {} from file {}",
-                        tag_id.to_string(),
-                        file_id.to_string()
-                    );
-                }
-
-                removed.push(tag_id);
+                file = Some(
+                    backend
+                        .untag_file(tag_id, file_id)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                );
             }
 
-            if output_mode == OutputMode::Json {
-                print_json(&json!({ "file": file_id, "untagged": removed }));
-            }
+            let files: Vec<FileInfo> = file.into_iter().collect();
+            show_files(backend, output_mode, &files).await?;
         }
         Commands::TagsForFile {
             id,
@@ -477,17 +467,11 @@ pub async fn run(
         }
         Commands::RenameTag { tag_id, name } => {
             let tag_id = common::resolve_tag_id(backend, &tag_id, DeletedRule::Exclude).await?;
-
-            backend
-                .rename_tag(tag_id, name.clone())
+            let tag = backend
+                .rename_tag(tag_id, name)
                 .await
                 .map_err(|error| error.to_string())?;
-
-            emit_scalar(
-                output_mode,
-                format!("Renamed tag {}", tag_id.to_string()),
-                json!({ "id": tag_id, "name": name }),
-            );
+            show_tags(backend, output_mode, &[tag]).await?;
         }
         Commands::SetTagStyle { tag_id, style } => {
             let tag_id = common::resolve_tag_id(backend, &tag_id, DeletedRule::Exclude).await?;
@@ -500,86 +484,56 @@ pub async fn run(
                 .map_err(|error| error.to_string())?;
             let merged = apply_style_args(current.style, &style);
 
-            backend
-                .set_tag_style(tag_id, merged.clone())
+            let tag = backend
+                .set_tag_style(tag_id, merged)
                 .await
                 .map_err(|error| error.to_string())?;
-
-            emit_scalar(
-                output_mode,
-                format!("Restyled tag {}", tag_id.to_string()),
-                json!({ "id": tag_id, "style": merged }),
-            );
+            show_tags(backend, output_mode, &[tag]).await?;
         }
         Commands::Move { id, path } => {
             let file_id = common::resolve_file_id(backend, &id, DeletedRule::Exclude).await?;
-
-            backend
-                .move_file(file_id, path.clone())
+            let file = backend
+                .move_file(file_id, path)
                 .await
                 .map_err(|error| error.to_string())?;
-
-            emit_scalar(
-                output_mode,
-                format!("Moved file {}", file_id.to_string()),
-                json!({ "id": file_id, "path": path }),
-            );
+            show_files(backend, output_mode, &[file]).await?;
         }
         Commands::TagTag { child, parents } => {
             let child_id = common::resolve_tag_id(backend, &child, DeletedRule::Exclude).await?;
 
-            let mut applied = Vec::new();
+            // As with `tag`: the last answer shows the child with every parent.
+            let mut tag = None;
             for parent in &parents {
                 let parent_id =
                     common::resolve_tag_id(backend, parent, DeletedRule::Exclude).await?;
-
-                backend
-                    .tag_tag(parent_id, child_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-
-                if output_mode == OutputMode::Human {
-                    println!(
-                        "Tagged tag {} with {}",
-                        child_id.to_string(),
-                        parent_id.to_string()
-                    );
-                }
-
-                applied.push(parent_id);
+                tag = Some(
+                    backend
+                        .tag_tag(parent_id, child_id)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                );
             }
 
-            if output_mode == OutputMode::Json {
-                print_json(&json!({ "tag": child_id, "tagged": applied }));
-            }
+            let tags: Vec<Tag> = tag.into_iter().collect();
+            show_tags(backend, output_mode, &tags).await?;
         }
         Commands::UntagTag { child, parents } => {
             let child_id = common::resolve_tag_id(backend, &child, DeletedRule::Exclude).await?;
 
-            let mut removed = Vec::new();
+            let mut tag = None;
             for parent in &parents {
                 let parent_id =
                     common::resolve_tag_id(backend, parent, DeletedRule::Exclude).await?;
-
-                backend
-                    .untag_tag(parent_id, child_id)
-                    .await
-                    .map_err(|error| error.to_string())?;
-
-                if output_mode == OutputMode::Human {
-                    println!(
-                        "Removed tag {} from {}",
-                        parent_id.to_string(),
-                        child_id.to_string(),
-                    );
-                }
-
-                removed.push(parent_id);
+                tag = Some(
+                    backend
+                        .untag_tag(parent_id, child_id)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                );
             }
 
-            if output_mode == OutputMode::Json {
-                print_json(&json!({ "tag": child_id, "untagged": removed }));
-            }
+            let tags: Vec<Tag> = tag.into_iter().collect();
+            show_tags(backend, output_mode, &tags).await?;
         }
         Commands::Subtags { tag_id, recursive } => {
             let tag_id = common::resolve_tag_id(backend, &tag_id, DeletedRule::Exclude).await?;
@@ -670,21 +624,21 @@ pub async fn run(
                 .purge_broken(dry_run)
                 .await
                 .map_err(|error| error.to_string())?;
-            emit_purge_outcome(output_mode, "broken", &outcome);
+            show_purge_outcome(backend, output_mode, "broken", &outcome).await?;
         }
         Commands::PurgeDeleted { dry_run } => {
             let outcome = backend
                 .purge_deleted(dry_run)
                 .await
                 .map_err(|error| error.to_string())?;
-            emit_purge_outcome(output_mode, "deleted", &outcome);
+            show_purge_outcome(backend, output_mode, "deleted", &outcome).await?;
         }
         Commands::DeleteDuplicates { dry_run } => {
             let outcome = backend
                 .delete_duplicates(dry_run)
                 .await
                 .map_err(|error| error.to_string())?;
-            emit_duplicate_deletion_outcome(output_mode, &outcome);
+            show_duplicate_deletion_outcome(backend, output_mode, &outcome).await?;
         }
         Commands::Backup => {
             let outcome = backend.backup().await.map_err(|error| error.to_string())?;
