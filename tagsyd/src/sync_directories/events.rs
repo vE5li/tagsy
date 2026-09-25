@@ -83,40 +83,7 @@ impl SyncDirectories {
                 }
 
                 let sync_directory = self.sync_directory_for_path(&file_name)?;
-                let sync_relative_path = relative_within(&file_name, &sync_directory.path)?;
-
-                if sync_directory.is_ignored(sync_relative_path) {
-                    log::debug!(
-                        "Ignoring Create of gitignored file {}",
-                        sync_relative_path.to_string_lossy()
-                    );
-                    return Ok(());
-                }
-
-                let (content, content_hash, size) = self.get_file_content(&file_name).await?;
-
-                match &sync_directory.sync_type {
-                    SyncType::Universal { .. } => {
-                        self.upload_file(
-                            sync_directory,
-                            sync_relative_path,
-                            content,
-                            content_hash,
-                            size,
-                            Vec::new(),
-                        )?;
-                    }
-                    SyncType::TagBased { tags } => {
-                        self.add_file(
-                            sync_directory,
-                            sync_relative_path,
-                            content,
-                            content_hash,
-                            size,
-                            tags.to_vec(),
-                        )?;
-                    }
-                }
+                self.ingest_arrival(sync_directory, &file_name).await?;
             }
             DebouncedEventKind::Move { from, to } => {
                 let Some(any_path) = from.as_ref().or(to.as_ref()) else {
@@ -233,40 +200,7 @@ impl SyncDirectories {
                             return Ok(());
                         }
 
-                        let sync_relative_path = relative_within(&to, &sync_directory.path)?;
-
-                        if sync_directory.is_ignored(sync_relative_path) {
-                            log::debug!(
-                                "Ignoring move-in of gitignored file {}",
-                                sync_relative_path.to_string_lossy()
-                            );
-                            return Ok(());
-                        }
-
-                        let (content, content_hash, size) = self.get_file_content(&to).await?;
-
-                        match &sync_directory.sync_type {
-                            SyncType::Universal { .. } => {
-                                self.upload_file(
-                                    sync_directory,
-                                    sync_relative_path,
-                                    content,
-                                    content_hash,
-                                    size,
-                                    Vec::new(),
-                                )?;
-                            }
-                            SyncType::TagBased { tags } => {
-                                self.add_file(
-                                    sync_directory,
-                                    sync_relative_path,
-                                    content,
-                                    content_hash,
-                                    size,
-                                    tags.to_vec(),
-                                )?;
-                            }
-                        }
+                        self.ingest_arrival(sync_directory, &to).await?;
                     } else if to.is_dir() {
                         // Moving a directory in also brings its subtree under the
                         // non-recursive watcher: register watches (pruning
@@ -352,6 +286,73 @@ impl SyncDirectories {
         }
 
         Ok(())
+    }
+
+    /// Ingest a file that just arrived at `path` — a create or a move-in not
+    /// caused by the daemon itself.
+    ///
+    /// An arrival at a path this directory already tracks *replaces* that
+    /// file: renaming one file over another (git's `index.lock` → `index`, an
+    /// editor's atomic save, `mv` over a file) reports only the arrival, never
+    /// the replaced file leaving. So it is new content for the tracked file,
+    /// exactly like a `Modify`; ingesting it as a new file would leave a
+    /// second id at the same path. The debouncer cannot make this call — the
+    /// events are identical to a rename onto a new name — only the index knows
+    /// the path was taken.
+    ///
+    /// The tracked lookup comes before the ignore check: ignore gates the
+    /// ingestion of new files only, never syncing one already tracked.
+    async fn ingest_arrival(
+        &self,
+        sync_directory: &super::OpenDirectory,
+        path: &Path,
+    ) -> Result<(), SyncDirectoryError> {
+        let sync_relative_path = relative_within(path, &sync_directory.path)?;
+
+        // A lookup error must not fall through to ingesting a new file: that
+        // is the duplicate this guards against. Skip the event instead; the
+        // next startup scan re-detects the content by hash.
+        let tracked = sync_directory
+            .tracked_file_id(sync_relative_path)
+            .map_err(|error| SyncDirectoryError::FailedAddingFile(error.into()))?;
+
+        if let Some(file_id) = tracked {
+            log::debug!(
+                "{} replaced a tracked file; recording new content",
+                sync_relative_path.to_string_lossy()
+            );
+            let (content, content_hash, size) = self.get_file_content(path).await?;
+            return self.update_file_content(sync_directory, file_id, content, content_hash, size);
+        }
+
+        if sync_directory.is_ignored(sync_relative_path) {
+            log::debug!(
+                "Ignoring arrival of gitignored file {}",
+                sync_relative_path.to_string_lossy()
+            );
+            return Ok(());
+        }
+
+        let (content, content_hash, size) = self.get_file_content(path).await?;
+
+        match &sync_directory.sync_type {
+            SyncType::Universal { .. } => self.upload_file(
+                sync_directory,
+                sync_relative_path,
+                content,
+                content_hash,
+                size,
+                Vec::new(),
+            ),
+            SyncType::TagBased { tags } => self.add_file(
+                sync_directory,
+                sync_relative_path,
+                content,
+                content_hash,
+                size,
+                tags.to_vec(),
+            ),
+        }
     }
 
     /// React to a `.gitignore` change under `gitignore_dir` by re-admitting any

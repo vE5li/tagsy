@@ -113,6 +113,38 @@ async fn phone_modifies_files() {
     .await;
 }
 
+/// Regression: renaming a file over a tracked one (git rewriting
+/// `.git/index`, an editor's atomic save, `mv` over a file) reports only an
+/// arrival at the path, never the replaced file leaving it, and each such
+/// save used to add a new file at the same path instead of a version of the
+/// existing one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn phone_replaces_files_by_rename() {
+    script::check(scenario(
+        hub_and_spoke,
+        vec![
+            write("phone", "atomic", "phone", "atomic.txt"),
+            write("phone", "moved", "phone", "moved-over.txt"),
+        ],
+        vec![
+            Step::ReplaceByRename {
+                on: "phone",
+                dir: "phone",
+                path: "atomic.txt",
+                bytes: bytes("atomic, second version"),
+            },
+            Step::MoveInOver {
+                on: "phone",
+                dir: "phone",
+                path: "moved-over.txt",
+                bytes: bytes("moved over, second version"),
+            },
+        ],
+        &["central"],
+    ))
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn central_modifies_files() {
     script::check(scenario(

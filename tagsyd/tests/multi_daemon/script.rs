@@ -143,6 +143,23 @@ pub enum Step {
         path: &'static str,
         bytes: Vec<u8>,
     },
+    /// Replace an existing file the way git (`index.lock` → `index`) and
+    /// atomically-saving editors do: write the new bytes to a sibling temp
+    /// file, then rename it over the original.
+    ReplaceByRename {
+        on: &'static str,
+        dir: &'static str,
+        path: &'static str,
+        bytes: Vec<u8>,
+    },
+    /// Replace an existing file by moving one in over it from outside every
+    /// sync directory (`mv ~/elsewhere dir/path`).
+    MoveInOver {
+        on: &'static str,
+        dir: &'static str,
+        path: &'static str,
+        bytes: Vec<u8>,
+    },
     /// Rename a file within a sync directory.
     Rename {
         on: &'static str,
@@ -227,6 +244,8 @@ impl Step {
             Step::Upload { on, .. }
             | Step::Write { on, .. }
             | Step::Overwrite { on, .. }
+            | Step::ReplaceByRename { on, .. }
+            | Step::MoveInOver { on, .. }
             | Step::Rename { on, .. }
             | Step::Remove { on, .. }
             | Step::Edit { on, .. }
@@ -439,6 +458,22 @@ async fn perform(cluster: &Cluster, roles: &Roles, context: &mut Context, step: 
         Step::Overwrite {
             dir, path, bytes, ..
         } => cluster.write_file(node, dir, path, bytes),
+        Step::ReplaceByRename {
+            dir, path, bytes, ..
+        } => {
+            let target = cluster.directory_path(node, dir).join(path);
+            let mut temp = target.clone().into_os_string();
+            temp.push(".lock");
+            std::fs::write(&temp, bytes).expect("write temp file in sync directory");
+            std::fs::rename(&temp, &target).expect("rename temp file over the original");
+        }
+        Step::MoveInOver {
+            dir, path, bytes, ..
+        } => {
+            let source = cluster.scratch_file(node, bytes);
+            let target = cluster.directory_path(node, dir).join(path);
+            std::fs::rename(source, target).expect("move file in over the original");
+        }
         Step::Rename { dir, from, to, .. } => {
             let base = cluster.directory_path(node, dir);
             let target = base.join(to);

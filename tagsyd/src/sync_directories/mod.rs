@@ -245,17 +245,25 @@ impl OpenDirectory {
     /// may revisit files already tracked) idempotent, the same guard the
     /// initial-sync untracked walk applies.
     fn is_file_tracked(&self, relative_path: &Path) -> Result<bool, DatabaseError> {
+        self.tracked_file_id(relative_path)
+            .map(|file_id| file_id.is_some())
+    }
+
+    /// The id of the file tracked at sync-relative `relative_path`, or `None`
+    /// if the path is untracked. Same lookup and error contract as
+    /// [`is_file_tracked`](Self::is_file_tracked).
+    fn tracked_file_id(&self, relative_path: &Path) -> Result<Option<FileId>, DatabaseError> {
         match &self.sync_type {
             SyncType::Universal { .. } => {
                 match FileId::from_string(&relative_path.to_string_lossy()) {
                     Some(file_id) => match self.database.get_file(file_id) {
-                        Ok(_) => Ok(true),
-                        Err(DatabaseError::MissingFile) => Ok(false),
+                        Ok(_) => Ok(Some(file_id)),
+                        Err(DatabaseError::MissingFile) => Ok(None),
                         Err(error) => Err(error),
                     },
                     // A name that is not a valid `file_id` cannot be tracked in a
                     // Universal directory.
-                    None => Ok(false),
+                    None => Ok(None),
                 }
             }
             SyncType::TagBased { .. } => {
@@ -263,8 +271,8 @@ impl OpenDirectory {
                     .database
                     .get_file_id(&PhysicalPath::new(relative_path.to_string_lossy()))
                 {
-                    Ok(_) => Ok(true),
-                    Err(DatabaseError::MissingFile) => Ok(false),
+                    Ok(file_id) => Ok(Some(file_id)),
+                    Err(DatabaseError::MissingFile) => Ok(None),
                     Err(error) => Err(error),
                 }
             }
