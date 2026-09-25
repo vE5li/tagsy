@@ -148,8 +148,19 @@ impl CatalogWriter {
             // hold matching content, otherwise drive a content-addressed receive
             // that floods `ChunkRequest`s to peers. A `Change` falls through to the
             // DB-writer pipeline below.
+            //
+            // A `LocalChange` takes the same pipeline; its reply is answered
+            // at the bottom of the loop, once the change is applied.
+            let mut reply = None;
             let ingest = match message {
                 CatalogCommand::Change(ingest, change_origin) => (ingest, change_origin),
+                CatalogCommand::LocalChange {
+                    change,
+                    reply: change_reply,
+                } => {
+                    reply = Some(change_reply);
+                    (Ingest::Meta(change), local_origin())
+                }
                 CatalogCommand::Fetch {
                     file_id,
                     expected_hash,
@@ -429,7 +440,15 @@ impl CatalogWriter {
                     // here, mirroring it. See `EVENT PUBLISHING` on `handle_changes`.
                     let _ = event_sender.send(change);
 
-                    let _ = respond_to.send(Ok(()));
+                    let restored = database
+                        .file_info_from_id(file_id, store::DeletedRule::Include)
+                        .map_err(|error| {
+                            messages::RestoreError::ReadBack(format!(
+                                "{}: {error}",
+                                file_id.to_string()
+                            ))
+                        });
+                    let _ = respond_to.send(restored);
                     continue;
                 }
                 CatalogCommand::GetPreview {
@@ -827,11 +846,7 @@ impl CatalogWriter {
                     // before this command is sent.
                     //
                     // The DB reads and the sync-directory round-trip mirror
-                    // `SweepMissingContent`. Applying a purge is enqueuing a
-                    // `Change::FilePurged` onto *this* loop's own channel, so we
-                    // must not await it here (self-deadlock, same as the sweep's
-                    // fetch): we send and let this loop process each purge after
-                    // the current handler returns.
+                    // `SweepMissingContent`.
                     let files = match database.get_all_files(store::DeletedRule::Exclude) {
                         Ok(files) => files,
                         Err(error) => {
@@ -842,6 +857,7 @@ impl CatalogWriter {
                     };
 
                     let mut catalog_files = Vec::with_capacity(files.len());
+                    let mut candidates = std::collections::HashMap::with_capacity(files.len());
                     for file in files {
                         let tags = match database
                             .tag_ids_for_file(file.file_id, store::SubtagRule::Exclude)
@@ -855,7 +871,8 @@ impl CatalogWriter {
                                 continue;
                             }
                         };
-                        catalog_files.push((file.file_id, file.logical_path, tags));
+                        catalog_files.push((file.file_id, file.logical_path.clone(), tags.clone()));
+                        candidates.insert(file.file_id, tagsy_api::PurgedFile { file, tags });
                     }
 
                     let (missing_respond_to, missing_rx) = tokio::sync::oneshot::channel();
@@ -867,8 +884,11 @@ impl CatalogWriter {
                         let _ = respond_to.send(Ok(Vec::new()));
                         continue;
                     }
-                    let broken = match missing_rx.await {
-                        Ok(missing) => missing,
+                    let broken: Vec<tagsy_api::PurgedFile> = match missing_rx.await {
+                        Ok(missing) => missing
+                            .into_iter()
+                            .filter_map(|file_id| candidates.remove(&file_id))
+                            .collect(),
                         Err(_) => {
                             log::warn!(
                                 "PurgeBroken: sync-directory actor dropped responder; aborting"
@@ -888,26 +908,29 @@ impl CatalogWriter {
                     }
 
                     log::info!("PurgeBroken: purging {} broken file(s)", broken.len());
-                    for file_id in &broken {
-                        // Enqueue the purge as a local metadata change so it flows
-                        // through the same `files::apply_change` path as a
-                        // peer-reconciled purge: record in the permanent set,
-                        // strip the catalog rows, drop bytes, forward to peers.
-                        if let Err(error) = change_sender.send(CatalogCommand::Change(
-                            Ingest::Meta(Change::FilePurged { file_id: *file_id }),
-                            // Not sourced from any sync directory: an empty path
-                            // matches none, so the `FilePurged` handler drops the
-                            // bytes from *every* directory that holds the file.
-                            ChangeOrigin::Local {
-                                directory_path: std::path::PathBuf::new(),
+                    for purged in &broken {
+                        // Apply the purge as a local metadata change so it takes
+                        // the same `files::apply_change` path as a peer-reconciled
+                        // purge: record in the permanent set, strip the catalog
+                        // rows, drop bytes, forward to peers. Not sourced from any
+                        // sync directory: an empty path matches none, so the bytes
+                        // are dropped from *every* directory that holds the file.
+                        apply_metadata_change(
+                            &configuration,
+                            &runtime_configuration,
+                            &mut database,
+                            &command_sender,
+                            &change_sender,
+                            &pending_fetches,
+                            &pull_scheduler,
+                            &operations,
+                            &event_sender,
+                            Change::FilePurged {
+                                file_id: purged.file.file_id,
                             },
-                        )) {
-                            log::error!(
-                                "PurgeBroken: change channel closed while enqueuing purge for {}: \
-                                 {error}",
-                                file_id.to_string()
-                            );
-                        }
+                            &local_origin(),
+                        )
+                        .await;
                     }
                     let _ = respond_to.send(Ok(broken));
                     continue;
@@ -922,11 +945,6 @@ impl CatalogWriter {
                     // sync-directory round-trip and no Universal precondition: a
                     // tombstone is already a deliberate state. Computed here on
                     // the sole DB writer to avoid a TOCTOU race.
-                    //
-                    // Applying a purge enqueues a `Change::FilePurged` onto
-                    // *this* loop's own channel, so — as in `PurgeBroken` — we
-                    // send and let this loop process each purge after the current
-                    // handler returns rather than awaiting (self-deadlock).
                     let files = match database.get_all_files(store::DeletedRule::Include) {
                         Ok(files) => files,
                         Err(error) => {
@@ -935,11 +953,25 @@ impl CatalogWriter {
                             continue;
                         }
                     };
-                    let deleted: Vec<tagsy_core::FileId> = files
+                    let deleted: Result<Vec<tagsy_api::PurgedFile>, _> = files
                         .into_iter()
                         .filter(|file| file.deleted)
-                        .map(|file| file.file_id)
+                        .map(|file| {
+                            let tags = database
+                                .tag_ids_for_file(file.file_id, store::SubtagRule::Exclude)?
+                                .into_iter()
+                                .collect();
+                            Ok(tagsy_api::PurgedFile { file, tags })
+                        })
                         .collect();
+                    let deleted = match deleted {
+                        Ok(deleted) => deleted,
+                        Err(error) => {
+                            log::error!("PurgeDeleted: failed to read tags: {error:?}");
+                            let _ = respond_to.send(Err(error));
+                            continue;
+                        }
+                    };
 
                     if dry_run {
                         log::info!(
@@ -951,19 +983,23 @@ impl CatalogWriter {
                     }
 
                     log::info!("PurgeDeleted: purging {} deleted file(s)", deleted.len());
-                    for file_id in &deleted {
-                        if let Err(error) = change_sender.send(CatalogCommand::Change(
-                            Ingest::Meta(Change::FilePurged { file_id: *file_id }),
-                            ChangeOrigin::Local {
-                                directory_path: std::path::PathBuf::new(),
+                    for purged in &deleted {
+                        apply_metadata_change(
+                            &configuration,
+                            &runtime_configuration,
+                            &mut database,
+                            &command_sender,
+                            &change_sender,
+                            &pending_fetches,
+                            &pull_scheduler,
+                            &operations,
+                            &event_sender,
+                            Change::FilePurged {
+                                file_id: purged.file.file_id,
                             },
-                        )) {
-                            log::error!(
-                                "PurgeDeleted: change channel closed while enqueuing purge for \
-                                 {}: {error}",
-                                file_id.to_string()
-                            );
-                        }
+                            &local_origin(),
+                        )
+                        .await;
                     }
                     let _ = respond_to.send(Ok(deleted));
                     continue;
@@ -972,8 +1008,8 @@ impl CatalogWriter {
                     dry_run,
                     respond_to,
                 } => {
-                    let groups = match duplicates::plan_duplicate_deletions(&database) {
-                        Ok(groups) => groups,
+                    let plans = match duplicates::plan_duplicate_deletions(&database) {
+                        Ok(plans) => plans,
                         Err(error) => {
                             log::error!("DeleteDuplicates: failed to plan: {error:?}");
                             let _ = respond_to.send(Err(error));
@@ -981,58 +1017,83 @@ impl CatalogWriter {
                         }
                     };
 
-                    let deleted: usize = groups.iter().map(|group| group.deleted.len()).sum();
+                    let deleted: usize = plans.iter().map(|plan| plan.deleted.len()).sum();
                     if dry_run {
                         log::info!(
                             "DeleteDuplicates (dry run): {deleted} duplicate file(s) in {} set(s) \
                              would be deleted",
-                            groups.len()
+                            plans.len()
                         );
-                        let _ = respond_to.send(Ok(groups));
-                        continue;
-                    }
-
-                    log::info!(
-                        "DeleteDuplicates: deleting {deleted} duplicate file(s) in {} set(s)",
-                        groups.len()
-                    );
-                    // As in the purges, applying means enqueuing ordinary
-                    // changes onto *this* loop's own channel (awaiting them here
-                    // would self-deadlock), so they inherit LWW, placement and
-                    // peer forwarding.
-                    //
-                    // The channel is FIFO, so order matters: the duplicates go
-                    // *before* the survivor gains their tags. A tag that makes a
-                    // TagBased directory newly want the survivor places it at the
-                    // logical path; were a duplicate still there, placement would
-                    // suffix the survivor's name (`name (1).txt`) for good.
-                    let origin = || ChangeOrigin::Local {
-                        directory_path: std::path::PathBuf::new(),
-                    };
-                    let changes = groups.iter().flat_map(|group| {
-                        let deleted = group.deleted.iter().map(|file_id| Change::FileDeleted {
-                            file_id: *file_id,
-                            deleted_at: clock::now_millis(),
-                        });
-                        let tagged = group.tags_merged.iter().map(|tag_id| Change::FileTagged {
-                            file_id: group.kept,
-                            tag_id: *tag_id,
-                            metadata: None,
-                            modified_at: clock::now_millis(),
-                        });
-                        deleted.chain(tagged)
-                    });
-                    for change in changes {
-                        if let Err(error) = change_sender
-                            .send(CatalogCommand::Change(Ingest::Meta(change), origin()))
-                        {
-                            log::error!(
-                                "DeleteDuplicates: change channel closed while enqueuing: {error}"
-                            );
-                            break;
+                    } else {
+                        log::info!(
+                            "DeleteDuplicates: deleting {deleted} duplicate file(s) in {} set(s)",
+                            plans.len()
+                        );
+                        // Applied here, as ordinary changes, so they inherit LWW,
+                        // placement and peer forwarding.
+                        //
+                        // Order matters: the duplicates go *before* the survivor
+                        // gains their tags. A tag that makes a TagBased directory
+                        // newly want the survivor places it at the logical path;
+                        // were a duplicate still there, placement would suffix
+                        // the survivor's name (`name (1).txt`) for good.
+                        let changes: Vec<Change> = plans
+                            .iter()
+                            .flat_map(|plan| {
+                                let deleted =
+                                    plan.deleted.iter().map(|file_id| Change::FileDeleted {
+                                        file_id: *file_id,
+                                        deleted_at: clock::now_millis(),
+                                    });
+                                let tagged =
+                                    plan.tags_merged.iter().map(|tag_id| Change::FileTagged {
+                                        file_id: plan.kept,
+                                        tag_id: *tag_id,
+                                        metadata: None,
+                                        modified_at: clock::now_millis(),
+                                    });
+                                deleted.chain(tagged)
+                            })
+                            .collect();
+                        for change in changes {
+                            apply_metadata_change(
+                                &configuration,
+                                &runtime_configuration,
+                                &mut database,
+                                &command_sender,
+                                &change_sender,
+                                &pending_fetches,
+                                &pull_scheduler,
+                                &operations,
+                                &event_sender,
+                                change,
+                                &local_origin(),
+                            )
+                            .await;
                         }
                     }
-                    let _ = respond_to.send(Ok(groups));
+
+                    // Report every member as it stands now: after the changes
+                    // above, or untouched on a dry run.
+                    let read =
+                        |file_id| database.file_info_from_id(file_id, store::DeletedRule::Include);
+                    let groups = plans
+                        .into_iter()
+                        .map(|plan| {
+                            Ok(tagsy_api::DuplicateGroup {
+                                kept: read(plan.kept)?,
+                                deleted: plan
+                                    .deleted
+                                    .into_iter()
+                                    .map(read)
+                                    .collect::<Result<_, _>>()?,
+                                logical_path: plan.logical_path,
+                                content_hash: plan.content_hash,
+                                tags_merged: plan.tags_merged,
+                            })
+                        })
+                        .collect();
+                    let _ = respond_to.send(groups);
                     continue;
                 }
                 CatalogCommand::CatalogFile {
@@ -1115,6 +1176,7 @@ impl CatalogWriter {
                     content_hash,
                     size,
                     tags,
+                    respond_to,
                 } => {
                     files::announce_upload(
                         &configuration,
@@ -1133,6 +1195,8 @@ impl CatalogWriter {
                         tags,
                     )
                     .await;
+                    let _ = respond_to
+                        .send(database.file_info_from_id(file_id, store::DeletedRule::Include));
                     continue;
                 }
             };
@@ -1162,53 +1226,102 @@ impl CatalogWriter {
                 (Ingest::Meta(change), change_origin) => (change, change_origin),
             };
 
-            // Apply the metadata change: file-lifecycle arms live in
-            // [`files`], tag / file-tag arms in [`tagging`]. Each returns
-            // `Some(publish)` when it handled the change; the first that does
-            // wins. Every current `Change` variant is handled by one of them.
-            let published = match files::apply_change(
+            apply_metadata_change(
                 &configuration,
                 &runtime_configuration,
                 &mut database,
                 &command_sender,
                 &change_sender,
                 &pending_fetches,
+                &pull_scheduler,
                 &operations,
-                &change,
+                &event_sender,
+                change,
                 &change_origin,
             )
-            .await
-            {
-                Some(publish) => publish,
-                None => tagging::apply_change(
-                    &configuration,
-                    &runtime_configuration,
-                    &mut database,
-                    &command_sender,
-                    &change_sender,
-                    &pending_fetches,
-                    &pull_scheduler,
-                    &operations,
-                    &change,
-                    &change_origin,
-                )
-                .await
-                .unwrap_or(true),
-            };
+            .await;
 
-            // Publish the applied change to UI-facing API subscribers, unless
-            // the handling arm already emitted for itself (it returned
-            // `false`). See `EVENT PUBLISHING` above.
-            //
-            // Best-effort: if there are no subscribers, or the channel is full
-            // and a subscriber lags, the send/receive machinery handles it (the
-            // subscriber observes `Lagged`, mapped to `Resynced` by the
-            // transport).
-            if published {
-                let _ = event_sender.send(change);
+            // A local caller waits for its own change: answer it now that the
+            // change is applied, from this (the writer's) connection.
+            if let Some(reply) = reply {
+                reply.answer(&database);
             }
         }
 
         log::info!("handle_changes task exited");
+    }
+}
+
+/// The origin of a change made on this device through the API rather than
+/// observed in a sync directory. The empty path matches no configured
+/// directory, so the change is dispatched to every directory it concerns
+/// rather than skipping one as its source.
+fn local_origin() -> ChangeOrigin {
+    ChangeOrigin::Local {
+        directory_path: std::path::PathBuf::new(),
+    }
+}
+
+/// Apply one metadata [`Change`] and publish it to API subscribers: the path
+/// every `Ingest::Meta` change takes at the bottom of the writer loop, shared
+/// with the handlers that apply their own changes (the purges,
+/// `DeleteDuplicates`) so they need not re-enter through the inbox.
+///
+/// File-lifecycle arms live in [`files`], tag / file-tag arms in [`tagging`].
+/// Each returns `Some(publish)` when it handled the change; the first that
+/// does wins. Every current `Change` variant is handled by one of them.
+#[allow(clippy::too_many_arguments)]
+async fn apply_metadata_change(
+    configuration: &Configuration,
+    runtime_configuration: &Arc<RwLock<RuntimeConfiguration>>,
+    database: &mut CatalogStore,
+    command_sender: &UnboundedSender<SyncDirectoryCommand>,
+    change_sender: &UnboundedSender<CatalogCommand>,
+    pending_fetches: &ChunkRelay,
+    pull_scheduler: &crate::peer::pull_scheduler::PullScheduler,
+    operations: &operations::Operations,
+    event_sender: &tokio::sync::broadcast::Sender<Change>,
+    change: Change,
+    change_origin: &ChangeOrigin,
+) {
+    let published = match files::apply_change(
+        configuration,
+        runtime_configuration,
+        database,
+        command_sender,
+        change_sender,
+        pending_fetches,
+        operations,
+        &change,
+        change_origin,
+    )
+    .await
+    {
+        Some(publish) => publish,
+        None => tagging::apply_change(
+            configuration,
+            runtime_configuration,
+            database,
+            command_sender,
+            change_sender,
+            pending_fetches,
+            pull_scheduler,
+            operations,
+            &change,
+            change_origin,
+        )
+        .await
+        .unwrap_or(true),
+    };
+
+    // Publish the applied change to UI-facing API subscribers, unless the
+    // handling arm already emitted for itself (it returned `false`). See
+    // `EVENT PUBLISHING` above.
+    //
+    // Best-effort: if there are no subscribers, or the channel is full and a
+    // subscriber lags, the send/receive machinery handles it (the subscriber
+    // observes `Lagged`, mapped to `Resynced` by the transport).
+    if published {
+        let _ = event_sender.send(change);
     }
 }

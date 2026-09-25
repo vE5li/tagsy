@@ -13,10 +13,12 @@
 //! - **Reads** open their own read-only [`CatalogStore`] handle from
 //!   `main_db_path`, exactly as peer sessions do. A `&CatalogStore` is never
 //!   held across an `.await`.
-//! - **Writes** are expressed as [`Change`] values and pushed onto the ingest
-//!   bus (`change_sender`). The single `handle_changes` task remains the only
-//!   DB writer and performs idempotent persistence plus peer forwarding. This
-//!   API adds no business logic and never writes the DB directly.
+//! - **Writes** are expressed as [`Change`] values sent to the catalog writer
+//!   (`change_sender`), which remains the only DB writer and performs
+//!   idempotent persistence plus peer forwarding. Each write waits until the
+//!   writer has applied it and answers with the entry it touched, read on the
+//!   writer's own connection. This API adds no business logic and never writes
+//!   the DB directly.
 //!
 //! Both process topologies (in-process on Android, IPC-to-daemon on Linux)
 //! wrap this same [`ApiService`] handle; the Dart UI never knows which.
@@ -28,7 +30,7 @@
 //!
 //! - [`read`] — resolution, lookup, traversal and search (synchronous reads
 //!   over a short-lived read handle);
-//! - [`write`] — enqueue-based fire-and-forget mutations;
+//! - [`write`] — mutations, each answered once the writer has applied it;
 //! - [`request`] — async `oneshot` round-trips through the change pipeline,
 //!   plus the shared timeout helper;
 //! - [`edit`] — the begin/finish/cancel external-edit flow;

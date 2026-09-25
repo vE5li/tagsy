@@ -802,7 +802,8 @@ impl Tagsy {
         let subtag_id = backend
             .resolve_tag_id(subtag_id, DeletedRule::Exclude)
             .await?;
-        backend.tag_tag(parent_id, subtag_id).await
+        backend.tag_tag(parent_id, subtag_id).await?;
+        Ok(())
     }
 
     /// Remove `subtag_id` as a subtag of `parent_id`. String-id variant of
@@ -815,7 +816,8 @@ impl Tagsy {
         let subtag_id = backend
             .resolve_tag_id(subtag_id, DeletedRule::Exclude)
             .await?;
-        backend.untag_tag(parent_id, subtag_id).await
+        backend.untag_tag(parent_id, subtag_id).await?;
+        Ok(())
     }
 
     /// The files and tags matching the free-form `query` (`$tag`, `!tag`, and
@@ -1052,15 +1054,18 @@ impl Tagsy {
         Ok(TagEntry::from(backend.get_tag(tag_id, deleted_rule).await?))
     }
 
-    /// Create a tag with an initial visual style; returns the freshly-minted id
-    /// as a string, which the Dart UI can pass straight back to any other
-    /// method here or use to fetch the tag's flattened [`TagEntry`] for a
-    /// chip. See the string-id convention on [`Tagsy`].
+    /// Create a tag with an initial visual style; returns the new id as a
+    /// string, which the Dart UI can pass straight back to any other method
+    /// here or use to fetch the tag's flattened [`TagEntry`] for a chip. See
+    /// the string-id convention on [`Tagsy`].
+    ///
+    /// Returns once the tag is recorded, so that follow-up fetch finds it.
     pub async fn create_tag(&self, name: String, style: TagStyleEntry) -> Result<String, ApiError> {
         Ok(self
             .try_backend()?
             .create_tag(name, style.into())
             .await?
+            .id
             .to_string())
     }
 
@@ -1068,7 +1073,8 @@ impl Tagsy {
     pub async fn delete_tag(&self, tag_id: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
         let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Exclude).await?;
-        backend.delete_tag(tag_id).await
+        backend.delete_tag(tag_id).await?;
+        Ok(())
     }
 
     /// Restore a soft-deleted tag. Unlike a file restore this always succeeds
@@ -1080,7 +1086,8 @@ impl Tagsy {
         // The restore path names a *deleted* tag, so resolution must see
         // tombstoned rows.
         let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Include).await?;
-        backend.restore_tag(tag_id).await
+        backend.restore_tag(tag_id).await?;
+        Ok(())
     }
 
     /// Rename a tag. The change propagates through the usual event stream, so
@@ -1088,7 +1095,8 @@ impl Tagsy {
     pub async fn rename_tag(&self, tag_id: String, name: String) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
         let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Exclude).await?;
-        backend.rename_tag(tag_id, name).await
+        backend.rename_tag(tag_id, name).await?;
+        Ok(())
     }
 
     /// Replace a tag's visual style (dot color, fill, border, shape, …). Dot
@@ -1101,7 +1109,8 @@ impl Tagsy {
     ) -> Result<(), ApiError> {
         let backend = self.try_backend()?;
         let tag_id = backend.resolve_tag_id(tag_id, DeletedRule::Exclude).await?;
-        backend.set_tag_style(tag_id, style.into()).await
+        backend.set_tag_style(tag_id, style.into()).await?;
+        Ok(())
     }
 
     /// Upload a file from a path on disk; returns the freshly-minted id.
@@ -1129,6 +1138,7 @@ impl Tagsy {
         Ok(backend
             .upload_file(std::path::PathBuf::from(path), path_name, tag_ids)
             .await?
+            .file_id
             .to_string())
     }
 
@@ -1138,7 +1148,8 @@ impl Tagsy {
         let file_id = backend
             .resolve_file_id(file_id, DeletedRule::Exclude)
             .await?;
-        backend.delete_file(file_id).await
+        backend.delete_file(file_id).await?;
+        Ok(())
     }
 
     /// Restore a soft-deleted file (best-effort). Fails with
@@ -1150,7 +1161,8 @@ impl Tagsy {
         let file_id = backend
             .resolve_file_id(file_id, DeletedRule::Include)
             .await?;
-        backend.restore_file(file_id).await
+        backend.restore_file(file_id).await?;
+        Ok(())
     }
 
     /// Purge the daemon's cached file previews, returning how many were
@@ -1182,7 +1194,7 @@ impl Tagsy {
         Ok(outcome
             .purged
             .iter()
-            .map(|file_id| file_id.to_string())
+            .map(|purged| purged.file.file_id.to_string())
             .collect())
     }
 
@@ -1199,7 +1211,7 @@ impl Tagsy {
         Ok(outcome
             .purged
             .iter()
-            .map(|file_id| file_id.to_string())
+            .map(|purged| purged.file.file_id.to_string())
             .collect())
     }
 
@@ -1220,7 +1232,8 @@ impl Tagsy {
         let file_id = backend
             .resolve_file_id(file_id, DeletedRule::Exclude)
             .await?;
-        backend.move_file(file_id, logical_path).await
+        backend.move_file(file_id, logical_path).await?;
+        Ok(())
     }
 
     /// Apply `tag_id` to `file_id`.
@@ -1230,7 +1243,8 @@ impl Tagsy {
         let file_id = backend
             .resolve_file_id(file_id, DeletedRule::Exclude)
             .await?;
-        backend.tag_file(tag_id, file_id).await
+        backend.tag_file(tag_id, file_id).await?;
+        Ok(())
     }
 
     /// Remove `tag_id` from `file_id`.
@@ -1240,7 +1254,8 @@ impl Tagsy {
         let file_id = backend
             .resolve_file_id(file_id, DeletedRule::Exclude)
             .await?;
-        backend.untag_file(tag_id, file_id).await
+        backend.untag_file(tag_id, file_id).await?;
+        Ok(())
     }
 
     /// Subscribe to the live change stream.

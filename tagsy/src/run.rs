@@ -105,7 +105,8 @@ pub async fn run(
                         resolved_tags.clone(),
                     )
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| error.to_string())?
+                    .file_id;
 
                 if !keep {
                     std::fs::remove_file(&item.disk_path).map_err(|error| {
@@ -154,7 +155,8 @@ pub async fn run(
             let tag_id = backend
                 .create_tag(name.clone(), style.clone())
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| error.to_string())?
+                .id;
 
             // Persistence is async (the write is enqueued), so we can't fetch the
             // row back yet without racing the pipeline. Render the full entry from

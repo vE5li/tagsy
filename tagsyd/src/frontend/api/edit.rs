@@ -66,20 +66,25 @@ impl ApiService {
         // produced no change, or the watcher already ingested the in-place
         // save and updated the DB.
         let (edited_hash, _) = crate::file_bytes::hash_and_len(&path).await?;
-        let current_hash = self.get_file(file_id, DeletedRule::Include)?.content_hash;
+        let current = self.get_file(file_id, DeletedRule::Include)?;
 
-        if edited_hash == current_hash {
+        if edited_hash == current.content_hash {
             // No-op: nothing was published, nothing else will read `path`.
             self.cleanup_edit_path(&path);
-            return Ok(EditOutcome { changed: false });
+            return Ok(EditOutcome {
+                changed: false,
+                file: current,
+            });
         }
 
         // Publish the new content: copied into the outbox, after which the
         // temp is no longer needed.
         let published = self.edit_file(file_id, path.clone()).await;
         self.cleanup_edit_path(&path);
-        published?;
-        Ok(EditOutcome { changed: true })
+        Ok(EditOutcome {
+            changed: true,
+            file: published?,
+        })
     }
 
     /// Abort an external edit started with [`Self::begin_edit`] without

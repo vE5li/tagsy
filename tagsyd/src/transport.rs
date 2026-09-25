@@ -153,24 +153,24 @@ impl Backend for InProcessBackend {
         self.api.tags_for_tag(tag_id, subtag_rule)
     }
 
-    async fn create_tag(&self, name: String, style: TagStyle) -> Result<TagId, ApiError> {
-        self.api.create_tag(name, style)
+    async fn create_tag(&self, name: String, style: TagStyle) -> Result<Tag, ApiError> {
+        self.api.create_tag(name, style).await
     }
 
-    async fn delete_tag(&self, tag_id: TagId) -> Result<(), ApiError> {
-        self.api.delete_tag(tag_id)
+    async fn delete_tag(&self, tag_id: TagId) -> Result<Tag, ApiError> {
+        self.api.delete_tag(tag_id).await
     }
 
-    async fn restore_tag(&self, tag_id: TagId) -> Result<(), ApiError> {
-        self.api.restore_tag(tag_id)
+    async fn restore_tag(&self, tag_id: TagId) -> Result<Tag, ApiError> {
+        self.api.restore_tag(tag_id).await
     }
 
-    async fn rename_tag(&self, tag_id: TagId, name: String) -> Result<(), ApiError> {
-        self.api.rename_tag(tag_id, name)
+    async fn rename_tag(&self, tag_id: TagId, name: String) -> Result<Tag, ApiError> {
+        self.api.rename_tag(tag_id, name).await
     }
 
-    async fn set_tag_style(&self, tag_id: TagId, style: TagStyle) -> Result<(), ApiError> {
-        self.api.set_tag_style(tag_id, style)
+    async fn set_tag_style(&self, tag_id: TagId, style: TagStyle) -> Result<Tag, ApiError> {
+        self.api.set_tag_style(tag_id, style).await
     }
 
     async fn upload_file(
@@ -178,13 +178,13 @@ impl Backend for InProcessBackend {
         path: PathBuf,
         path_name: String,
         tags: Vec<TagId>,
-    ) -> Result<FileId, ApiError> {
+    ) -> Result<FileInfo, ApiError> {
         // The daemon copies the file into its outbox (see `crate::outbox`):
         // once this returns it holds its own copy.
         self.api.upload_file(path, path_name, tags).await
     }
 
-    async fn edit_file(&self, file_id: FileId, path: PathBuf) -> Result<(), ApiError> {
+    async fn edit_file(&self, file_id: FileId, path: PathBuf) -> Result<FileInfo, ApiError> {
         self.api.edit_file(file_id, path).await
     }
 
@@ -224,32 +224,32 @@ impl Backend for InProcessBackend {
         self.api.backup().await
     }
 
-    async fn delete_file(&self, file_id: FileId) -> Result<(), ApiError> {
-        self.api.delete_file(file_id)
+    async fn delete_file(&self, file_id: FileId) -> Result<FileInfo, ApiError> {
+        self.api.delete_file(file_id).await
     }
 
-    async fn restore_file(&self, file_id: FileId) -> Result<(), ApiError> {
+    async fn restore_file(&self, file_id: FileId) -> Result<FileInfo, ApiError> {
         self.api.restore_file(file_id).await
     }
 
-    async fn move_file(&self, file_id: FileId, logical_path: String) -> Result<(), ApiError> {
-        self.api.move_file(file_id, logical_path)
+    async fn move_file(&self, file_id: FileId, logical_path: String) -> Result<FileInfo, ApiError> {
+        self.api.move_file(file_id, logical_path).await
     }
 
-    async fn tag_file(&self, tag_id: TagId, file_id: FileId) -> Result<(), ApiError> {
-        self.api.tag_file(tag_id, file_id)
+    async fn tag_file(&self, tag_id: TagId, file_id: FileId) -> Result<FileInfo, ApiError> {
+        self.api.tag_file(tag_id, file_id).await
     }
 
-    async fn untag_file(&self, tag_id: TagId, file_id: FileId) -> Result<(), ApiError> {
-        self.api.untag_file(tag_id, file_id)
+    async fn untag_file(&self, tag_id: TagId, file_id: FileId) -> Result<FileInfo, ApiError> {
+        self.api.untag_file(tag_id, file_id).await
     }
 
-    async fn tag_tag(&self, parent_id: TagId, subtag_id: TagId) -> Result<(), ApiError> {
-        self.api.tag_tag(parent_id, subtag_id)
+    async fn tag_tag(&self, parent_id: TagId, subtag_id: TagId) -> Result<Tag, ApiError> {
+        self.api.tag_tag(parent_id, subtag_id).await
     }
 
-    async fn untag_tag(&self, parent_id: TagId, subtag_id: TagId) -> Result<(), ApiError> {
-        self.api.untag_tag(parent_id, subtag_id)
+    async fn untag_tag(&self, parent_id: TagId, subtag_id: TagId) -> Result<Tag, ApiError> {
+        self.api.untag_tag(parent_id, subtag_id).await
     }
 
     async fn purge_previews(&self) -> Result<usize, ApiError> {
@@ -448,35 +448,35 @@ impl Backend for AnyBackend {
         }
     }
 
-    async fn create_tag(&self, name: String, style: TagStyle) -> Result<TagId, ApiError> {
+    async fn create_tag(&self, name: String, style: TagStyle) -> Result<Tag, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.create_tag(name, style).await,
             AnyBackend::Ipc(backend) => backend.create_tag(name, style).await,
         }
     }
 
-    async fn delete_tag(&self, tag_id: TagId) -> Result<(), ApiError> {
+    async fn delete_tag(&self, tag_id: TagId) -> Result<Tag, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.delete_tag(tag_id).await,
             AnyBackend::Ipc(backend) => backend.delete_tag(tag_id).await,
         }
     }
 
-    async fn restore_tag(&self, tag_id: TagId) -> Result<(), ApiError> {
+    async fn restore_tag(&self, tag_id: TagId) -> Result<Tag, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.restore_tag(tag_id).await,
             AnyBackend::Ipc(backend) => backend.restore_tag(tag_id).await,
         }
     }
 
-    async fn rename_tag(&self, tag_id: TagId, name: String) -> Result<(), ApiError> {
+    async fn rename_tag(&self, tag_id: TagId, name: String) -> Result<Tag, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.rename_tag(tag_id, name).await,
             AnyBackend::Ipc(backend) => backend.rename_tag(tag_id, name).await,
         }
     }
 
-    async fn set_tag_style(&self, tag_id: TagId, style: TagStyle) -> Result<(), ApiError> {
+    async fn set_tag_style(&self, tag_id: TagId, style: TagStyle) -> Result<Tag, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.set_tag_style(tag_id, style).await,
             AnyBackend::Ipc(backend) => backend.set_tag_style(tag_id, style).await,
@@ -488,14 +488,14 @@ impl Backend for AnyBackend {
         path: PathBuf,
         path_name: String,
         tags: Vec<TagId>,
-    ) -> Result<FileId, ApiError> {
+    ) -> Result<FileInfo, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.upload_file(path, path_name, tags).await,
             AnyBackend::Ipc(backend) => backend.upload_file(path, path_name, tags).await,
         }
     }
 
-    async fn edit_file(&self, file_id: FileId, path: PathBuf) -> Result<(), ApiError> {
+    async fn edit_file(&self, file_id: FileId, path: PathBuf) -> Result<FileInfo, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.edit_file(file_id, path).await,
             AnyBackend::Ipc(backend) => backend.edit_file(file_id, path).await,
@@ -562,49 +562,49 @@ impl Backend for AnyBackend {
         }
     }
 
-    async fn delete_file(&self, file_id: FileId) -> Result<(), ApiError> {
+    async fn delete_file(&self, file_id: FileId) -> Result<FileInfo, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.delete_file(file_id).await,
             AnyBackend::Ipc(backend) => backend.delete_file(file_id).await,
         }
     }
 
-    async fn restore_file(&self, file_id: FileId) -> Result<(), ApiError> {
+    async fn restore_file(&self, file_id: FileId) -> Result<FileInfo, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.restore_file(file_id).await,
             AnyBackend::Ipc(backend) => backend.restore_file(file_id).await,
         }
     }
 
-    async fn move_file(&self, file_id: FileId, logical_path: String) -> Result<(), ApiError> {
+    async fn move_file(&self, file_id: FileId, logical_path: String) -> Result<FileInfo, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.move_file(file_id, logical_path).await,
             AnyBackend::Ipc(backend) => backend.move_file(file_id, logical_path).await,
         }
     }
 
-    async fn tag_file(&self, tag_id: TagId, file_id: FileId) -> Result<(), ApiError> {
+    async fn tag_file(&self, tag_id: TagId, file_id: FileId) -> Result<FileInfo, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.tag_file(tag_id, file_id).await,
             AnyBackend::Ipc(backend) => backend.tag_file(tag_id, file_id).await,
         }
     }
 
-    async fn untag_file(&self, tag_id: TagId, file_id: FileId) -> Result<(), ApiError> {
+    async fn untag_file(&self, tag_id: TagId, file_id: FileId) -> Result<FileInfo, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.untag_file(tag_id, file_id).await,
             AnyBackend::Ipc(backend) => backend.untag_file(tag_id, file_id).await,
         }
     }
 
-    async fn tag_tag(&self, parent_id: TagId, subtag_id: TagId) -> Result<(), ApiError> {
+    async fn tag_tag(&self, parent_id: TagId, subtag_id: TagId) -> Result<Tag, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.tag_tag(parent_id, subtag_id).await,
             AnyBackend::Ipc(backend) => backend.tag_tag(parent_id, subtag_id).await,
         }
     }
 
-    async fn untag_tag(&self, parent_id: TagId, subtag_id: TagId) -> Result<(), ApiError> {
+    async fn untag_tag(&self, parent_id: TagId, subtag_id: TagId) -> Result<Tag, ApiError> {
         match self {
             AnyBackend::InProcess(backend) => backend.untag_tag(parent_id, subtag_id).await,
             AnyBackend::Ipc(backend) => backend.untag_tag(parent_id, subtag_id).await,

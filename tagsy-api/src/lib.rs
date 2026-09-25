@@ -30,6 +30,6 @@ pub use operations::{
 pub use tagsy_core::{BorderStyle, TagShape, TagStyle};
 pub use types::{
     ApiEvent, BackupOutcome, DeletedRule, DuplicateDeletionOutcome, DuplicateGroup, EditOutcome,
-    EditorRule, HomeSection, PurgeOutcome, RetagSummary, SearchResults, StorageStats, SubtagRule,
-    Tag, TagRuleReport,
+    EditorRule, HomeSection, PurgeOutcome, PurgedFile, RetagSummary, SearchResults, StorageStats,
+    SubtagRule, Tag, TagRuleReport,
 };

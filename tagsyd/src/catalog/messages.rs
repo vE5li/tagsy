@@ -20,12 +20,13 @@
 //! `Fetch` and awaits the `oneshot`; the recursive fetch engine that talks to
 //! peers lives entirely in `handle_changes`/the peer sessions.
 
+use tagsy_api::PurgedFile;
 use tagsy_core::state::{Change, ChangeOrigin};
-use tagsy_core::{FileId, LogicalPath, Preview, TagId};
+use tagsy_core::{FileId, FileInfo, LogicalPath, Preview, TagId};
 use tokio::sync::oneshot;
 
 use crate::file_bytes::FileBytes;
-use crate::store::DatabaseError;
+use crate::store::{CatalogStore, DatabaseError, DeletedRule, Tag};
 
 /// A change carried on the daemon ingest bus.
 ///
@@ -102,11 +103,23 @@ impl Ingest {
 
 /// A message on the daemon ingest bus.
 ///
-/// One ordered channel; two message kinds: fire-and-forget mutations and a
-/// request-reply fetch.
+/// One ordered channel carrying fire-and-forget mutations (from peers and
+/// sync directories) alongside request-reply commands — the API's own
+/// mutations ([`CatalogCommand::LocalChange`]), fetches, restores, previews,
+/// purges.
 pub enum CatalogCommand {
     /// A mutation to apply. Fire-and-forget: no reply.
     Change(Ingest, ChangeOrigin),
+    /// A mutation made through the API (CLI / UI), applied exactly like a
+    /// [`CatalogCommand::Change`] with a local origin, after which `reply` is
+    /// answered with the entry the change touched, read on the writer's own
+    /// connection. The reply therefore shows the catalog as it stands once
+    /// this change is applied — including when last-writer-wins made it a
+    /// no-op — and an unknown id comes back as an error.
+    ///
+    /// Peer and sync-directory changes keep using the fire-and-forget
+    /// variant: only a local caller waits for its own change.
+    LocalChange { change: Change, reply: ChangeReply },
     /// An on-demand request for a file's bytes (used by `tagsy edit` when
     /// the file is not present locally). `handle_changes` resolves the
     /// version's size from the catalog and drives a content-addressed
@@ -221,6 +234,9 @@ pub enum CatalogCommand {
     /// `FileMetadataAdded`) and version, announces the metadata-only change to
     /// peers, and pulls the bytes from the outbox into every matching local
     /// sync directory — the same placement a peer-announced file gets.
+    ///
+    /// Answers `respond_to` with the file as recorded, once it is (the byte
+    /// placement into sync directories continues in the background).
     AnnounceUpload {
         file_id: FileId,
         /// `Some(logical_path)` for a new file (`FileMetadataAdded`); `None`
@@ -230,6 +246,7 @@ pub enum CatalogCommand {
         /// Content size in bytes, as ingested into the outbox.
         size: u64,
         tags: Vec<TagId>,
+        respond_to: oneshot::Sender<Result<FileInfo, DatabaseError>>,
     },
     /// User-initiated restore of a soft-deleted file. Request-reply (like
     /// [`CatalogCommand::Fetch`]) because the outcome is only known after an
@@ -242,10 +259,11 @@ pub enum CatalogCommand {
     /// tombstone, record the restored version, forward a `Change::FileRestored`
     /// to peers, and drive placement so the bytes land where wanted. If nothing
     /// holds the bytes, the tombstone is left untouched and this resolves
-    /// `Err(RestoreError::NotAvailable)`.
+    /// `Err(RestoreError::NotAvailable)`. On success it resolves with the
+    /// restored file.
     Restore {
         file_id: FileId,
-        respond_to: oneshot::Sender<Result<(), RestoreError>>,
+        respond_to: oneshot::Sender<Result<FileInfo, RestoreError>>,
     },
     /// Internal follow-up to [`CatalogCommand::Restore`], enqueued by the
     /// spawned availability probe once it has confirmed the bytes are
@@ -265,7 +283,7 @@ pub enum CatalogCommand {
         /// as the restored version's `observed_at` (beats any peer
         /// `deleted_at`).
         restored_at: i64,
-        respond_to: oneshot::Sender<Result<(), RestoreError>>,
+        respond_to: oneshot::Sender<Result<FileInfo, RestoreError>>,
     },
     /// Request the preview for `file_id`'s current content. Request-reply, like
     /// [`CatalogCommand::Fetch`], and handled on the writer loop because the
@@ -324,14 +342,14 @@ pub enum CatalogCommand {
     /// files and asks the sync-directory actor which are missing bytes
     /// (`MissingContent` — the same predicate the connect-time recovery sweep
     /// uses). With `dry_run`, it replies with that set and mutates nothing.
-    /// Otherwise it enqueues a `Change::FilePurged` for each and replies with
-    /// the purged ids. The Universal-directory precondition is enforced by the
-    /// `ApiService` before this is sent.
+    /// Otherwise it applies a `Change::FilePurged` for each and replies with
+    /// the purged files as they stood just before. The Universal-directory
+    /// precondition is enforced by the `ApiService` before this is sent.
     ///
     /// Exposed via the `tagsy purge-broken` CLI command.
     PurgeBroken {
         dry_run: bool,
-        respond_to: oneshot::Sender<Result<Vec<FileId>, DatabaseError>>,
+        respond_to: oneshot::Sender<Result<Vec<PurgedFile>, DatabaseError>>,
     },
     /// Operator-initiated purge of **soft-deleted** files: every file whose
     /// current catalog state is tombstoned (`deleted = 1`). Request-reply,
@@ -342,13 +360,14 @@ pub enum CatalogCommand {
     /// deliberate, explicit state, and purging it merely makes that deletion
     /// permanent and irreversible across the mesh. The deleted set is read here
     /// (not by the caller) to avoid a time-of-check/time-of-use race. With
-    /// `dry_run`, replies with the set and mutates nothing; otherwise enqueues
-    /// a `Change::FilePurged` for each and replies with the purged ids.
+    /// `dry_run`, replies with the set and mutates nothing; otherwise applies
+    /// a `Change::FilePurged` for each and replies with the purged files as
+    /// they stood just before.
     ///
     /// Exposed via the `tagsy purge-deleted` CLI command.
     PurgeDeleted {
         dry_run: bool,
-        respond_to: oneshot::Sender<Result<Vec<FileId>, DatabaseError>>,
+        respond_to: oneshot::Sender<Result<Vec<PurgedFile>, DatabaseError>>,
     },
     /// Operator-initiated soft delete of **duplicate** files: live files
     /// sharing a logical path and latest content hash. Request-reply, handled
@@ -357,10 +376,10 @@ pub enum CatalogCommand {
     /// no-longer-duplicate file deleted).
     ///
     /// Each set keeps its lowest-id member (see [`super::duplicates`]). With
-    /// `dry_run`, replies with the plan and mutates nothing. Otherwise enqueues
+    /// `dry_run`, replies with the plan and mutates nothing. Otherwise applies
     /// a `Change::FileDeleted` for every other member, then a
     /// `Change::FileTagged` onto the survivor for each tag it lacks, and
-    /// replies with the plan.
+    /// replies with every member as it stands afterwards.
     ///
     /// Exposed via the `tagsy delete-duplicates` CLI command.
     DeleteDuplicates {
@@ -413,6 +432,42 @@ impl CatalogCommand {
     }
 }
 
+/// Who waits on a [`CatalogCommand::LocalChange`], and which entry they want
+/// back once it is applied.
+///
+/// The entry is named explicitly rather than derived from the change, because
+/// the caller decides what it changed: tagging a file answers with the file,
+/// making a tag a subtag answers with the subtag.
+#[derive(Debug)]
+pub enum ChangeReply {
+    File {
+        file_id: FileId,
+        respond_to: oneshot::Sender<Result<FileInfo, DatabaseError>>,
+    },
+    Tag {
+        tag_id: TagId,
+        respond_to: oneshot::Sender<Result<Tag, DatabaseError>>,
+    },
+}
+
+impl ChangeReply {
+    /// Read the requested entry from `database` and send it. Tombstones are
+    /// included: deleting something answers with the deleted entry.
+    pub fn answer(self, database: &CatalogStore) {
+        match self {
+            ChangeReply::File {
+                file_id,
+                respond_to,
+            } => {
+                let _ = respond_to.send(database.file_info_from_id(file_id, DeletedRule::Include));
+            }
+            ChangeReply::Tag { tag_id, respond_to } => {
+                let _ = respond_to.send(database.tag_from_id(tag_id, DeletedRule::Include));
+            }
+        }
+    }
+}
+
 /// Why an on-demand fetch failed.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum FetchError {
@@ -439,6 +494,9 @@ pub enum RestoreError {
     /// tombstone is left in place.
     #[error("no source holds the file's bytes; cannot restore")]
     NotAvailable,
+    /// The restore was applied, but reading the restored file back failed.
+    #[error("restored, but failed to read the file back: {0}")]
+    ReadBack(String),
     /// The runtime is shutting down; the request cannot be served.
     #[error("runtime is shutting down")]
     ShuttingDown,

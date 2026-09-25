@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use tagsy_api::PurgeOutcome;
-use tagsy_core::{FileId, Preview};
+use tagsy_core::{FileId, FileInfo, Preview};
 use tokio::sync::oneshot;
 
 use super::{ApiError, ApiService, DuplicateDeletionOutcome};
@@ -47,6 +47,32 @@ impl ApiService {
         }
     }
 
+    /// Send `command` to the catalog writer's inbox.
+    pub(super) fn send_to_writer(&self, command: CatalogCommand) -> Result<(), ApiError> {
+        self.change_sender
+            .send(command)
+            .map_err(|_| ApiError::Internal("runtime is shutting down".to_owned()))
+    }
+
+    /// Await the writer's answer to a mutation it applies itself.
+    ///
+    /// Unlike [`Self::await_reply`] there is no deadline: nothing on the way
+    /// can stall (no peer is involved), the writer answers once it reaches
+    /// the command, and it drops the responder only when shutting down. A
+    /// deadline would only turn "applied, after a long queue" into a
+    /// misleading failure.
+    pub(super) async fn await_applied<T, E>(
+        response: oneshot::Receiver<Result<T, E>>,
+    ) -> Result<T, ApiError>
+    where
+        ApiError: From<E>,
+    {
+        response
+            .await
+            .map_err(|_| ApiError::Internal("runtime is shutting down".to_owned()))?
+            .map_err(ApiError::from)
+    }
+
     /// Restore a soft-deleted file — best-effort.
     ///
     /// Sends a [`CatalogCommand::Restore`] and awaits its outcome. The daemon
@@ -58,9 +84,10 @@ impl ApiService {
     /// nothing holds the bytes the tombstone is left in place and this returns
     /// [`ApiError::ContentUnavailable`].
     ///
-    /// Request-reply (unlike `delete_file`) because the outcome is only known
-    /// after the async availability probe.
-    pub async fn restore_file(&self, file_id: FileId) -> Result<(), ApiError> {
+    /// On success, returns the restored file. Kept under
+    /// [`Self::await_reply`]'s deadline, unlike the other mutations,
+    /// because the availability probe involves peers.
+    pub async fn restore_file(&self, file_id: FileId) -> Result<FileInfo, ApiError> {
         let (respond_to, response) = oneshot::channel();
         self.change_sender
             .send(CatalogCommand::Restore {
@@ -255,9 +282,7 @@ impl ApiService {
             })
             .map_err(|_| ApiError::Internal("runtime is shutting down".to_owned()))?;
 
-        let purged = Self::await_reply(response, "runtime is shutting down".to_owned())
-            .await?
-            .map_err(ApiError::from)?;
+        let purged = Self::await_applied(response).await?;
         Ok(PurgeOutcome { dry_run, purged })
     }
 
@@ -280,9 +305,7 @@ impl ApiService {
             })
             .map_err(|_| ApiError::Internal("runtime is shutting down".to_owned()))?;
 
-        let purged = Self::await_reply(response, "runtime is shutting down".to_owned())
-            .await?
-            .map_err(ApiError::from)?;
+        let purged = Self::await_applied(response).await?;
         Ok(PurgeOutcome { dry_run, purged })
     }
 
@@ -307,9 +330,7 @@ impl ApiService {
             })
             .map_err(|_| ApiError::Internal("runtime is shutting down".to_owned()))?;
 
-        let groups = Self::await_reply(response, "runtime is shutting down".to_owned())
-            .await?
-            .map_err(ApiError::from)?;
+        let groups = Self::await_applied(response).await?;
         Ok(DuplicateDeletionOutcome { dry_run, groups })
     }
 }

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tagsy_core::state::Change;
 use tagsy_core::tag::MetadataFormat;
-use tagsy_core::{FileId, FileInfo, LogicalPath, TagId, TagStyle};
+use tagsy_core::{FileInfo, LogicalPath, TagId, TagStyle};
 
 /// Whether a read walks the tag hierarchy transitively (`Include`) or looks at
 /// only direct relationships (`Exclude`).
@@ -205,40 +205,52 @@ pub struct BackupOutcome {
 pub struct EditOutcome {
     /// Whether the daemon published a new version from the edited bytes.
     pub changed: bool,
+    /// The file as recorded once the edit is done: its new version if
+    /// `changed`, otherwise as it already was.
+    pub file: FileInfo,
 }
 
-/// The result of a `purge-broken` invocation.
+/// The result of a `purge-broken` / `purge-deleted` invocation.
 ///
-/// `purged` lists every file id the daemon identified as broken (cataloged but
-/// with no local bytes despite a Universal sync directory). When `dry_run` is
-/// `true` these are the ids that *would* be purged and nothing was mutated;
-/// when `false` they have been permanently purged. The CLI presents the list
-/// and its length; a Dart UI can show the same either way, keyed on `dry_run`
-/// for the confirmation wording.
+/// `purged` lists every file the daemon selected. When `dry_run` is `true`
+/// these are the files that *would* be purged and nothing was mutated; when
+/// `false` they have been permanently purged. Each is described as it stood
+/// just before the purge, because afterwards nothing is left to look up.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PurgeOutcome {
     /// Whether this was a dry run (no mutation performed).
     pub dry_run: bool,
-    /// The ids that were (or, on a dry run, would be) purged.
-    pub purged: Vec<FileId>,
+    /// The files that were (or, on a dry run, would be) purged.
+    pub purged: Vec<PurgedFile>,
+}
+
+/// One file selected by a purge, with its direct tags — both read before the
+/// purge strips them from the catalog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PurgedFile {
+    pub file: FileInfo,
+    pub tags: Vec<TagId>,
 }
 
 /// One set of duplicate files found by `delete-duplicates`: live files sharing
 /// a logical path and the content hash of their latest version.
 ///
-/// `kept` is the member with the lowest [`FileId`]. The choice depends only on
-/// replicated state, so every device running the command keeps the same file
-/// and concurrent runs never delete each other's survivor. `tags_merged` are
-/// the tags the deleted members carried that `kept` did not; they are added to
-/// `kept`, so no tagging is lost.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `kept` is the member with the lowest [`FileId`](tagsy_core::FileId). The
+/// choice depends only on replicated state, so every device running the command
+/// keeps the same file and concurrent runs never delete each other's survivor.
+/// `tags_merged` are the tags the deleted members carried that `kept` did not;
+/// they are added to `kept`, so no tagging is lost.
+///
+/// On a dry run the files are as they stand; otherwise as they stand once the
+/// deletes and tag merges are applied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DuplicateGroup {
     pub logical_path: LogicalPath,
     pub content_hash: String,
     /// The surviving file.
-    pub kept: FileId,
+    pub kept: FileInfo,
     /// The files that were (or, on a dry run, would be) soft-deleted.
-    pub deleted: Vec<FileId>,
+    pub deleted: Vec<FileInfo>,
     /// Tags added (or, on a dry run, that would be added) to `kept`.
     pub tags_merged: Vec<TagId>,
 }
@@ -246,8 +258,7 @@ pub struct DuplicateGroup {
 /// The result of a `delete-duplicates` invocation.
 ///
 /// With `dry_run` nothing was mutated and `groups` describes what would
-/// happen. Otherwise the tag merges and soft deletes have been *enqueued* on
-/// the ingest bus, not necessarily applied yet.
+/// happen. Otherwise the tag merges and soft deletes have been applied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DuplicateDeletionOutcome {
     /// Whether this was a dry run (no mutation performed).

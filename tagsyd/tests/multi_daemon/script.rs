@@ -504,16 +504,18 @@ async fn perform(cluster: &Cluster, roles: &Roles, context: &mut Context, step: 
             backend.move_file(id, (*to).to_owned()).await.or_fail(step);
         }
         Step::CreateTag { tag, .. } => {
-            let id = backend
+            let created = backend
                 .create_tag((*tag).to_owned(), TagStyle::default())
                 .await
                 .or_fail(step);
-            context.tags.insert((*tag).to_owned(), id);
+            context.tags.insert((*tag).to_owned(), created.id);
         }
-        Step::RenameTag { tag, to, .. } => backend
-            .rename_tag(context.tag(tag), (*to).to_owned())
-            .await
-            .or_fail(step),
+        Step::RenameTag { tag, to, .. } => {
+            backend
+                .rename_tag(context.tag(tag), (*to).to_owned())
+                .await
+                .or_fail(step);
+        }
         Step::RecolorTag { tag, dot_color, .. } => {
             let style = TagStyle {
                 dot_color: (*dot_color).to_owned(),
@@ -524,8 +526,12 @@ async fn perform(cluster: &Cluster, roles: &Roles, context: &mut Context, step: 
                 .await
                 .or_fail(step);
         }
-        Step::DeleteTag { tag, .. } => backend.delete_tag(context.tag(tag)).await.or_fail(step),
-        Step::RestoreTag { tag, .. } => backend.restore_tag(context.tag(tag)).await.or_fail(step),
+        Step::DeleteTag { tag, .. } => {
+            backend.delete_tag(context.tag(tag)).await.or_fail(step);
+        }
+        Step::RestoreTag { tag, .. } => {
+            backend.restore_tag(context.tag(tag)).await.or_fail(step);
+        }
         Step::TagFile { tag, file, .. } => {
             let id = context.file(cluster, file).await;
             backend.tag_file(context.tag(tag), id).await.or_fail(step);
@@ -534,14 +540,18 @@ async fn perform(cluster: &Cluster, roles: &Roles, context: &mut Context, step: 
             let id = context.file(cluster, file).await;
             backend.untag_file(context.tag(tag), id).await.or_fail(step);
         }
-        Step::TagTag { parent, child, .. } => backend
-            .tag_tag(context.tag(parent), context.tag(child))
-            .await
-            .or_fail(step),
-        Step::UntagTag { parent, child, .. } => backend
-            .untag_tag(context.tag(parent), context.tag(child))
-            .await
-            .or_fail(step),
+        Step::TagTag { parent, child, .. } => {
+            backend
+                .tag_tag(context.tag(parent), context.tag(child))
+                .await
+                .or_fail(step);
+        }
+        Step::UntagTag { parent, child, .. } => {
+            backend
+                .untag_tag(context.tag(parent), context.tag(child))
+                .await
+                .or_fail(step);
+        }
         Step::PurgeDeleted { .. } => {
             backend.purge_deleted(false).await.or_fail(step);
         }

@@ -496,7 +496,7 @@ impl ApiService {
         }
 
         for (file_id, tag_id) in plan {
-            self.tag_file(tag_id, file_id)?;
+            self.enqueue(Self::file_tagged(tag_id, file_id))?;
         }
 
         Ok(summary)

@@ -77,7 +77,9 @@ pub enum ControlRequest {
         tag_id: TagId,
         subtag_rule: SubtagRule,
     },
-    // Writes.
+    // Writes. Each is answered once the daemon has applied it, with the
+    // entry it touched: [`ControlResponse::Tag`] for the tag mutations,
+    // [`ControlResponse::File`] for the file ones.
     CreateTag {
         name: String,
         style: TagStyle,
@@ -98,7 +100,7 @@ pub enum ControlRequest {
     },
     /// Upload the file at `path` — an absolute path on this host, which the
     /// daemon reads itself (clients run as the daemon's user) and copies into
-    /// its outbox before answering. Answered with [`ControlResponse::FileId`];
+    /// its outbox before answering. Answered with [`ControlResponse::File`];
     /// the client may delete `path` afterwards.
     UploadFile {
         path: PathBuf,
@@ -107,7 +109,7 @@ pub enum ControlRequest {
     },
     /// Replace an existing file's content with the file at `path`, ingested
     /// like [`ControlRequest::UploadFile`]. Answered with
-    /// [`ControlResponse::Ok`].
+    /// [`ControlResponse::File`].
     EditFile {
         file_id: FileId,
         path: PathBuf,
@@ -249,11 +251,13 @@ pub enum ControlRequest {
 /// the [`Backend`] return types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlResponse {
-    /// A single file's info (answer to [`ControlRequest::GetFile`]).
+    /// A single file's info (answer to [`ControlRequest::GetFile`] and to every
+    /// file mutation).
     File(FileInfo),
     /// A file's classified kind (answer to [`ControlRequest::Classify`]).
     FileKind(FileKind),
-    /// A single tag (answer to [`ControlRequest::GetTag`]).
+    /// A single tag (answer to [`ControlRequest::GetTag`] and to every tag
+    /// mutation).
     Tag(Tag),
     TagIds(Vec<TagId>),
     FileIds(Vec<FileId>),

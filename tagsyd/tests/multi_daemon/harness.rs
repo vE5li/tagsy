@@ -669,13 +669,13 @@ impl Cluster {
         tags: Vec<TagId>,
     ) -> FileId {
         let source = self.scratch_file(id, bytes);
-        let file_id = self
+        let file = self
             .backend(id)
             .upload_file(source.clone(), logical_path.to_owned(), tags)
             .await
             .expect("upload_file");
         std::fs::remove_file(&source).expect("remove upload source");
-        file_id
+        file.file_id
     }
 
     /// Replace a file's content through the node's API; the source is deleted

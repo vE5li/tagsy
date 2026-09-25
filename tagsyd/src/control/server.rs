@@ -314,36 +314,38 @@ async fn dispatch(
             Ok(tag_ids) => ControlResponse::TagIds(tag_ids),
             Err(error) => ControlResponse::Error(error),
         },
-        ControlRequest::CreateTag { name, style } => match api.create_tag(name, style) {
-            Ok(tag_id) => ControlResponse::TagId(tag_id),
+        ControlRequest::CreateTag { name, style } => match api.create_tag(name, style).await {
+            Ok(tag) => ControlResponse::Tag(tag),
             Err(error) => ControlResponse::Error(error),
         },
-        ControlRequest::DeleteTag { tag_id } => match api.delete_tag(tag_id) {
-            Ok(()) => ControlResponse::Ok,
+        ControlRequest::DeleteTag { tag_id } => match api.delete_tag(tag_id).await {
+            Ok(tag) => ControlResponse::Tag(tag),
             Err(error) => ControlResponse::Error(error),
         },
-        ControlRequest::RestoreTag { tag_id } => match api.restore_tag(tag_id) {
-            Ok(()) => ControlResponse::Ok,
+        ControlRequest::RestoreTag { tag_id } => match api.restore_tag(tag_id).await {
+            Ok(tag) => ControlResponse::Tag(tag),
             Err(error) => ControlResponse::Error(error),
         },
-        ControlRequest::RenameTag { tag_id, name } => match api.rename_tag(tag_id, name) {
-            Ok(()) => ControlResponse::Ok,
+        ControlRequest::RenameTag { tag_id, name } => match api.rename_tag(tag_id, name).await {
+            Ok(tag) => ControlResponse::Tag(tag),
             Err(error) => ControlResponse::Error(error),
         },
-        ControlRequest::SetTagStyle { tag_id, style } => match api.set_tag_style(tag_id, style) {
-            Ok(()) => ControlResponse::Ok,
-            Err(error) => ControlResponse::Error(error),
-        },
+        ControlRequest::SetTagStyle { tag_id, style } => {
+            match api.set_tag_style(tag_id, style).await {
+                Ok(tag) => ControlResponse::Tag(tag),
+                Err(error) => ControlResponse::Error(error),
+            }
+        }
         ControlRequest::UploadFile {
             path,
             path_name,
             tags,
         } => match api.upload_file(path, path_name, tags).await {
-            Ok(file_id) => ControlResponse::FileId(file_id),
+            Ok(file) => ControlResponse::File(file),
             Err(error) => ControlResponse::Error(error),
         },
         ControlRequest::EditFile { file_id, path } => match api.edit_file(file_id, path).await {
-            Ok(()) => ControlResponse::Ok,
+            Ok(file) => ControlResponse::File(file),
             Err(error) => ControlResponse::Error(error),
         },
         ControlRequest::FetchFile {
@@ -385,41 +387,43 @@ async fn dispatch(
             Ok(outcome) => ControlResponse::BackupComplete(outcome),
             Err(error) => ControlResponse::Error(error),
         },
-        ControlRequest::DeleteFile { file_id } => match api.delete_file(file_id) {
-            Ok(()) => ControlResponse::Ok,
+        ControlRequest::DeleteFile { file_id } => match api.delete_file(file_id).await {
+            Ok(file) => ControlResponse::File(file),
             Err(error) => ControlResponse::Error(error),
         },
         ControlRequest::RestoreFile { file_id } => match api.restore_file(file_id).await {
-            Ok(()) => ControlResponse::Ok,
+            Ok(file) => ControlResponse::File(file),
             Err(error) => ControlResponse::Error(error),
         },
         ControlRequest::MoveFile {
             file_id,
             logical_path,
-        } => match api.move_file(file_id, logical_path) {
-            Ok(()) => ControlResponse::Ok,
+        } => match api.move_file(file_id, logical_path).await {
+            Ok(file) => ControlResponse::File(file),
             Err(error) => ControlResponse::Error(error),
         },
-        ControlRequest::TagFile { tag_id, file_id } => match api.tag_file(tag_id, file_id) {
-            Ok(()) => ControlResponse::Ok,
+        ControlRequest::TagFile { tag_id, file_id } => match api.tag_file(tag_id, file_id).await {
+            Ok(file) => ControlResponse::File(file),
             Err(error) => ControlResponse::Error(error),
         },
-        ControlRequest::UntagFile { tag_id, file_id } => match api.untag_file(tag_id, file_id) {
-            Ok(()) => ControlResponse::Ok,
-            Err(error) => ControlResponse::Error(error),
-        },
+        ControlRequest::UntagFile { tag_id, file_id } => {
+            match api.untag_file(tag_id, file_id).await {
+                Ok(file) => ControlResponse::File(file),
+                Err(error) => ControlResponse::Error(error),
+            }
+        }
         ControlRequest::TagTag {
             parent_id,
             subtag_id,
-        } => match api.tag_tag(parent_id, subtag_id) {
-            Ok(()) => ControlResponse::Ok,
+        } => match api.tag_tag(parent_id, subtag_id).await {
+            Ok(tag) => ControlResponse::Tag(tag),
             Err(error) => ControlResponse::Error(error),
         },
         ControlRequest::UntagTag {
             parent_id,
             subtag_id,
-        } => match api.untag_tag(parent_id, subtag_id) {
-            Ok(()) => ControlResponse::Ok,
+        } => match api.untag_tag(parent_id, subtag_id).await {
+            Ok(tag) => ControlResponse::Tag(tag),
             Err(error) => ControlResponse::Error(error),
         },
         ControlRequest::Subscribe => {

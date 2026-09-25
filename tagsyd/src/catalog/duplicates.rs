@@ -5,7 +5,7 @@
 //! Split in two so only files that are actually duplicated have their tags
 //! read: [`find_duplicate_sets`] groups the catalog listing, and
 //! [`plan_duplicate_group`] turns one set plus its members' direct tags into a
-//! [`DuplicateGroup`]. Neither touches the database; the thin
+//! [`DuplicatePlan`]. Neither touches the database; the thin
 //! [`plan_duplicate_deletions`] feeds them from it.
 //!
 //! The survivor is always the member with the lowest [`FileId`]. That depends
@@ -16,7 +16,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use tagsy_api::DuplicateGroup;
 use tagsy_core::{FileId, FileInfo, LogicalPath, TagId};
 
 use crate::store::{CatalogStore, DatabaseError, DeletedRule, SubtagRule};
@@ -28,6 +27,18 @@ pub(crate) struct DuplicateSet {
     pub content_hash: String,
     /// Every member, sorted ascending; the first is the survivor.
     pub file_ids: Vec<FileId>,
+}
+
+/// What to do with one [`DuplicateSet`]: which member survives, which are
+/// deleted, and which tags the survivor absorbs. Ids only; the writer reports
+/// the members themselves as a [`tagsy_api::DuplicateGroup`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DuplicatePlan {
+    pub logical_path: LogicalPath,
+    pub content_hash: String,
+    pub kept: FileId,
+    pub deleted: Vec<FileId>,
+    pub tags_merged: Vec<TagId>,
 }
 
 /// Group `files` by `(logical_path, content_hash)`, keeping only groups of two
@@ -68,7 +79,7 @@ pub(crate) fn find_duplicate_sets(files: Vec<FileInfo>) -> Vec<DuplicateSet> {
 /// have their tags read.
 pub(crate) fn plan_duplicate_deletions(
     database: &CatalogStore,
-) -> Result<Vec<DuplicateGroup>, DatabaseError> {
+) -> Result<Vec<DuplicatePlan>, DatabaseError> {
     let sets = find_duplicate_sets(database.get_all_files(DeletedRule::Exclude)?);
 
     let mut tags = BTreeMap::new();
@@ -91,7 +102,7 @@ pub(crate) fn plan_duplicate_deletions(
 pub(crate) fn plan_duplicate_group(
     set: DuplicateSet,
     tags: &BTreeMap<FileId, BTreeSet<TagId>>,
-) -> DuplicateGroup {
+) -> DuplicatePlan {
     let mut file_ids = set.file_ids.into_iter();
     let kept = file_ids
         .next()
@@ -109,7 +120,7 @@ pub(crate) fn plan_duplicate_group(
         .into_iter()
         .collect();
 
-    DuplicateGroup {
+    DuplicatePlan {
         logical_path: set.logical_path,
         content_hash: set.content_hash,
         kept,

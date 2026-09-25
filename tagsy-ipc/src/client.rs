@@ -379,43 +379,43 @@ impl Backend for IpcBackend {
         }
     }
 
-    async fn create_tag(&self, name: String, style: TagStyle) -> Result<TagId, ApiError> {
+    async fn create_tag(&self, name: String, style: TagStyle) -> Result<Tag, ApiError> {
         match self.call(ControlRequest::CreateTag { name, style }).await? {
-            ControlResponse::TagId(tag_id) => Ok(tag_id),
+            ControlResponse::Tag(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }
 
-    async fn delete_tag(&self, tag_id: TagId) -> Result<(), ApiError> {
+    async fn delete_tag(&self, tag_id: TagId) -> Result<Tag, ApiError> {
         match self.call(ControlRequest::DeleteTag { tag_id }).await? {
-            ControlResponse::Ok => Ok(()),
+            ControlResponse::Tag(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }
 
-    async fn restore_tag(&self, tag_id: TagId) -> Result<(), ApiError> {
+    async fn restore_tag(&self, tag_id: TagId) -> Result<Tag, ApiError> {
         match self.call(ControlRequest::RestoreTag { tag_id }).await? {
-            ControlResponse::Ok => Ok(()),
+            ControlResponse::Tag(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }
 
-    async fn rename_tag(&self, tag_id: TagId, name: String) -> Result<(), ApiError> {
+    async fn rename_tag(&self, tag_id: TagId, name: String) -> Result<Tag, ApiError> {
         match self
             .call(ControlRequest::RenameTag { tag_id, name })
             .await?
         {
-            ControlResponse::Ok => Ok(()),
+            ControlResponse::Tag(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }
 
-    async fn set_tag_style(&self, tag_id: TagId, style: TagStyle) -> Result<(), ApiError> {
+    async fn set_tag_style(&self, tag_id: TagId, style: TagStyle) -> Result<Tag, ApiError> {
         match self
             .call(ControlRequest::SetTagStyle { tag_id, style })
             .await?
         {
-            ControlResponse::Ok => Ok(()),
+            ControlResponse::Tag(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }
@@ -428,7 +428,7 @@ impl Backend for IpcBackend {
         path: PathBuf,
         path_name: String,
         tags: Vec<TagId>,
-    ) -> Result<FileId, ApiError> {
+    ) -> Result<FileInfo, ApiError> {
         // The daemon reads the file itself, so it needs a path that does not
         // depend on this process's working directory.
         let path = absolute(path)?;
@@ -440,18 +440,18 @@ impl Backend for IpcBackend {
             })
             .await?
         {
-            ControlResponse::FileId(file_id) => Ok(file_id),
+            ControlResponse::File(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }
 
-    async fn edit_file(&self, file_id: FileId, path: PathBuf) -> Result<(), ApiError> {
+    async fn edit_file(&self, file_id: FileId, path: PathBuf) -> Result<FileInfo, ApiError> {
         let path = absolute(path)?;
         match self
             .call(ControlRequest::EditFile { file_id, path })
             .await?
         {
-            ControlResponse::Ok => Ok(()),
+            ControlResponse::File(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }
@@ -535,21 +535,21 @@ impl Backend for IpcBackend {
         }
     }
 
-    async fn delete_file(&self, file_id: FileId) -> Result<(), ApiError> {
+    async fn delete_file(&self, file_id: FileId) -> Result<FileInfo, ApiError> {
         match self.call(ControlRequest::DeleteFile { file_id }).await? {
-            ControlResponse::Ok => Ok(()),
+            ControlResponse::File(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }
 
-    async fn restore_file(&self, file_id: FileId) -> Result<(), ApiError> {
+    async fn restore_file(&self, file_id: FileId) -> Result<FileInfo, ApiError> {
         match self.call(ControlRequest::RestoreFile { file_id }).await? {
-            ControlResponse::Ok => Ok(()),
+            ControlResponse::File(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }
 
-    async fn move_file(&self, file_id: FileId, logical_path: String) -> Result<(), ApiError> {
+    async fn move_file(&self, file_id: FileId, logical_path: String) -> Result<FileInfo, ApiError> {
         match self
             .call(ControlRequest::MoveFile {
                 file_id,
@@ -557,32 +557,32 @@ impl Backend for IpcBackend {
             })
             .await?
         {
-            ControlResponse::Ok => Ok(()),
+            ControlResponse::File(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }
 
-    async fn tag_file(&self, tag_id: TagId, file_id: FileId) -> Result<(), ApiError> {
+    async fn tag_file(&self, tag_id: TagId, file_id: FileId) -> Result<FileInfo, ApiError> {
         match self
             .call(ControlRequest::TagFile { tag_id, file_id })
             .await?
         {
-            ControlResponse::Ok => Ok(()),
+            ControlResponse::File(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }
 
-    async fn untag_file(&self, tag_id: TagId, file_id: FileId) -> Result<(), ApiError> {
+    async fn untag_file(&self, tag_id: TagId, file_id: FileId) -> Result<FileInfo, ApiError> {
         match self
             .call(ControlRequest::UntagFile { tag_id, file_id })
             .await?
         {
-            ControlResponse::Ok => Ok(()),
+            ControlResponse::File(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }
 
-    async fn tag_tag(&self, parent_id: TagId, subtag_id: TagId) -> Result<(), ApiError> {
+    async fn tag_tag(&self, parent_id: TagId, subtag_id: TagId) -> Result<Tag, ApiError> {
         match self
             .call(ControlRequest::TagTag {
                 parent_id,
@@ -590,12 +590,12 @@ impl Backend for IpcBackend {
             })
             .await?
         {
-            ControlResponse::Ok => Ok(()),
+            ControlResponse::Tag(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }
 
-    async fn untag_tag(&self, parent_id: TagId, subtag_id: TagId) -> Result<(), ApiError> {
+    async fn untag_tag(&self, parent_id: TagId, subtag_id: TagId) -> Result<Tag, ApiError> {
         match self
             .call(ControlRequest::UntagTag {
                 parent_id,
@@ -603,7 +603,7 @@ impl Backend for IpcBackend {
             })
             .await?
         {
-            ControlResponse::Ok => Ok(()),
+            ControlResponse::Tag(value) => Ok(value),
             other => Err(unexpected(other)),
         }
     }

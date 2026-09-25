@@ -117,37 +117,40 @@ pub trait Backend {
         subtag_rule: SubtagRule,
     ) -> impl Future<Output = Result<Vec<TagId>, ApiError>> + Send;
 
-    /// Create a tag with an initial visual style; returns the freshly-minted
-    /// id. Callers with no styling preference pass [`TagStyle::default`].
+    /// Create a tag with an initial visual style; returns the new tag.
+    /// Callers with no styling preference pass [`TagStyle::default`].
+    ///
+    /// Like every mutation below, this resolves once the daemon has applied
+    /// the change, with the entry it touched as it now stands.
     fn create_tag(
         &self,
         name: String,
         style: TagStyle,
-    ) -> impl Future<Output = Result<TagId, ApiError>> + Send;
+    ) -> impl Future<Output = Result<Tag, ApiError>> + Send;
 
-    /// Delete a tag.
-    fn delete_tag(&self, tag_id: TagId) -> impl Future<Output = Result<(), ApiError>> + Send;
+    /// Delete a tag; returns it, tombstoned.
+    fn delete_tag(&self, tag_id: TagId) -> impl Future<Output = Result<Tag, ApiError>> + Send;
 
-    /// Restore a soft-deleted tag.
-    fn restore_tag(&self, tag_id: TagId) -> impl Future<Output = Result<(), ApiError>> + Send;
+    /// Restore a soft-deleted tag; returns it.
+    fn restore_tag(&self, tag_id: TagId) -> impl Future<Output = Result<Tag, ApiError>> + Send;
 
-    /// Rename a tag.
+    /// Rename a tag; returns it.
     fn rename_tag(
         &self,
         tag_id: TagId,
         name: String,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send;
+    ) -> impl Future<Output = Result<Tag, ApiError>> + Send;
 
-    /// Replace a tag's visual style (dot color, fill, border, shape, …). Dot
-    /// color is one property of the style, so this is also how a tag is
-    /// recolored.
+    /// Replace a tag's visual style (dot color, fill, border, shape, …);
+    /// returns the tag. Dot color is one property of the style, so this is
+    /// also how a tag is recolored.
     fn set_tag_style(
         &self,
         tag_id: TagId,
         style: TagStyle,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send;
+    ) -> impl Future<Output = Result<Tag, ApiError>> + Send;
 
-    /// Upload a file from a path on disk; returns the freshly-minted id.
+    /// Upload a file from a path on disk; returns the new file as recorded.
     ///
     /// The daemon copies `path` into its outbox (streamed, never buffered
     /// whole) before this returns, so the caller may delete `path` afterwards;
@@ -159,15 +162,16 @@ pub trait Backend {
         path: PathBuf,
         path_name: String,
         tags: Vec<TagId>,
-    ) -> impl Future<Output = Result<FileId, ApiError>> + Send;
+    ) -> impl Future<Output = Result<FileInfo, ApiError>> + Send;
 
     /// Replace the content of an existing file with the bytes at `path`,
-    /// ingested exactly like [`upload_file`](Self::upload_file).
+    /// ingested exactly like [`upload_file`](Self::upload_file); returns the
+    /// file at its new version.
     fn edit_file(
         &self,
         file_id: FileId,
         path: PathBuf,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send;
+    ) -> impl Future<Output = Result<FileInfo, ApiError>> + Send;
 
     /// Start an external edit: return the on-disk path the caller should hand
     /// to an editor.
@@ -259,47 +263,53 @@ pub trait Backend {
     /// returning where it landed. Errors if backups are not configured.
     fn backup(&self) -> impl Future<Output = Result<BackupOutcome, ApiError>> + Send;
 
-    /// Delete a file.
-    fn delete_file(&self, file_id: FileId) -> impl Future<Output = Result<(), ApiError>> + Send;
+    /// Delete a file; returns it, tombstoned.
+    fn delete_file(
+        &self,
+        file_id: FileId,
+    ) -> impl Future<Output = Result<FileInfo, ApiError>> + Send;
 
     /// Restore a soft-deleted file (best-effort; fails if no source holds its
-    /// bytes).
-    fn restore_file(&self, file_id: FileId) -> impl Future<Output = Result<(), ApiError>> + Send;
+    /// bytes); returns it.
+    fn restore_file(
+        &self,
+        file_id: FileId,
+    ) -> impl Future<Output = Result<FileInfo, ApiError>> + Send;
 
-    /// Move (rename) a file to a new logical path.
+    /// Move (rename) a file to a new logical path; returns it.
     fn move_file(
         &self,
         file_id: FileId,
         logical_path: String,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send;
+    ) -> impl Future<Output = Result<FileInfo, ApiError>> + Send;
 
-    /// Apply `tag_id` to `file_id`.
+    /// Apply `tag_id` to `file_id`; returns the file.
     fn tag_file(
         &self,
         tag_id: TagId,
         file_id: FileId,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send;
+    ) -> impl Future<Output = Result<FileInfo, ApiError>> + Send;
 
-    /// Remove `tag_id` from `file_id`.
+    /// Remove `tag_id` from `file_id`; returns the file.
     fn untag_file(
         &self,
         tag_id: TagId,
         file_id: FileId,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send;
+    ) -> impl Future<Output = Result<FileInfo, ApiError>> + Send;
 
-    /// Make `subtag_id` a subtag (child) of `parent_id`.
+    /// Make `subtag_id` a subtag (child) of `parent_id`; returns the subtag.
     fn tag_tag(
         &self,
         parent_id: TagId,
         subtag_id: TagId,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send;
+    ) -> impl Future<Output = Result<Tag, ApiError>> + Send;
 
-    /// Remove `subtag_id` as a subtag of `parent_id`.
+    /// Remove `subtag_id` as a subtag of `parent_id`; returns the subtag.
     fn untag_tag(
         &self,
         parent_id: TagId,
         subtag_id: TagId,
-    ) -> impl Future<Output = Result<(), ApiError>> + Send;
+    ) -> impl Future<Output = Result<Tag, ApiError>> + Send;
 
     /// Purge the entire preview cache, returning how many cached previews were
     /// removed. Previews are hash-keyed and regenerated on demand, so this only
@@ -315,7 +325,7 @@ pub trait Backend {
     /// With `dry_run`, reports which files would be purged without mutating
     /// anything. Otherwise purges each — stripping its catalog metadata and
     /// on-disk bytes and propagating the purge to all peers, permanently and
-    /// irreversibly — and reports the purged ids.
+    /// irreversibly — and reports the purged files as they stood before.
     fn purge_broken(
         &self,
         dry_run: bool,
@@ -328,7 +338,7 @@ pub trait Backend {
     /// With `dry_run`, reports which files would be purged without mutating
     /// anything. Otherwise purges each — stripping its catalog metadata and
     /// on-disk bytes and propagating the purge to all peers, permanently and
-    /// irreversibly — and reports the purged ids.
+    /// irreversibly — and reports the purged files as they stood before.
     fn purge_deleted(
         &self,
         dry_run: bool,
@@ -339,8 +349,8 @@ pub trait Backend {
     /// every tag the deleted members carry.
     ///
     /// With `dry_run`, reports the sets without mutating anything. Otherwise
-    /// enqueues the tag merges and deletes — reversible soft deletes,
-    /// propagated to peers — and reports the sets.
+    /// applies the tag merges and deletes — reversible soft deletes,
+    /// propagated to peers — and reports the sets as they now stand.
     fn delete_duplicates(
         &self,
         dry_run: bool,

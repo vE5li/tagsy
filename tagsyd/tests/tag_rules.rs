@@ -171,6 +171,7 @@ impl Harness {
             content_hash: format!("hash-{path}"),
             size: 1,
             tags,
+            respond_to: tokio::sync::oneshot::channel().0,
         });
         let tags = self
             .expect("the upload announcement", |change| {
@@ -257,6 +258,7 @@ async fn upload_applies_a_matching_rule() {
         content_hash: "hash".to_owned(),
         size: 1,
         tags: Vec::new(),
+        respond_to: tokio::sync::oneshot::channel().0,
     });
 
     let tags = harness
@@ -279,6 +281,7 @@ async fn upload_without_a_match_is_untouched() {
         content_hash: "hash".to_owned(),
         size: 1,
         tags: Vec::new(),
+        respond_to: tokio::sync::oneshot::channel().0,
     });
 
     let tags = harness
@@ -303,6 +306,7 @@ async fn upload_merges_rule_tags_with_caller_tags() {
         content_hash: "hash".to_owned(),
         size: 1,
         tags: vec![caller_tag],
+        respond_to: tokio::sync::oneshot::channel().0,
     });
 
     let tags = harness
@@ -326,6 +330,7 @@ async fn upload_does_not_duplicate_an_already_supplied_tag() {
         content_hash: "hash".to_owned(),
         size: 1,
         tags: vec![tag_id],
+        respond_to: tokio::sync::oneshot::channel().0,
     });
 
     let tags = harness
@@ -420,6 +425,7 @@ async fn moving_a_file_into_a_matching_path_does_not_apply_rules() {
         content_hash: "hash".to_owned(),
         size: 1,
         tags: Vec::new(),
+        respond_to: tokio::sync::oneshot::channel().0,
     });
     let tags = harness
         .expect("the upload announcement", |change| {
@@ -462,6 +468,7 @@ async fn editing_content_does_not_apply_rules() {
         content_hash: "hash".to_owned(),
         size: 1,
         tags: Vec::new(),
+        respond_to: tokio::sync::oneshot::channel().0,
     });
     harness
         .expect("the upload announcement", |change| {
@@ -476,6 +483,7 @@ async fn editing_content_does_not_apply_rules() {
         content_hash: "hash2".to_owned(),
         size: 2,
         tags: Vec::new(),
+        respond_to: tokio::sync::oneshot::channel().0,
     });
 
     harness
@@ -633,7 +641,11 @@ async fn retag_skips_deleted_files() {
             directory_path: std::path::PathBuf::new(),
         },
     ));
-    harness.api.delete_file(file_id).expect("delete enqueued");
+    harness
+        .api
+        .delete_file(file_id)
+        .await
+        .expect("delete applied");
     harness
         .expect("the deletion to be applied", |change| {
             matches!(change, Change::FileDeleted { file_id: got, .. } if *got == file_id)
@@ -701,6 +713,7 @@ async fn a_broken_rule_does_not_disable_the_others() {
         content_hash: "hash".to_owned(),
         size: 1,
         tags: Vec::new(),
+        respond_to: tokio::sync::oneshot::channel().0,
     });
 
     let tags = harness

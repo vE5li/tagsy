@@ -51,7 +51,9 @@ impl From<RestoreError> for ApiError {
             // No source still held the bytes to restore from.
             RestoreError::NotAvailable => ApiError::ContentUnavailable,
             RestoreError::NotDeleted => ApiError::InvalidArgument(error.to_string()),
-            RestoreError::ShuttingDown => ApiError::Internal(error.to_string()),
+            RestoreError::ReadBack(_) | RestoreError::ShuttingDown => {
+                ApiError::Internal(error.to_string())
+            }
         }
     }
 }

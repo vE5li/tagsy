@@ -135,7 +135,7 @@ pub fn emit_purge_outcome(output_mode: OutputMode, noun: &str, outcome: &PurgeOu
     let ids: Vec<String> = outcome
         .purged
         .iter()
-        .map(|file_id| file_id.to_string())
+        .map(|purged| purged.file.file_id.to_string())
         .collect();
 
     let human = if count == 0 {
@@ -173,7 +173,12 @@ pub fn emit_duplicate_deletion_outcome(
     output_mode: OutputMode,
     outcome: &DuplicateDeletionOutcome,
 ) {
-    let ids = |ids: &[FileId]| ids.iter().map(FileId::to_string).collect::<Vec<_>>();
+    let ids = |files: &[FileInfo]| {
+        files
+            .iter()
+            .map(|file| file.file_id.to_string())
+            .collect::<Vec<_>>()
+    };
     let tag_ids = |ids: &[TagId]| ids.iter().map(TagId::to_string).collect::<Vec<_>>();
     let count: usize = outcome.groups.iter().map(|group| group.deleted.len()).sum();
 
@@ -196,7 +201,7 @@ pub fn emit_duplicate_deletion_outcome(
         let mut lines = vec![header];
         for group in &outcome.groups {
             lines.push(format!("  {} ({})", group.logical_path, group.content_hash));
-            lines.push(format!("    keep    {}", group.kept.to_string()));
+            lines.push(format!("    keep    {}", group.kept.file_id.to_string()));
             lines.extend(
                 ids(&group.deleted)
                     .into_iter()
@@ -218,7 +223,7 @@ pub fn emit_duplicate_deletion_outcome(
             json!({
                 "logical_path": group.logical_path.as_str(),
                 "content_hash": group.content_hash,
-                "kept": group.kept.to_string(),
+                "kept": group.kept.file_id.to_string(),
                 "deleted": ids(&group.deleted),
                 "tags_merged": tag_ids(&group.tags_merged),
             })

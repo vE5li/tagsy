@@ -191,23 +191,134 @@ async fn upload_and_edit_over_the_control_socket() {
     let client = cluster.control_client(phone).await;
 
     let source = cluster.scratch_file(phone, b"sent by the cli");
-    let file_id = client
+    let uploaded = client
         .upload_file(source.clone(), "from-cli.txt".to_owned(), vec![phone_tag])
         .await
         .expect("upload over the control socket");
     std::fs::remove_file(&source).unwrap();
+    // The answer is the file as recorded, not a guess from the request.
+    assert_eq!(uploaded.logical_path.as_str(), "from-cli.txt");
+    assert_eq!(uploaded.version_number, 1);
+    assert_eq!(uploaded.size, b"sent by the cli".len() as u64);
+    let file_id = uploaded.file_id;
     cluster.settle().await;
     cluster.assert_converged();
 
     let source = cluster.scratch_file(phone, b"edited by the cli, longer");
-    client
+    let edited = client
         .edit_file(file_id, source.clone())
         .await
         .expect("edit over the control socket");
     std::fs::remove_file(&source).unwrap();
+    assert_eq!(edited.version_number, 2);
+    assert_eq!(
+        edited.content_hash,
+        blake3::hash(b"edited by the cli, longer")
+            .to_hex()
+            .to_string()
+    );
     cluster.settle().await;
     cluster.assert_converged();
     cluster.wait_for_empty_outbox(phone).await;
+}
+
+/// Every mutation answers once it is applied, with the entry it touched as it
+/// now stands — so a read issued right after it already sees the change.
+/// Before, mutations were only enqueued and a read-back raced the writer;
+/// this goes over the control socket, the path the CLI takes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutations_answer_with_the_applied_entry() {
+    use tagsy_api::{ApiError, Backend, DeletedRule, SubtagRule, TagStyle};
+
+    let (mut cluster, _central, phone, _phone_tag) = hub_and_spoke();
+    cluster.start_connected().await;
+    let client = cluster.control_client(phone).await;
+    let file_tags = async |file_id| {
+        client
+            .tags_for_file(file_id, SubtagRule::Exclude)
+            .await
+            .unwrap()
+    };
+
+    let tag = client
+        .create_tag("work".to_owned(), TagStyle::default())
+        .await
+        .unwrap();
+    assert_eq!(tag.name, "work");
+    assert_eq!(
+        client
+            .get_tag(tag.id, DeletedRule::Exclude)
+            .await
+            .unwrap()
+            .name,
+        "work"
+    );
+    let renamed = client.rename_tag(tag.id, "job".to_owned()).await.unwrap();
+    assert_eq!(renamed.name, "job");
+    let style = TagStyle {
+        dot_color: "#123456".to_owned(),
+        ..TagStyle::default()
+    };
+    let restyled = client.set_tag_style(tag.id, style).await.unwrap();
+    assert_eq!(restyled.style.dot_color, "#123456");
+    assert_eq!(restyled.name, "job");
+
+    let source = cluster.scratch_file(phone, b"content");
+    let file = client
+        .upload_file(source, "a.txt".to_owned(), vec![])
+        .await
+        .unwrap();
+    let tagged = client.tag_file(tag.id, file.file_id).await.unwrap();
+    assert_eq!(tagged.file_id, file.file_id);
+    assert_eq!(file_tags(file.file_id).await, vec![tag.id]);
+    let moved = client
+        .move_file(file.file_id, "b.txt".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(moved.logical_path.as_str(), "b.txt");
+    client.untag_file(tag.id, file.file_id).await.unwrap();
+    assert!(file_tags(file.file_id).await.is_empty());
+
+    let parent = client
+        .create_tag("parent".to_owned(), TagStyle::default())
+        .await
+        .unwrap();
+    let child = client.tag_tag(parent.id, tag.id).await.unwrap();
+    assert_eq!(child.id, tag.id);
+    let parents = client
+        .tags_for_tag(tag.id, SubtagRule::Exclude)
+        .await
+        .unwrap();
+    assert_eq!(parents, vec![parent.id]);
+    client.untag_tag(parent.id, tag.id).await.unwrap();
+    assert!(
+        client
+            .tags_for_tag(tag.id, SubtagRule::Exclude)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    client.tag_file(parent.id, file.file_id).await.unwrap();
+    let deleted = client.delete_file(file.file_id).await.unwrap();
+    assert!(deleted.deleted);
+    assert!(client.delete_tag(tag.id).await.unwrap().deleted);
+    assert!(!client.restore_tag(tag.id).await.unwrap().deleted);
+
+    // A purge reports the files as they stood, tags included, and is applied
+    // by the time it answers.
+    let outcome = client.purge_deleted(false).await.unwrap();
+    assert_eq!(outcome.purged.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.purged[0].file.file_id, file.file_id);
+    assert_eq!(outcome.purged[0].file.logical_path.as_str(), "b.txt");
+    assert_eq!(outcome.purged[0].tags, vec![parent.id]);
+    assert!(matches!(
+        client.get_file(file.file_id, DeletedRule::Include).await,
+        Err(ApiError::UnknownId)
+    ));
+
+    cluster.settle().await;
+    cluster.assert_converged();
 }
 
 /// Regression: an on-demand fetch of content the node already holds used to
@@ -381,7 +492,8 @@ async fn delete_duplicates_keeps_lowest_id_and_merges_tags() {
         .backend(central)
         .create_tag("other".to_owned(), Default::default())
         .await
-        .expect("create tag");
+        .expect("create tag")
+        .id;
 
     let mut copies = Vec::new();
     for tags in [vec![phone_tag], vec![other_tag], vec![]] {
@@ -416,8 +528,15 @@ async fn delete_duplicates_keeps_lowest_id_and_merges_tags() {
     assert_eq!(dry.groups.len(), 1, "one duplicate set: {dry:?}");
     let group = &dry.groups[0];
     assert_eq!(group.logical_path.as_str(), "dup.txt");
-    assert_eq!(group.kept, kept);
-    assert_eq!(group.deleted, deleted);
+    let ids = |group: &tagsy_api::DuplicateGroup| {
+        let deleted: Vec<_> = group.deleted.iter().map(|file| file.file_id).collect();
+        (group.kept.file_id, deleted)
+    };
+    assert_eq!(ids(group), (kept, deleted.clone()));
+    assert!(
+        group.deleted.iter().all(|file| !file.deleted),
+        "a dry run reports the files as they stand"
+    );
     assert_eq!(
         group.tags_merged.iter().copied().collect::<BTreeSet<_>>(),
         expected_merged
@@ -438,7 +557,16 @@ async fn delete_duplicates_keeps_lowest_id_and_merges_tags() {
         .await
         .expect("delete duplicates");
     assert!(!applied.dry_run);
-    assert_eq!(applied.groups, dry.groups);
+    assert_eq!(applied.groups.len(), 1);
+    let group = &applied.groups[0];
+    assert_eq!(ids(group), ids(&dry.groups[0]));
+    assert_eq!(group.tags_merged, dry.groups[0].tags_merged);
+    // Reported as they stand once applied.
+    assert!(!group.kept.deleted, "the survivor is reported deleted");
+    assert!(
+        group.deleted.iter().all(|file| file.deleted),
+        "a duplicate is reported live: {group:?}"
+    );
     cluster.settle().await;
     cluster.assert_converged();
 
@@ -540,7 +668,7 @@ async fn delete_duplicates_cleans_up_a_shared_path() {
         .await
         .expect("delete duplicates");
     assert_eq!(outcome.groups.len(), 1, "{outcome:?}");
-    assert_eq!(outcome.groups[0].kept, original.min(shadow));
+    assert_eq!(outcome.groups[0].kept.file_id, original.min(shadow));
     assert_shared_bytes_survive(&cluster, phone).await;
 
     let deleted = original.max(shadow);
