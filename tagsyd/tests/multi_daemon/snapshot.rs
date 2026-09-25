@@ -25,7 +25,9 @@
 //!
 //! The disk is checked per node against that node's own catalog
 //! ([`check_disk`]) rather than across nodes, because each node's directory
-//! layout legitimately differs (Universal vs. TagBased).
+//! layout legitimately differs (Universal vs. TagBased). Each directory's
+//! index is checked too ([`check_index`]): the disk comparison works on paths,
+//! so it cannot see two files sharing one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -34,7 +36,7 @@ use std::path::Path;
 use tagsy_core::state::{RelationshipKind, RelationshipManifestEntry};
 use tagsy_core::{FileId, TagId};
 use tagsyd::configuration::SyncType;
-use tagsyd::store::{CatalogStore, DeletedRule, ManifestRow, Tag};
+use tagsyd::store::{CatalogStore, DeletedRule, DirectoryIndex, ManifestRow, Tag};
 
 /// A set of rendered facts. Two snapshots are equal iff their line sets are.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -290,6 +292,37 @@ pub fn check_disk(
         format!(
             "{} ({sync_type:?}) disagrees with its catalog (- expected, + on disk):\n{diff}",
             directory.display()
+        )
+    })
+}
+
+/// Check one sync directory's index: every physical path belongs to exactly
+/// one file. Two files may share a logical path, but placement suffixes the
+/// name so their bytes never share a physical one
+/// (`DirectoryIndex::physical_path_in_use_by_other`); a second id at the same
+/// path has no bytes of its own and shadows the first. [`check_disk`] compares
+/// by path and cannot see this.
+///
+/// Returns a description of every shared path, or `None`.
+pub fn check_index(index_db: &Path, directory: &Path) -> Option<String> {
+    let index = DirectoryIndex::initialize(index_db).expect("open directory index for snapshot");
+    let mut ids_by_path: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for file in index.get_all_files().expect("read directory index") {
+        ids_by_path
+            .entry(file.physical_path.as_str().to_owned())
+            .or_default()
+            .push(file.file_id.to_string());
+    }
+    let shared: Vec<String> = ids_by_path
+        .into_iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .map(|(path, ids)| format!("  {path}: {}", ids.join(", ")))
+        .collect();
+    (!shared.is_empty()).then(|| {
+        format!(
+            "{} index maps several files to one path:\n{}",
+            directory.display(),
+            shared.join("\n")
         )
     })
 }

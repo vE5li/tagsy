@@ -124,6 +124,12 @@ impl Node {
         self.root.join("directories").join(label)
     }
 
+    /// The directory's index database, named after its basename (the label),
+    /// as `Paths::sync_directory_db_path` does.
+    fn index_db_path(&self, label: &str) -> PathBuf {
+        self.data_dir().join(format!("{label}.db"))
+    }
+
     fn scratch_dir(&self) -> PathBuf {
         self.root.join("scratch")
     }
@@ -554,8 +560,9 @@ impl Cluster {
         CatalogState::load(&self.node(id).data_dir().join("main.db"))
     }
 
-    /// Assert every running node holds the identical catalog and that each
-    /// node's disk matches its own catalog. Call after [`Self::settle`].
+    /// Assert every running node holds the identical catalog, that each
+    /// node's disk matches its own catalog, and that no directory index maps
+    /// two files to one path. Call after [`Self::settle`].
     pub fn assert_converged(&self) {
         let running = self.running_ids();
         let mut failures = Vec::new();
@@ -586,6 +593,12 @@ impl Cluster {
                     &directory.sync_type,
                 ) {
                     failures.push(format!("{}: {diff}", node.name));
+                }
+                if let Some(shared) = snapshot::check_index(
+                    &node.index_db_path(&directory.label),
+                    &node.directory_path(&directory.label),
+                ) {
+                    failures.push(format!("{}: {shared}", node.name));
                 }
             }
         }
