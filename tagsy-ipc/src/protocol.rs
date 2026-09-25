@@ -202,6 +202,12 @@ pub enum ControlRequest {
     PurgeDeleted {
         dry_run: bool,
     },
+    /// Soft-delete duplicate files (same logical path and content hash).
+    /// Answered with [`ControlResponse::DuplicatesDeleted`]. With `dry_run` the
+    /// daemon reports the duplicate sets without mutating anything.
+    DeleteDuplicates {
+        dry_run: bool,
+    },
     /// Read the daemon's external-editor rules. Answered with
     /// [`ControlResponse::EditorRules`].
     EditorRules,
@@ -291,6 +297,9 @@ pub enum ControlResponse {
     /// The files purged (or, on a dry run, that would be purged) as
     /// soft-deleted (answer to [`ControlRequest::PurgeDeleted`]).
     PurgedDeleted(tagsy_api::PurgeOutcome),
+    /// The duplicate sets found, and whether their deletion was enqueued or
+    /// only reported (answer to [`ControlRequest::DeleteDuplicates`]).
+    DuplicatesDeleted(tagsy_api::DuplicateDeletionOutcome),
     /// The daemon's external-editor rules (answer to
     /// [`ControlRequest::EditorRules`]).
     EditorRules(Vec<EditorRule>),

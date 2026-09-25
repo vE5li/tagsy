@@ -17,8 +17,9 @@ use crate::activity::ActivityInfo;
 use crate::connections::{ConnectedPeer, ConnectionEvent};
 use crate::operations::{Operation, OperationEvent};
 use crate::{
-    ApiError, ApiEvent, BackupOutcome, DeletedRule, EditOutcome, EditorRule, HomeSection,
-    PurgeOutcome, RetagSummary, SearchResults, StorageStats, SubtagRule, Tag, TagRuleReport,
+    ApiError, ApiEvent, BackupOutcome, DeletedRule, DuplicateDeletionOutcome, EditOutcome,
+    EditorRule, HomeSection, PurgeOutcome, RetagSummary, SearchResults, StorageStats, SubtagRule,
+    Tag, TagRuleReport,
 };
 
 /// The transport-agnostic UI-facing API.
@@ -332,6 +333,18 @@ pub trait Backend {
         &self,
         dry_run: bool,
     ) -> impl Future<Output = Result<PurgeOutcome, ApiError>> + Send;
+
+    /// Soft-delete **duplicate** files: live files sharing a logical path and
+    /// latest content hash. Each set keeps its lowest-id member, which gains
+    /// every tag the deleted members carry.
+    ///
+    /// With `dry_run`, reports the sets without mutating anything. Otherwise
+    /// enqueues the tag merges and deletes — reversible soft deletes,
+    /// propagated to peers — and reports the sets.
+    fn delete_duplicates(
+        &self,
+        dry_run: bool,
+    ) -> impl Future<Output = Result<DuplicateDeletionOutcome, ApiError>> + Send;
 
     /// The daemon's configured external-editor rules (see [`EditorRule`]). A
     /// snapshot read; the desktop UI calls this once when preparing to launch

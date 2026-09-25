@@ -10,11 +10,11 @@
 
 use std::path::PathBuf;
 
-use tagsy_api::{DuplicateDeletionOutcome, PurgeOutcome};
+use tagsy_api::PurgeOutcome;
 use tagsy_core::{FileId, Preview};
 use tokio::sync::oneshot;
 
-use super::{ApiError, ApiService};
+use super::{ApiError, ApiService, DuplicateDeletionOutcome};
 use crate::catalog::messages::{CatalogCommand, FetchError, PreviewError, RestoreError};
 use crate::configuration::SyncType;
 

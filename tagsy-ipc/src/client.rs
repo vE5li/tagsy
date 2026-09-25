@@ -14,9 +14,9 @@ use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use tagsy_api::{
     ApiError, ApiEvent, Backend, BackupOutcome, ConnectedPeer, ConnectionEvent, ConnectionStream,
-    DeletedRule, EditOutcome, EditorRule, EventStream, HomeSection, Operation, OperationEvent,
-    OperationStream, PurgeOutcome, RetagSummary, SearchResults, StorageStats, SubtagRule, Tag,
-    TagRuleReport,
+    DeletedRule, DuplicateDeletionOutcome, EditOutcome, EditorRule, EventStream, HomeSection,
+    Operation, OperationEvent, OperationStream, PurgeOutcome, RetagSummary, SearchResults,
+    StorageStats, SubtagRule, Tag, TagRuleReport,
 };
 use tagsy_core::{FileId, FileInfo, FileKind, Preview, TagId, TagStyle};
 use tokio::net::UnixStream;
@@ -625,6 +625,16 @@ impl Backend for IpcBackend {
     async fn purge_deleted(&self, dry_run: bool) -> Result<PurgeOutcome, ApiError> {
         match self.call(ControlRequest::PurgeDeleted { dry_run }).await? {
             ControlResponse::PurgedDeleted(outcome) => Ok(outcome),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    async fn delete_duplicates(&self, dry_run: bool) -> Result<DuplicateDeletionOutcome, ApiError> {
+        match self
+            .call(ControlRequest::DeleteDuplicates { dry_run })
+            .await?
+        {
+            ControlResponse::DuplicatesDeleted(outcome) => Ok(outcome),
             other => Err(unexpected(other)),
         }
     }
