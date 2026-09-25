@@ -10,8 +10,9 @@ use tagsy_ipc::IpcBackend;
 
 use crate::commands::{Commands, StyleArgs};
 use crate::output::{
-    OutputMode, emit_connected_peers, emit_files, emit_operations, emit_purge_outcome, emit_scalar,
-    emit_tags, emit_tags_and_files, print_json, print_tag_rule_report,
+    OutputMode, emit_connected_peers, emit_duplicate_deletion_outcome, emit_files, emit_operations,
+    emit_purge_outcome, emit_scalar, emit_tags, emit_tags_and_files, print_json,
+    print_tag_rule_report,
 };
 use crate::{common, upload};
 
@@ -675,6 +676,13 @@ pub async fn run(
                 .await
                 .map_err(|error| error.to_string())?;
             emit_purge_outcome(output_mode, "deleted", &outcome);
+        }
+        Commands::DeleteDuplicates { dry_run } => {
+            let outcome = backend
+                .delete_duplicates(dry_run)
+                .await
+                .map_err(|error| error.to_string())?;
+            emit_duplicate_deletion_outcome(output_mode, &outcome);
         }
         Commands::Backup => {
             let outcome = backend.backup().await.map_err(|error| error.to_string())?;

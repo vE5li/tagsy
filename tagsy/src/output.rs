@@ -8,7 +8,8 @@ use owo_colors::OwoColorize;
 use serde::Serialize;
 use serde_json::json;
 use tagsy_api::{
-    ConnectedPeer, Direction, Operation, OperationKind, OperationStatus, PurgeOutcome, Tag,
+    ConnectedPeer, Direction, DuplicateDeletionOutcome, Operation, OperationKind, OperationStatus,
+    PurgeOutcome, Tag,
 };
 use tagsy_core::{FileId, FileInfo, FileKind, TagId};
 
@@ -160,6 +161,75 @@ pub fn emit_purge_outcome(output_mode: OutputMode, noun: &str, outcome: &PurgeOu
         serde_json::json!({
             "dry_run": outcome.dry_run,
             "purged": ids,
+            "count": count,
+        }),
+    );
+}
+
+/// Emit the result of `delete-duplicates`: one block per duplicate set naming
+/// the kept file, the deleted ones, and the tags merged onto the kept file, or
+/// the equivalent JSON object. `count` is the number of files deleted.
+pub fn emit_duplicate_deletion_outcome(
+    output_mode: OutputMode,
+    outcome: &DuplicateDeletionOutcome,
+) {
+    let ids = |ids: &[FileId]| ids.iter().map(FileId::to_string).collect::<Vec<_>>();
+    let tag_ids = |ids: &[TagId]| ids.iter().map(TagId::to_string).collect::<Vec<_>>();
+    let count: usize = outcome.groups.iter().map(|group| group.deleted.len()).sum();
+
+    let human = if outcome.groups.is_empty() {
+        if outcome.dry_run {
+            "No duplicate files found; nothing would be deleted".to_owned()
+        } else {
+            "No duplicate files found; nothing deleted".to_owned()
+        }
+    } else {
+        let sets = outcome.groups.len();
+        let header = if outcome.dry_run {
+            format!(
+                "{count} duplicate file(s) in {sets} set(s) would be deleted (dry run, nothing \
+                 changed):"
+            )
+        } else {
+            format!("Deleted {count} duplicate file(s) in {sets} set(s):")
+        };
+        let mut lines = vec![header];
+        for group in &outcome.groups {
+            lines.push(format!("  {} ({})", group.logical_path, group.content_hash));
+            lines.push(format!("    keep    {}", group.kept.to_string()));
+            lines.extend(
+                ids(&group.deleted)
+                    .into_iter()
+                    .map(|id| format!("    delete  {id}")),
+            );
+            lines.extend(
+                tag_ids(&group.tags_merged)
+                    .into_iter()
+                    .map(|id| format!("    add tag {id}")),
+            );
+        }
+        lines.join("\n")
+    };
+
+    let groups: Vec<serde_json::Value> = outcome
+        .groups
+        .iter()
+        .map(|group| {
+            json!({
+                "logical_path": group.logical_path.as_str(),
+                "content_hash": group.content_hash,
+                "kept": group.kept.to_string(),
+                "deleted": ids(&group.deleted),
+                "tags_merged": tag_ids(&group.tags_merged),
+            })
+        })
+        .collect();
+    emit_scalar(
+        output_mode,
+        human,
+        json!({
+            "dry_run": outcome.dry_run,
+            "groups": groups,
             "count": count,
         }),
     );

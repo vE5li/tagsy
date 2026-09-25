@@ -327,6 +327,19 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Delete duplicate files: live files with the same logical path and the
+    /// same content.
+    ///
+    /// Of each set of duplicates, the file with the lowest id is kept, so every
+    /// device picks the same one. Any tag carried by a deleted duplicate is
+    /// added to the kept file, so no tagging is lost. Deletion is the
+    /// normal, reversible soft delete (see `restore-file`), and propagates to
+    /// every peer. Run `--dry-run` first to see exactly what would change.
+    DeleteDuplicates {
+        /// Report which files would be deleted without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Bundle the entire tagsy state (both databases plus every sync
     /// directory's contents) into a single compressed archive in
     /// TAGSY_BACKUP_DIR. Prints where the archive landed.
