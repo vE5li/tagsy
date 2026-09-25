@@ -350,6 +350,23 @@ pub enum CatalogCommand {
         dry_run: bool,
         respond_to: oneshot::Sender<Result<Vec<FileId>, DatabaseError>>,
     },
+    /// Operator-initiated soft delete of **duplicate** files: live files
+    /// sharing a logical path and latest content hash. Request-reply, handled
+    /// on the writer loop so the duplicate sets can't change between planning
+    /// and applying (an edit landing in between would otherwise get a
+    /// no-longer-duplicate file deleted).
+    ///
+    /// Each set keeps its lowest-id member (see [`super::duplicates`]). With
+    /// `dry_run`, replies with the plan and mutates nothing. Otherwise enqueues
+    /// a `Change::FileDeleted` for every other member, then a
+    /// `Change::FileTagged` onto the survivor for each tag it lacks, and
+    /// replies with the plan.
+    ///
+    /// Exposed via the `tagsy delete-duplicates` CLI command.
+    DeleteDuplicates {
+        dry_run: bool,
+        respond_to: oneshot::Sender<Result<Vec<tagsy_api::DuplicateGroup>, DatabaseError>>,
+    },
 }
 
 /// A command sent to a specific peer's live session by `handle_changes`.

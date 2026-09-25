@@ -40,6 +40,7 @@
 //! history of `handle_changes` for the full options list).
 
 pub mod content;
+pub mod duplicates;
 pub mod files;
 pub mod forward;
 pub mod messages;
@@ -965,6 +966,73 @@ impl CatalogWriter {
                         }
                     }
                     let _ = respond_to.send(Ok(deleted));
+                    continue;
+                }
+                CatalogCommand::DeleteDuplicates {
+                    dry_run,
+                    respond_to,
+                } => {
+                    let groups = match duplicates::plan_duplicate_deletions(&database) {
+                        Ok(groups) => groups,
+                        Err(error) => {
+                            log::error!("DeleteDuplicates: failed to plan: {error:?}");
+                            let _ = respond_to.send(Err(error));
+                            continue;
+                        }
+                    };
+
+                    let deleted: usize = groups.iter().map(|group| group.deleted.len()).sum();
+                    if dry_run {
+                        log::info!(
+                            "DeleteDuplicates (dry run): {deleted} duplicate file(s) in {} set(s) \
+                             would be deleted",
+                            groups.len()
+                        );
+                        let _ = respond_to.send(Ok(groups));
+                        continue;
+                    }
+
+                    log::info!(
+                        "DeleteDuplicates: deleting {deleted} duplicate file(s) in {} set(s)",
+                        groups.len()
+                    );
+                    // As in the purges, applying means enqueuing ordinary
+                    // changes onto *this* loop's own channel (awaiting them here
+                    // would self-deadlock), so they inherit LWW, placement and
+                    // peer forwarding.
+                    //
+                    // The channel is FIFO, so order matters: the duplicates go
+                    // *before* the survivor gains their tags. A tag that makes a
+                    // TagBased directory newly want the survivor places it at the
+                    // logical path; were a duplicate still there, placement would
+                    // suffix the survivor's name (`name (1).txt`) for good.
+                    let origin = || ChangeOrigin::Local {
+                        directory_path: std::path::PathBuf::new(),
+                    };
+                    let changes = groups.iter().flat_map(|group| {
+                        let deleted = group.deleted.iter().map(|file_id| Change::FileDeleted {
+                            file_id: *file_id,
+                            deleted_at: clock::now_millis(),
+                        });
+                        let tagged = group.tags_merged.iter().map(|tag_id| Change::FileTagged {
+                            file_id: group.kept,
+                            tag_id: *tag_id,
+                            metadata: None,
+                            modified_at: clock::now_millis(),
+                        });
+                        deleted.chain(tagged)
+                    });
+                    for change in changes {
+                        if let Err(error) = change_sender
+                            .send(CatalogCommand::Change(Ingest::Meta(change), origin()))
+                        {
+                            log::error!(
+                                "DeleteDuplicates: change channel closed while enqueuing: {error}"
+                            );
+                            break;
+                        }
+                    }
+                    let _ = respond_to.send(Ok(groups));
                     continue;
                 }
                 CatalogCommand::CatalogFile {

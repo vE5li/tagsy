@@ -3,14 +3,14 @@
 //!
 //! Unlike the [`write`](super::write) mutations, these operations need the
 //! daemon's answer — availability of bytes to restore, a fetched temp path, a
-//! resolved preview — so each sends a [`CatalogCommand`] carrying a
-//! `oneshot::Sender` and awaits the reply under a shared deadline. That
-//! deadline / channel-closed handling is identical across all four and lives in
-//! [`ApiService::await_reply`].
+//! resolved preview, a computed purge or deletion set — so each sends a
+//! [`CatalogCommand`] carrying a `oneshot::Sender` and awaits the reply under a
+//! shared deadline. That deadline / channel-closed handling is identical across
+//! all four and lives in [`ApiService::await_reply`].
 
 use std::path::PathBuf;
 
-use tagsy_api::PurgeOutcome;
+use tagsy_api::{DuplicateDeletionOutcome, PurgeOutcome};
 use tagsy_core::{FileId, Preview};
 use tokio::sync::oneshot;
 
@@ -284,5 +284,32 @@ impl ApiService {
             .await?
             .map_err(ApiError::from)?;
         Ok(PurgeOutcome { dry_run, purged })
+    }
+
+    /// Soft-delete duplicate files: live files sharing a logical path and
+    /// latest content hash. Each set keeps its lowest-id member, which gains
+    /// every tag the others carry; the rest are deleted like any
+    /// [`Self::delete_file`] — reversible, and propagated to peers.
+    ///
+    /// The plan is computed on the sole DB writer (see
+    /// [`CatalogCommand::DeleteDuplicates`]) to avoid a
+    /// time-of-check/time-of-use race. With `dry_run`, nothing is mutated.
+    /// Exposed via the `tagsy delete-duplicates` CLI command.
+    pub async fn delete_duplicates(
+        &self,
+        dry_run: bool,
+    ) -> Result<DuplicateDeletionOutcome, ApiError> {
+        let (respond_to, response) = oneshot::channel();
+        self.change_sender
+            .send(CatalogCommand::DeleteDuplicates {
+                dry_run,
+                respond_to,
+            })
+            .map_err(|_| ApiError::Internal("runtime is shutting down".to_owned()))?;
+
+        let groups = Self::await_reply(response, "runtime is shutting down".to_owned())
+            .await?
+            .map_err(ApiError::from)?;
+        Ok(DuplicateDeletionOutcome { dry_run, groups })
     }
 }
