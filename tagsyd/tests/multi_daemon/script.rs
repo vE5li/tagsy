@@ -236,6 +236,9 @@ pub enum Step {
     PurgeDeleted {
         on: &'static str,
     },
+    DeleteDuplicates {
+        on: &'static str,
+    },
 }
 
 impl Step {
@@ -261,7 +264,8 @@ impl Step {
             | Step::UntagFile { on, .. }
             | Step::TagTag { on, .. }
             | Step::UntagTag { on, .. }
-            | Step::PurgeDeleted { on } => on,
+            | Step::PurgeDeleted { on }
+            | Step::DeleteDuplicates { on } => on,
         }
     }
 }
@@ -540,6 +544,9 @@ async fn perform(cluster: &Cluster, roles: &Roles, context: &mut Context, step: 
             .or_fail(step),
         Step::PurgeDeleted { .. } => {
             backend.purge_deleted(false).await.or_fail(step);
+        }
+        Step::DeleteDuplicates { .. } => {
+            backend.delete_duplicates(false).await.or_fail(step);
         }
     }
 }

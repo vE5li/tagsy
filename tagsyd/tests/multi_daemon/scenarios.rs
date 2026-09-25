@@ -249,6 +249,80 @@ async fn central_purges_deleted_file() {
     .await;
 }
 
+// ---- Deleting duplicates -------------------------------------------------
+
+/// An upload of `text` at `path`: unlike [`upload`], the bytes don't depend on
+/// the label, so two such uploads with the same text are duplicates.
+fn upload_bytes(
+    on: &'static str,
+    file: &'static str,
+    path: &'static str,
+    text: &str,
+    tags: &[&'static str],
+) -> Step {
+    Step::Upload {
+        on,
+        file,
+        path,
+        bytes: bytes(text),
+        tags: tags.to_vec(),
+    }
+}
+
+/// Three copies of `dup.txt` (only one tagged for the phone), plus a
+/// same-path file with other content and a same-content file at another path,
+/// neither of which is a duplicate. Whichever copy survives ends up tagged for
+/// the phone and back at the plain `dup.txt` there.
+fn duplicates_setup() -> Vec<Step> {
+    vec![
+        upload_bytes("central", "copy_1", "dup.txt", "same", &["phone"]),
+        upload_bytes("central", "copy_2", "dup.txt", "same", &[]),
+        upload_bytes("central", "copy_3", "dup.txt", "same", &[]),
+        upload_bytes("central", "other_content", "dup.txt", "different", &[]),
+        upload_bytes("central", "other_path", "elsewhere.txt", "same", &["phone"]),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn central_deletes_duplicates() {
+    script::check(scenario(
+        hub_and_spoke,
+        duplicates_setup(),
+        vec![Step::DeleteDuplicates { on: "central" }],
+        &["phone"],
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn phone_deletes_duplicates() {
+    script::check(scenario(
+        hub_and_spoke,
+        duplicates_setup(),
+        vec![Step::DeleteDuplicates { on: "phone" }],
+        &["central"],
+    ))
+    .await;
+}
+
+/// Both phones deduplicate while partitioned. They must pick the same
+/// survivor: otherwise each deletes the copy the other kept, and on reconnect
+/// nothing is left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn phones_delete_duplicates_concurrently() {
+    script::check(two_phone_conflict(
+        vec![
+            upload_bytes("central", "copy_a", "dup.txt", "same", &["a"]),
+            upload_bytes("central", "copy_b", "dup.txt", "same", &["b"]),
+        ],
+        vec![
+            Step::DeleteDuplicates { on: "phone_a" },
+            Step::DeleteDuplicates { on: "phone_b" },
+        ],
+    ))
+    .await;
+}
+
 // ---- Moving files --------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

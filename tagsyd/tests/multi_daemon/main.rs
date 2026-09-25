@@ -361,3 +361,193 @@ async fn untagging_one_id_of_a_shared_path_keeps_its_bytes() {
         .unwrap();
     assert_shared_bytes_survive(&cluster, phone).await;
 }
+
+/// `delete-duplicates` keeps the lowest id of each set, merges the others'
+/// tags onto it, and soft-deletes the rest — on every node. A dry run reports
+/// the same plan and changes nothing.
+///
+/// The scripted scenarios check convergence, but their oracle names files by
+/// logical path, so it cannot tell which copy survived or which one holds a
+/// tag. This pins both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_duplicates_keeps_lowest_id_and_merges_tags() {
+    use std::collections::BTreeSet;
+
+    use tagsy_api::{Backend, DeletedRule, SubtagRule};
+
+    let (mut cluster, central, phone, phone_tag) = hub_and_spoke();
+    cluster.start_connected().await;
+    let other_tag = cluster
+        .backend(central)
+        .create_tag("other".to_owned(), Default::default())
+        .await
+        .expect("create tag");
+
+    let mut copies = Vec::new();
+    for tags in [vec![phone_tag], vec![other_tag], vec![]] {
+        copies.push(cluster.upload(central, "dup.txt", b"same", tags).await);
+    }
+    let unique = cluster
+        .upload(central, "dup.txt", b"different", vec![])
+        .await;
+    cluster.settle().await;
+
+    let kept = *copies.iter().min().unwrap();
+    let mut deleted: Vec<_> = copies.iter().copied().filter(|id| *id != kept).collect();
+    deleted.sort();
+    let kept_tags: BTreeSet<_> = cluster
+        .backend(central)
+        .tags_for_file(kept, SubtagRule::Exclude)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    let expected_merged: BTreeSet<_> = [phone_tag, other_tag]
+        .into_iter()
+        .filter(|tag| !kept_tags.contains(tag))
+        .collect();
+
+    let dry = cluster
+        .backend(phone)
+        .delete_duplicates(true)
+        .await
+        .expect("dry run");
+    assert!(dry.dry_run);
+    assert_eq!(dry.groups.len(), 1, "one duplicate set: {dry:?}");
+    let group = &dry.groups[0];
+    assert_eq!(group.logical_path.as_str(), "dup.txt");
+    assert_eq!(group.kept, kept);
+    assert_eq!(group.deleted, deleted);
+    assert_eq!(
+        group.tags_merged.iter().copied().collect::<BTreeSet<_>>(),
+        expected_merged
+    );
+    cluster.settle().await;
+    for id in copies.iter().chain([&unique]) {
+        let file = cluster
+            .backend(phone)
+            .get_file(*id, DeletedRule::Include)
+            .await
+            .unwrap();
+        assert!(!file.deleted, "the dry run deleted {id:?}");
+    }
+
+    let applied = cluster
+        .backend(phone)
+        .delete_duplicates(false)
+        .await
+        .expect("delete duplicates");
+    assert!(!applied.dry_run);
+    assert_eq!(applied.groups, dry.groups);
+    cluster.settle().await;
+    cluster.assert_converged();
+
+    for node in [central, phone] {
+        let backend = cluster.backend(node);
+        let is_deleted = async |id| {
+            backend
+                .get_file(id, DeletedRule::Include)
+                .await
+                .unwrap()
+                .deleted
+        };
+        assert!(!is_deleted(kept).await, "the survivor was deleted");
+        assert!(!is_deleted(unique).await, "a non-duplicate was deleted");
+        for id in &deleted {
+            assert!(is_deleted(*id).await, "a duplicate survived");
+        }
+        let tags: BTreeSet<_> = backend
+            .tags_for_file(kept, SubtagRule::Exclude)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(tags, BTreeSet::from([phone_tag, other_tag]));
+    }
+    assert_eq!(
+        std::fs::read(cluster.directory_path(phone, "phone").join("dup.txt")).unwrap(),
+        b"same",
+        "the survivor took the plain name in the phone's directory"
+    );
+
+    // Deduplicating again finds nothing.
+    let again = cluster
+        .backend(central)
+        .delete_duplicates(false)
+        .await
+        .unwrap();
+    assert!(again.groups.is_empty(), "{again:?}");
+}
+
+/// The duplicates are deleted *before* the survivor gains their tags, so a
+/// TagBased directory that newly wants the survivor finds the logical path
+/// free. The other way round, the survivor is placed next to the duplicate
+/// still there — as `dup (1).txt`, a name it keeps once the duplicate goes.
+///
+/// A node that also holds everything in a Universal directory has the
+/// survivor's bytes locally and places it at once, which makes the order
+/// observable; a phone would have to fetch it first, by when the name is
+/// usually free anyway.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_duplicates_frees_the_name_before_retagging() {
+    use tagsy_api::Backend;
+
+    let mut cluster = Cluster::new();
+    let phone_tag = cluster.declare_tag("phone");
+    let node = cluster.add_node("node", vec![
+        DirectorySpec::universal("store"),
+        DirectorySpec::tag_based("phone", &[phone_tag]),
+    ]);
+    cluster.start_connected().await;
+
+    let first = cluster.upload(node, "dup.txt", b"same", vec![]).await;
+    let second = cluster.upload(node, "dup.txt", b"same", vec![]).await;
+    // Tag the copy that will be deleted, so the survivor must be placed.
+    let doomed = first.max(second);
+    cluster
+        .backend(node)
+        .tag_file(phone_tag, doomed)
+        .await
+        .unwrap();
+    cluster.settle().await;
+
+    cluster
+        .backend(node)
+        .delete_duplicates(false)
+        .await
+        .expect("delete duplicates");
+    cluster.settle().await;
+
+    cluster.assert_converged();
+    let phone_directory = snapshot::disk_contents(&cluster.directory_path(node, "phone"));
+    let names: Vec<&str> = phone_directory
+        .lines()
+        .map(|line| line.split_once(' ').unwrap().0)
+        .collect();
+    assert_eq!(names, ["dup.txt"]);
+}
+
+/// The cleanup `delete-duplicates` exists for: ids a rename-over left sharing
+/// one physical file. Whichever id is kept, the file stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_duplicates_cleans_up_a_shared_path() {
+    use tagsy_api::{Backend, DeletedRule};
+
+    let (cluster, phone, original, shadow) = shared_physical_path().await;
+    let outcome = cluster
+        .backend(phone)
+        .delete_duplicates(false)
+        .await
+        .expect("delete duplicates");
+    assert_eq!(outcome.groups.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.groups[0].kept, original.min(shadow));
+    assert_shared_bytes_survive(&cluster, phone).await;
+
+    let deleted = original.max(shadow);
+    let file = cluster
+        .backend(phone)
+        .get_file(deleted, DeletedRule::Include)
+        .await
+        .unwrap();
+    assert!(file.deleted);
+}
