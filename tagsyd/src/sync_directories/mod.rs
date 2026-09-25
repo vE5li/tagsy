@@ -249,6 +249,28 @@ impl OpenDirectory {
             .map(|file_id| file_id.is_some())
     }
 
+    /// Whether `file`'s bytes on disk are also claimed by another id in this
+    /// directory, and so must stay when `file` is dropped from it.
+    ///
+    /// Two ids can map to one physical path: before an arrival at a tracked
+    /// path became new content, every rename over a tracked file (git's
+    /// `index.lock` → `index`, an editor's atomic save) cataloged a second id
+    /// at the same path, and directory indexes still hold those rows. Removing
+    /// the file for one of them would take the bytes from the others. So a
+    /// removal checks this first and, if shared, drops only its own row — the
+    /// file goes once the last id mapping to it does.
+    ///
+    /// Only TagBased directories can share: a Universal directory stores each
+    /// file under its own id.
+    fn is_shared_with_another_file(&self, file: &SyncDirectoryFile) -> Result<bool, DatabaseError> {
+        match &self.sync_type {
+            SyncType::Universal { .. } => Ok(false),
+            SyncType::TagBased { .. } => self
+                .database
+                .physical_path_in_use_by_other(&file.physical_path, file.file_id),
+        }
+    }
+
     /// The id of the file tracked at sync-relative `relative_path`, or `None`
     /// if the path is untracked. Same lookup and error contract as
     /// [`is_file_tracked`](Self::is_file_tracked).

@@ -252,3 +252,112 @@ async fn local_fetch_keeps_catalog_writer_alive() {
         "tag created after the fetch was never applied: {normalized:?}"
     );
 }
+
+/// A phone whose TagBased directory maps two file ids to one physical
+/// `index` file, both with the same bytes: the state git's `index.lock` →
+/// `index` rename used to leave behind, before an arrival at a tracked path
+/// became new content. Returns `(original, shadow)`: the id the watcher
+/// cataloged first, and the one planted at the same path.
+///
+/// The watcher can no longer produce this, so it is planted: the shadow is
+/// uploaded normally (placed as `index (1)`), then, with the phone stopped,
+/// its row is pointed at `index` and its own copy removed.
+async fn shared_physical_path() -> (
+    Cluster,
+    harness::NodeId,
+    tagsy_core::FileId,
+    tagsy_core::FileId,
+) {
+    use tagsy_api::Backend;
+    use tagsy_core::PhysicalPath;
+    use tagsyd::store::DirectoryIndex;
+
+    let (mut cluster, central, phone, phone_tag) = hub_and_spoke();
+    cluster.start_connected().await;
+
+    cluster.write_file(phone, "phone", "index", b"same");
+    cluster.settle().await;
+    let original = cluster
+        .backend(phone)
+        .resolve_file_id("index".to_owned(), tagsy_api::DeletedRule::Exclude)
+        .await
+        .expect("the written file was cataloged");
+    let shadow = cluster
+        .upload(central, "index", b"same", vec![phone_tag])
+        .await;
+    cluster.settle().await;
+
+    cluster.stop(phone).await;
+    let index = DirectoryIndex::initialize(cluster.index_db_path(phone, "phone")).unwrap();
+    let own_copy = index.get_file(shadow).expect("shadow placed on the phone");
+    assert_eq!(own_copy.physical_path.as_str(), "index (1)");
+    index
+        .update_file_physical_path(shadow, &PhysicalPath::new("index"))
+        .unwrap();
+    drop(index);
+    cluster.remove_file(phone, "phone", "index (1)");
+    cluster.start(phone).await;
+    cluster.wait_all_connected().await;
+    cluster.settle().await;
+
+    let index = DirectoryIndex::initialize(cluster.index_db_path(phone, "phone")).unwrap();
+    for id in [original, shadow] {
+        assert_eq!(
+            index.get_file(id).unwrap().physical_path.as_str(),
+            "index",
+            "the shared path did not survive the restart"
+        );
+    }
+
+    (cluster, phone, original, shadow)
+}
+
+/// Whatever removes one of two ids sharing a physical path must drop only
+/// its row: the bytes still belong to the other.
+async fn assert_shared_bytes_survive(cluster: &Cluster, phone: harness::NodeId) {
+    cluster.settle().await;
+    assert_eq!(
+        std::fs::read(cluster.directory_path(phone, "phone").join("index")).ok(),
+        Some(b"same".to_vec()),
+        "the bytes the remaining id maps to were removed"
+    );
+    cluster.assert_converged();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_the_shadow_of_a_shared_path_keeps_its_bytes() {
+    use tagsy_api::Backend;
+
+    let (cluster, phone, _original, shadow) = shared_physical_path().await;
+    cluster.backend(phone).delete_file(shadow).await.unwrap();
+    assert_shared_bytes_survive(&cluster, phone).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_the_original_of_a_shared_path_keeps_its_bytes() {
+    use tagsy_api::Backend;
+
+    let (cluster, phone, original, _shadow) = shared_physical_path().await;
+    cluster.backend(phone).delete_file(original).await.unwrap();
+    assert_shared_bytes_survive(&cluster, phone).await;
+}
+
+/// Untagging drops a file from a TagBased directory through placement, not
+/// `RemoveFile`; the same rule applies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn untagging_one_id_of_a_shared_path_keeps_its_bytes() {
+    use tagsy_api::Backend;
+
+    let (cluster, phone, _original, shadow) = shared_physical_path().await;
+    let phone_tag = cluster
+        .backend(phone)
+        .tags_for_file(shadow, tagsy_api::SubtagRule::Exclude)
+        .await
+        .unwrap()[0];
+    cluster
+        .backend(phone)
+        .untag_file(phone_tag, shadow)
+        .await
+        .unwrap();
+    assert_shared_bytes_survive(&cluster, phone).await;
+}

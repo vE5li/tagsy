@@ -555,6 +555,11 @@ impl Cluster {
         self.node(id).data_dir().join("main.db")
     }
 
+    /// The index database of one of a node's sync directories.
+    pub fn index_db_path(&self, id: NodeId, label: &str) -> PathBuf {
+        self.node(id).index_db_path(label)
+    }
+
     /// Read a node's catalog (works whether or not the node is running).
     pub fn catalog(&self, id: NodeId) -> CatalogState {
         CatalogState::load(&self.node(id).data_dir().join("main.db"))

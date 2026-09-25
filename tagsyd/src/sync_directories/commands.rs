@@ -462,6 +462,24 @@ impl SyncDirectories {
                     return Ok(());
                 }
 
+                // Another id still maps to these bytes: drop only this row.
+                // A lookup error removes nothing — keeping stray bytes is
+                // recoverable, deleting another file's is not.
+                if sync_directory
+                    .is_shared_with_another_file(&file)
+                    .map_err(|error| SyncDirectoryError::FailedRemovingFile(error.into()))?
+                {
+                    log::info!(
+                        "Keeping {} in {}: another file still maps to it",
+                        file.physical_path,
+                        sync_directory.path.to_string_lossy()
+                    );
+                    return sync_directory
+                        .database
+                        .remove_file_by_id(file_id)
+                        .map_err(|error| SyncDirectoryError::FailedRemovingFile(error.into()));
+                }
+
                 log::info!(
                     "Removing file {} from {}",
                     file.physical_path,
@@ -475,12 +493,10 @@ impl SyncDirectories {
                     }
                 };
 
-                // Tolerate the file already being gone: a same-content duplicate
-                // can leave two file_ids pointing at the same physical path, so a
-                // second `RemoveFile` for that path finds nothing on disk. That is
-                // not an error — we still want to clean up this file_id's DB row
-                // below. Any other IO error is logged but must not crash the sole
-                // sync-directory thread.
+                // Tolerate the file already being gone (removed by hand, with
+                // the watcher event still pending). That is not an error — we still want to
+                // clean up this file_id's DB row below. Any other IO error is
+                // logged but must not crash the sole sync-directory thread.
                 match std::fs::remove_file(&file_path) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

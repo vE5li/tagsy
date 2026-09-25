@@ -222,6 +222,26 @@ impl SyncDirectories {
                         .map_err(|error| SyncDirectoryError::FailedRemovingFile(error.into()))?;
                     let file_path = sync_directory.path.join(file.physical_path.as_str());
 
+                    // Another id still maps to these bytes: drop only this
+                    // row. See `OpenDirectory::is_shared_with_another_file`.
+                    if sync_directory
+                        .is_shared_with_another_file(&file)
+                        .map_err(|error| SyncDirectoryError::FailedRemovingFile(error.into()))?
+                    {
+                        log::info!(
+                            "ApplyPlacement: keeping {} for another file; dropping {} only",
+                            file_path.to_string_lossy(),
+                            file_id.to_string()
+                        );
+                        sync_directory
+                            .database
+                            .remove_file_by_id(file_id)
+                            .map_err(|error| {
+                                SyncDirectoryError::FailedRemovingFile(error.into())
+                            })?;
+                        continue;
+                    }
+
                     log::info!(
                         "ApplyPlacement: removing {} from {}",
                         file_id.to_string(),
