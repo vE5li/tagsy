@@ -10,7 +10,7 @@ use tagsy_core::{FileId, FileInfo, LogicalPath};
 
 use super::CatalogStore;
 use super::previews::delete_previews_for;
-use super::short_id::{common_prefix_length, normalize_id_prefix};
+use super::short_id::{normalize_id_prefix, unique_prefix_length};
 use super::types::{DatabaseError, DeletionState, and_deleted_clause};
 use super::versions::VersionHistory;
 
@@ -92,23 +92,6 @@ latest_version AS (
 /// in one aggregate pass over the whole catalog; smaller ones by per-file
 /// indexed lookups.
 const BULK_LOOKUP_THRESHOLD: usize = 64;
-
-/// The shortest prefix of `id` that no neighbour in `sorted_ids` (which must
-/// contain `id`) shares — the short id. Neighbours in sort order are the only
-/// candidates for the longest common prefix.
-fn unique_prefix_length(sorted_ids: &[String], id: &str) -> usize {
-    let position = sorted_ids
-        .binary_search_by(|candidate| candidate.as_str().cmp(id))
-        .expect("id is in the sorted set");
-    let mut required = 1;
-    if position > 0 {
-        required = required.max(common_prefix_length(id, &sorted_ids[position - 1]) + 1);
-    }
-    if position + 1 < sorted_ids.len() {
-        required = required.max(common_prefix_length(id, &sorted_ids[position + 1]) + 1);
-    }
-    required.clamp(1, id.len())
-}
 
 /// One row of [`CatalogStore::manifest_entries`]: a file id, its full
 /// [`VersionHistory`], the unix-millis timestamp of its latest version, the

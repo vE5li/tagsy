@@ -276,24 +276,6 @@ pub fn emit_duplicate_deletion_outcome(
     }
 }
 
-/// Number of leading characters needed to uniquely identify `target` among
-/// `all` ids (jj-style short change ids).
-fn unique_prefix_length(target: &str, all: &[String]) -> usize {
-    for length in 1..=target.len() {
-        let prefix = &target[..length];
-        let collisions = all
-            .iter()
-            .filter(|other| other.as_str() != target && other.starts_with(prefix))
-            .count();
-
-        if collisions == 0 {
-            return length;
-        }
-    }
-
-    target.len()
-}
-
 /// Render an id with its unique prefix highlighted and the remainder
 /// dimmed, mirroring how `jj` displays change ids.
 fn highlight_id(id: &str, prefix_length: usize) -> String {
@@ -335,10 +317,9 @@ fn deleted_label(deleted: bool) -> &'static str {
 /// The single tag table used by *every* command that prints tags — listings
 /// (`search`, `tags-for-file`, `subtags`) and every tag mutation alike.
 ///
-/// Short-id prefixes are highlighted the way `jj`/`git` show change ids.
-/// The prefix length is computed against `tags`, so pass the full set
-/// you intend to display; the highlighted prefix is a valid lookup key
-/// for the tag commands.
+/// Short-id prefixes are highlighted the way `jj`/`git` show change ids,
+/// using the daemon-computed `short_id_length` (unique against *all* tags
+/// right now), exactly as the file table does.
 ///
 /// The `Tags` column shows the tags applied to each tag (the tags it is a
 /// subtag of), the tag analogue of the file table's per-file tags. The
@@ -347,8 +328,6 @@ fn deleted_label(deleted: bool) -> &'static str {
 /// `tags_by_tag` supplies those names; a tag absent from the map renders
 /// with an empty column.
 fn tag_table(tags: &[Tag], tags_by_tag: &HashMap<TagId, Vec<String>>) -> Table {
-    let ids: Vec<String> = tags.iter().map(|tag| tag.id.to_string()).collect();
-
     let mut table = Table::new();
     table
         .load_preset(UTF8_FULL)
@@ -357,14 +336,13 @@ fn tag_table(tags: &[Tag], tags_by_tag: &HashMap<TagId, Vec<String>>) -> Table {
 
     for tag in tags {
         let id = tag.id.to_string();
-        let prefix_length = unique_prefix_length(&id, &ids);
         let tags_column = tags_by_tag
             .get(&tag.id)
             .map(|names| names.join(", "))
             .unwrap_or_default();
 
         table.add_row(vec![
-            Cell::new(highlight_id(&id, prefix_length)),
+            Cell::new(highlight_id(&id, tag.short_id_length)),
             Cell::new(&tag.name),
             Cell::new(format_style(&tag.style)),
             // TODO: Store the ids instead of the names.
@@ -663,45 +641,6 @@ mod tests {
 
     use super::*;
 
-    // ---- unique_prefix_length: jj-style shortest-unique-prefix ----
-
-    #[test]
-    fn unique_prefix_is_one_char_when_first_chars_differ() {
-        let all = vec!["abc".to_owned(), "bcd".to_owned(), "cde".to_owned()];
-        assert_eq!(unique_prefix_length("abc", &all), 1);
-    }
-
-    #[test]
-    fn unique_prefix_grows_past_a_shared_run() {
-        // "ab.." collides with "abd" until the 3rd char disambiguates.
-        let all = vec!["abc".to_owned(), "abd".to_owned()];
-        assert_eq!(unique_prefix_length("abc", &all), 3);
-    }
-
-    #[test]
-    fn unique_prefix_ignores_the_target_itself() {
-        // The target appearing in `all` must not count as a collision, or no
-        // prefix would ever be unique.
-        let all = vec!["abc".to_owned()];
-        assert_eq!(unique_prefix_length("abc", &all), 1);
-    }
-
-    #[test]
-    fn unique_prefix_is_full_length_when_target_is_a_prefix_of_another() {
-        // "ab" is a prefix of "abc", so no prefix of "ab" is unique; it falls
-        // back to the whole string.
-        let all = vec!["ab".to_owned(), "abc".to_owned()];
-        assert_eq!(unique_prefix_length("ab", &all), 2);
-    }
-
-    #[test]
-    fn unique_prefix_of_a_lone_id_is_one() {
-        assert_eq!(
-            unique_prefix_length("deadbeef", &["deadbeef".to_owned()]),
-            1
-        );
-    }
-
     // ---- table columns ----
 
     #[test]
@@ -734,6 +673,7 @@ mod tests {
             style: tagsy_api::TagStyle::default(),
             metadata: None,
             deleted: false,
+            short_id_length: 4,
         };
         let table = tag_table(&[tag], &HashMap::new());
         let row = table.row(0).unwrap().cell_iter().last().unwrap().content();
@@ -778,6 +718,7 @@ mod tests {
             },
             metadata: None,
             deleted: false,
+            short_id_length: 4,
         };
         let row = TagRow::new(&tag, vec!["parent".to_owned()]);
 

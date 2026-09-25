@@ -52,6 +52,12 @@ pub struct Tag {
     /// [`DeletedRule::Include`] this may be `true`, letting the caller
     /// distinguish live from tombstoned rows in a mixed result set.
     pub deleted: bool,
+    /// Length of the shortest prefix of `id` that is unique among all tags
+    /// right now — the "short id", as `jj`/`git` show change ids. Frontends
+    /// highlight `id[..short_id_length]` and dim the remainder. The tag
+    /// counterpart of [`FileInfo::short_id_length`]; a display hint only, any
+    /// id prefix resolves.
+    pub short_id_length: usize,
 }
 
 /// A rule mapping a search query to an external editor command.

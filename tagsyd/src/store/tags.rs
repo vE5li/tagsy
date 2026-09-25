@@ -14,7 +14,7 @@ use tagsy_core::{BorderStyle, TagId, TagShape, TagStyle};
 
 use super::CatalogStore;
 use super::query::TextPattern;
-use super::short_id::normalize_id_prefix;
+use super::short_id::{normalize_id_prefix, unique_prefix_length};
 use super::types::{DatabaseError, and_deleted_clause, where_deleted_clause};
 
 /// The ten style columns, in a fixed order, for building SELECTs and reading
@@ -279,7 +279,7 @@ impl CatalogStore {
         );
         let mut statement = self.connection.prepare_cached(&sql)?;
 
-        let tag_list = statement
+        let mut tag_list = statement
             .query_map([], |row| {
                 Ok(Tag {
                     id: row.get(0)?,
@@ -287,10 +287,20 @@ impl CatalogStore {
                     deleted: row.get::<_, i64>(2)? != 0,
                     style: style_from_row(row, 3)?,
                     metadata: None,
+                    // Filled in below once we have the whole set.
+                    short_id_length: 0,
                 })
             })?
             .map(|tag| tag.unwrap())
             .collect::<Vec<_>>();
+
+        // The listing holds every tag, so compute the short ids in memory,
+        // exactly as `get_all_files` does, rather than two lookups per tag.
+        let mut sorted_ids: Vec<String> = tag_list.iter().map(|tag| tag.id.to_string()).collect();
+        sorted_ids.sort();
+        for tag in &mut tag_list {
+            tag.short_id_length = unique_prefix_length(&sorted_ids, &tag.id.to_string());
+        }
 
         Ok(tag_list)
     }
@@ -311,7 +321,7 @@ impl CatalogStore {
         );
         let mut statement = self.connection.prepare_cached(&sql)?;
 
-        let tag = statement
+        let mut tag = statement
             .query_map([tag_id], |row| {
                 Ok(Tag {
                     id: tag_id,
@@ -319,11 +329,13 @@ impl CatalogStore {
                     deleted: row.get::<_, i64>(1)? != 0,
                     style: style_from_row(row, 2)?,
                     metadata: None,
+                    short_id_length: 0,
                 })
             })?
             .map(|tag| tag.unwrap())
             .next()
             .ok_or(DatabaseError::MissingTag)?;
+        tag.short_id_length = self.shorten_tag_id(tag_id)?;
 
         Ok(tag)
     }

@@ -23,6 +23,25 @@ pub(super) fn common_prefix_length(a: &str, b: &str) -> usize {
     a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 
+/// The shortest prefix of `id` that no neighbour in `sorted_ids` (which must
+/// contain `id`) shares — the short id, computed in memory for a listing that
+/// already holds every id. Neighbours in sort order are the only candidates
+/// for the longest common prefix (the same reasoning as
+/// [`shortest_unique_prefix_length`], which the single-id paths use).
+pub(super) fn unique_prefix_length(sorted_ids: &[String], id: &str) -> usize {
+    let position = sorted_ids
+        .binary_search_by(|candidate| candidate.as_str().cmp(id))
+        .expect("id is in the sorted set");
+    let mut required = 1;
+    if position > 0 {
+        required = required.max(common_prefix_length(id, &sorted_ids[position - 1]) + 1);
+    }
+    if position + 1 < sorted_ids.len() {
+        required = required.max(common_prefix_length(id, &sorted_ids[position + 1]) + 1);
+    }
+    required.clamp(1, id.len())
+}
+
 /// Normalize a user-supplied id or short-id into the canonical lowercase-hex
 /// form used for prefix matching.
 ///
@@ -227,5 +246,35 @@ mod tests {
         let full_a = shared_a.to_string();
         let len_a = database.shorten_tag_id(shared_a).unwrap();
         assert!(!shared_b.to_string().starts_with(&full_a[..len_a]));
+    }
+
+    /// Tags carry their short id the way files do, on both the listing and
+    /// the by-id read, and the two agree.
+    #[test]
+    fn tag_reads_report_short_id_length() {
+        let database = memory_db();
+        let shared_a = tag_id_from_hex("abcd000000000000000000000000000a");
+        let shared_b = tag_id_from_hex("abcd000000000000000000000000000b");
+        let far = tag_id_from_hex("ffff000000000000000000000000000f");
+        for (id, name) in [(shared_a, "a"), (shared_b, "b"), (far, "c")] {
+            database.add_tag(id, name, &dot_style("red"), 1).unwrap();
+        }
+
+        let full = shared_a.to_string().len();
+        let expected = [(shared_a, full), (shared_b, full), (far, 1)];
+        let listed: Vec<_> = database
+            .get_all_tags(DeletedRule::Exclude)
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(listed.len(), expected.len());
+        for tag in &listed {
+            let (_, length) = expected.iter().find(|(id, _)| *id == tag.id).unwrap();
+            assert_eq!(tag.short_id_length, *length, "listing, {:?}", tag.id);
+        }
+        for (id, length) in expected {
+            let tag = database.tag_from_id(id, DeletedRule::Exclude).unwrap();
+            assert_eq!(tag.short_id_length, length, "by id, {id:?}");
+        }
     }
 }
