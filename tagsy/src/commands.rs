@@ -80,16 +80,16 @@ pub enum Commands {
         tags: Vec<String>,
         /// Keep the local files after uploading (by default each is deleted
         /// once its upload has succeeded).
-        #[arg(long = "keep")]
+        #[arg(short, long = "keep")]
         keep: bool,
         /// Include hidden entries (dotfiles, and files inside dotted
         /// directories) when walking directories.
-        #[arg(long = "hidden")]
+        #[arg(short, long = "hidden")]
         hidden: bool,
         /// Confirm uploading a large batch (more than 100 files). Without
         /// this, such uploads are refused to prevent accidents; scripts can
         /// pass it unconditionally.
-        #[arg(long = "many")]
+        #[arg(short, long = "many")]
         many: bool,
     },
     /// Create a tag; prints the new tag.
@@ -137,13 +137,13 @@ pub enum Commands {
         query: Vec<String>,
         /// Also match files carrying any subtag of a `$tag`/`!tag` term,
         /// walking the hierarchy transitively.
-        #[arg(long)]
+        #[arg(short, long)]
         include_subtags: bool,
         /// Search soft-deleted (tombstoned) files and tags instead of live
         /// ones. Results contain *only* rows whose own tombstone is set;
         /// relationships (which tags a deleted file used to carry, etc.) are
         /// still walked live-only.
-        #[arg(long)]
+        #[arg(short, long)]
         deleted: bool,
     },
     /// Edit a file in `$EDITOR`, fetching it from a peer first if it is not
@@ -216,7 +216,7 @@ pub enum Commands {
         id: String,
         /// Also include tags reached through the tag hierarchy (the tags this
         /// file's tags are subtags of), walking transitively.
-        #[arg(long)]
+        #[arg(short, long)]
         include_subtags: bool,
     },
     /// Rename a tag.
@@ -275,7 +275,7 @@ pub enum Commands {
         /// resolves to a single tag.
         tag_id: String,
         /// Walk the hierarchy transitively (include subtags of subtags).
-        #[arg(long)]
+        #[arg(short, long)]
         recursive: bool,
     },
     /// List the daemon's currently-active sync operations (connecting to peers,
