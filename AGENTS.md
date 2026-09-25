@@ -385,3 +385,4 @@ benchmark (`tagsyd/tests/multi_daemon/bench.rs`) before and after.
 - **"Divergent history" is logged at ERROR** on every reconnect after
   concurrent edits (`peer/plan.rs`), although it is now expected: histories may
   differ, only the latest version must agree. Demote it, or merge histories.
+- **Migrate to `crane`** to improve the Nix build.
