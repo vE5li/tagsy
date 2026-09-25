@@ -197,6 +197,7 @@ impl WatchDispatcher {
 
     /// Whether `directory` is currently watched. Exposed for tests and for
     /// callers deciding whether a directory event needs a fresh `watch_tree`.
+    #[cfg(test)]
     pub fn is_watching(&self, directory: &Path) -> bool {
         self.watched.contains(directory)
     }
