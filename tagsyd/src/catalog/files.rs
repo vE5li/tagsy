@@ -822,7 +822,14 @@ fn purge_guard_file_id(change: &Change) -> Option<tagsy_core::FileId> {
         | Change::FileMoved { file_id, .. }
         | Change::FileMetadataChanged { file_id, .. }
         | Change::FileDeleted { file_id, .. }
-        | Change::FileRestored { file_id, .. } => Some(*file_id),
+        | Change::FileRestored { file_id, .. }
+        // A file's tag relationships are catalog rows for it too: a peer that
+        // has not learned the purge yet still advertises them in its
+        // `TagManifest`, and applying one re-created a relationship row for
+        // the purged file here (while the peer, learning the purge, dropped
+        // its own).
+        | Change::FileTagged { file_id, .. }
+        | Change::FileUntagged { file_id, .. } => Some(*file_id),
         _ => None,
     }
 }
@@ -836,6 +843,8 @@ fn change_variant_name(change: &Change) -> &'static str {
         Change::FileDeleted { .. } => "FileDeleted",
         Change::FileRestored { .. } => "FileRestored",
         Change::FilePurged { .. } => "FilePurged",
+        Change::FileTagged { .. } => "FileTagged",
+        Change::FileUntagged { .. } => "FileUntagged",
         _ => "Change",
     }
 }
