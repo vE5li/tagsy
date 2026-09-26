@@ -155,7 +155,7 @@ fn build_archive(
 
     // Snapshot the main catalog.
     let main_snapshot = staging_db.join("main.db");
-    CatalogStore::initialize(main_db_path)?.vacuum_into(&main_snapshot)?;
+    CatalogStore::open_read_only(main_db_path)?.vacuum_into(&main_snapshot)?;
     let mut db_files = vec!["main.db".to_owned()];
 
     // Snapshot each per-directory index that exists on disk. A directory added
@@ -167,7 +167,7 @@ fn build_archive(
         let source_db = paths.sync_directory_db_path(&directory.path);
         let staged_db = if source_db.exists() {
             let dest = staging_db.join(format!("{name}.db"));
-            DirectoryIndex::initialize(&source_db)?.vacuum_into(&dest)?;
+            DirectoryIndex::open_read_only(&source_db)?.vacuum_into(&dest)?;
             db_files.push(format!("{name}.db"));
             Some(dest)
         } else {

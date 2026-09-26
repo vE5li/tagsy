@@ -27,7 +27,7 @@
 
 use std::path::Path;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 mod directory_index;
 mod entries;
@@ -92,7 +92,43 @@ pub(crate) fn open_connection(
     Ok(connection)
 }
 
+/// Open a **read-only** connection to one of the daemon's SQLite databases:
+/// for every reader that is not the database's owning actor (peer sessions,
+/// API reads, the outbox release, backups). SQLite then rejects any write on
+/// it, so "only the owning actor writes" is enforced, not a convention.
+///
+/// That matters beyond hygiene: the owner's read-then-write transactions
+/// (e.g. `record_version_at`) upgrade to a write lock, and SQLite fails such an
+/// upgrade *immediately* with `SQLITE_BUSY` — no busy timeout — while another
+/// connection holds the write lock. A reader that wrote, even briefly, made
+/// the owner's writes fail and be lost.
+///
+/// The pragmas of [`open_connection`] are not repeated: `journal_mode` is
+/// persistent in the file (set by the owner, which opens first), and
+/// `synchronous` only affects commits. The database must already exist.
+pub(crate) fn open_read_only_connection(
+    database_path: impl AsRef<Path>,
+) -> Result<Connection, DatabaseError> {
+    let connection = Connection::open_with_flags(
+        database_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| DatabaseError::UnableToOpenOrCreate)?;
+    connection.set_prepared_statement_cache_capacity(128);
+    Ok(connection)
+}
+
 impl CatalogStore {
+    /// Open the main catalog **read-only**, for any reader other than the
+    /// catalog writer (see [`open_read_only_connection`]). Runs no schema
+    /// statements, migrations or self-heal — those are the writer's startup
+    /// work in [`initialize`](Self::initialize), which must have run first.
+    pub fn open_read_only(database_path: impl AsRef<Path>) -> Result<Self, DatabaseError> {
+        Ok(Self {
+            connection: open_read_only_connection(database_path)?,
+        })
+    }
+
     pub fn initialize(database_path: impl AsRef<Path>) -> Result<Self, DatabaseError> {
         let connection = open_connection(database_path)?;
 
@@ -141,5 +177,57 @@ impl CatalogStore {
         self.connection
             .execute("VACUUM INTO ?1", [dest.to_string_lossy().as_ref()])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tagsy_core::{FileId, LogicalPath};
+
+    use super::*;
+
+    /// A read-only catalog handle sees the writer's commits but cannot write
+    /// itself: every reader other than the catalog writer opens this way, so a
+    /// stray write fails loudly instead of taking the write lock the writer's
+    /// read-then-write transactions need.
+    #[test]
+    fn read_only_catalog_reads_but_cannot_write() {
+        let directory =
+            std::env::temp_dir().join(format!("tagsy-read-only-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("main.db");
+
+        let mut writer = CatalogStore::initialize(&path).unwrap();
+        let file_id = FileId::new();
+        writer
+            .add_file(file_id, &LogicalPath::new("f.txt"), 0)
+            .unwrap();
+        writer
+            .record_version_at(file_id, "v1", "local", 1, 100)
+            .unwrap();
+
+        let reader = CatalogStore::open_read_only(&path).unwrap();
+        assert!(
+            reader
+                .add_file(FileId::new(), &LogicalPath::new("g.txt"), 0)
+                .is_err(),
+            "a read-only handle must reject writes"
+        );
+
+        writer
+            .record_version_at(file_id, "v2", "local", 1, 200)
+            .unwrap();
+        assert_eq!(
+            reader
+                .latest_version(file_id)
+                .unwrap()
+                .unwrap()
+                .content_hash,
+            "v2"
+        );
+
+        drop(reader);
+        drop(writer);
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }

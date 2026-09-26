@@ -194,7 +194,7 @@ impl ApiService {
     /// `CatalogStore` is `Send + !Sync`; we never share one across `.await`,
     /// so each read opens its own handle and drops it before returning.
     fn open_read(&self) -> Result<CatalogStore, ApiError> {
-        CatalogStore::initialize(&self.main_db_path).map_err(ApiError::from)
+        CatalogStore::open_read_only(&self.main_db_path).map_err(ApiError::from)
     }
 
     /// Subscribe to the live change stream.

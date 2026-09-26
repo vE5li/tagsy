@@ -236,7 +236,7 @@ async fn release_pass(
         return;
     }
     for (file_id, content_hash) in entries {
-        let verdict = match crate::store::CatalogStore::initialize(main_db_path) {
+        let verdict = match crate::store::CatalogStore::open_read_only(main_db_path) {
             Ok(database) => catalog_verdict(&database, file_id, &content_hash),
             Err(error) => {
                 log::warn!("Outbox release: cannot read the catalog ({error:?}); keeping entries");

@@ -411,7 +411,7 @@ async fn shared_physical_path() -> (
     cluster.wait_all_connected().await;
     cluster.settle().await;
 
-    let index = DirectoryIndex::initialize(cluster.index_db_path(phone, "phone")).unwrap();
+    let index = DirectoryIndex::open_read_only(cluster.index_db_path(phone, "phone")).unwrap();
     for id in [original, shadow] {
         assert_eq!(
             index.get_file(id).unwrap().physical_path.as_str(),

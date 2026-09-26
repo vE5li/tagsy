@@ -86,11 +86,12 @@ pub struct CatalogState {
 }
 
 impl CatalogState {
-    /// Read the catalog through its own store, exactly as the API's read path
-    /// does. Safe against a running daemon (SQLite serializes; the busy
-    /// timeout covers the writer).
+    /// Read the catalog through its own store, read-only, exactly as the API's
+    /// read path does. Safe against a running daemon, and it must not write:
+    /// a snapshot that ran the writer's startup self-heal once masked a purge
+    /// bug by stripping the very rows it should have reported.
     pub fn load(main_db: &Path) -> Self {
-        let store = CatalogStore::initialize(main_db).expect("open catalog for snapshot");
+        let store = CatalogStore::open_read_only(main_db).expect("open catalog for snapshot");
         let files = store.manifest_entries().expect("read file manifest");
         let modified_at: BTreeMap<TagId, i64> = store
             .tag_manifest_entries()
@@ -305,7 +306,8 @@ pub fn check_disk(
 ///
 /// Returns a description of every shared path, or `None`.
 pub fn check_index(index_db: &Path, directory: &Path) -> Option<String> {
-    let index = DirectoryIndex::initialize(index_db).expect("open directory index for snapshot");
+    let index =
+        DirectoryIndex::open_read_only(index_db).expect("open directory index for snapshot");
     let mut ids_by_path: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for file in index.get_all_files().expect("read directory index") {
         ids_by_path

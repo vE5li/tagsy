@@ -284,7 +284,7 @@ async fn scale_benchmark() {
     );
 
     // 2. Bulk tagging through the API.
-    let files = tagsyd::store::CatalogStore::initialize(cluster.main_db_path(central))
+    let files = tagsyd::store::CatalogStore::open_read_only(cluster.main_db_path(central))
         .expect("open central catalog")
         .get_all_files(DeletedRule::Exclude)
         .expect("list central files");

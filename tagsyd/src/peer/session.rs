@@ -171,7 +171,7 @@ pub async fn run_peer_session<S>(
     // READ-ONLY: the session makes reconciliation decisions from it but routes
     // every write through `change_sender` to `handle_changes`, the sole
     // main-database writer.
-    let database = match CatalogStore::initialize(main_db_path) {
+    let database = match CatalogStore::open_read_only(main_db_path) {
         Ok(database) => database,
         Err(error) => {
             log::error!("Peer {peer_name}: failed to open main DB for session: {error:?}");

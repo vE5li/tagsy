@@ -271,14 +271,23 @@ There are two SQLite databases, both owned by `tagsyd/src/store/`:
   directory, holding a single `files_v1` table. Unrelated to the main
   catalog's former `files_v1`.
 
-Every connection to either database is opened through
+Each database has exactly one writing connection, its owning actor's
+(`CatalogStore::initialize` / `DirectoryIndex::initialize`, which also run
+the schema statements and migrations). Every other reader — peer sessions,
+API reads, the outbox release, backups, test snapshots — opens it with
+`open_read_only` (`store::open_read_only_connection`), so SQLite rejects any
+write from it. This is load-bearing, not hygiene: the owner's read-then-write
+transactions fail *immediately* with `SQLITE_BUSY` (no busy timeout) while
+another connection holds the write lock, and the write is lost.
+
+The owner's connection is opened through
 `store::open_connection`, which sets `journal_mode = WAL` and
 `synchronous = NORMAL`. That is a deliberate durability trade-off: commits
 don't fsync, so power loss or an OS crash can roll back the latest commits
 (never corrupt the file; a daemon crash or kill loses nothing). This is
 recoverable by design — peers re-advertise everything on reconnect and the
 startup scan re-detects on-disk files — and the default `FULL` made every
-write path ~50× slower. Don't open a connection any other way.
+write path ~50× slower. Don't open a connection any other way than these two.
 
 Every table name carries a version suffix. All `CREATE TABLE` statements and
 all migrations live in `store/schema.rs`, for both databases — that one file
@@ -372,10 +381,6 @@ benchmark (`tagsyd/tests/multi_daemon/bench.rs`) before and after.
   another device. A hybrid logical clock — also advancing past every stamp
   received from a peer — would make a local change always win over any change
   this device had already seen.
-- **API reads re-initialize the catalog.** `ApiService::open_read` goes through
-  `CatalogStore::initialize`, re-running the schema statements, migrations and
-  a purge-reconciliation write transaction on every read. A plain read-only
-  connection would do; that work belongs to the writer's startup open.
 - **Uncached SQL.** `prepare` calls use the statement cache, but
   `Connection::execute` / `query_row` still re-parse their SQL on every call.
 - **Receive temp files live under the system temp dir**

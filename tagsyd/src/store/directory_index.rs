@@ -45,6 +45,17 @@ impl DirectoryIndex {
         Ok(Self { connection })
     }
 
+    /// Open a per-directory index **read-only**, for any reader other than
+    /// the sync-directory actor that owns it (see
+    /// [`open_read_only_connection`](super::open_read_only_connection)). Runs
+    /// no schema statements; the owner's [`initialize`](Self::initialize) must
+    /// have created the database.
+    pub fn open_read_only(database_path: impl AsRef<Path>) -> Result<Self, DatabaseError> {
+        Ok(Self {
+            connection: super::open_read_only_connection(database_path)?,
+        })
+    }
+
     /// Write a transactionally consistent copy of this per-directory index to
     /// `dest` via SQLite's `VACUUM INTO`, safe against a live connection.
     /// `dest` must not already exist. The catalog analogue is
