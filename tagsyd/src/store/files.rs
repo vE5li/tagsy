@@ -703,37 +703,42 @@ impl CatalogStore {
             return Ok(files);
         }
 
+        // One statement yields both the listable rows and the full id set the
+        // short ids are computed against, so both come from the same snapshot.
+        // Two statements would each see their own WAL snapshot, and a writer
+        // committing between them (e.g. a purge) would leave a listed file
+        // missing from the id set. The LEFT JOIN keeps version-less files in
+        // the id set, matching `shorten_file_id`; they are not listable.
         let sql = format!(
             "{LATEST_VERSION_CTE}
              SELECT f.id, f.logical_path, agg.content_hash, agg.latest_version, agg.size,
                     f.deleted, agg.first_recorded_at, agg.latest_change_at
              FROM files_v2 AS f
-             JOIN latest_version AS agg
+             LEFT JOIN latest_version AS agg
                ON agg.file_id = f.id"
         );
         let mut statement = self.connection.prepare_cached(&sql)?;
-        let mut by_id: std::collections::HashMap<FileId, FileInfo> = statement
-            .query_map([], |row| {
-                Ok(FileInfo {
-                    file_id: row.get(0)?,
-                    logical_path: row.get(1)?,
-                    content_hash: row.get(2)?,
-                    version_number: row.get(3)?,
-                    size: row.get::<_, i64>(4)? as u64,
-                    short_id_length: 0,
-                    deleted: row.get::<_, i64>(5)? != 0,
-                    first_recorded_at: row.get(6)?,
-                    latest_change_at: row.get(7)?,
-                })
-            })?
-            .map(|row| row.map(|file| (file.file_id, file)))
-            .collect::<Result<_, _>>()?;
-
-        let mut sorted_ids: Vec<String> = self
-            .all_file_ids(DeletedRule::Include)?
-            .iter()
-            .map(FileId::to_string)
-            .collect();
+        let mut sorted_ids = Vec::new();
+        let mut by_id = std::collections::HashMap::new();
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let file_id: FileId = row.get(0)?;
+            sorted_ids.push(file_id.to_string());
+            let Some(content_hash) = row.get::<_, Option<String>>(2)? else {
+                continue;
+            };
+            by_id.insert(file_id, FileInfo {
+                file_id,
+                logical_path: row.get(1)?,
+                content_hash,
+                version_number: row.get(3)?,
+                size: row.get::<_, i64>(4)? as u64,
+                short_id_length: 0,
+                deleted: row.get::<_, i64>(5)? != 0,
+                first_recorded_at: row.get(6)?,
+                latest_change_at: row.get(7)?,
+            });
+        }
         sorted_ids.sort();
 
         let mut files = Vec::with_capacity(file_ids.len());
