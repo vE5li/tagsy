@@ -182,8 +182,8 @@ pub enum CatalogCommand {
     /// decides *what* to catalog (its divergence/LWW logic stays there) but
     /// must not write the main DB itself — `handle_changes` is the sole
     /// writer — so it hands the write here. Fire-and-forget. Inserts the
-    /// `files` row if absent and appends the version; the byte pull happens
-    /// separately on the session link.
+    /// `files` row if absent and appends the version, then requests the byte
+    /// pull (`pull`) from the session if a local sync directory wants it.
     CatalogFile {
         file_id: FileId,
         /// The file's logical identity, used to insert the `files` row when the
@@ -204,6 +204,10 @@ pub enum CatalogCommand {
         observed_at: i64,
         /// The announcing peer (stored in `file_versions.origin`).
         origin: ChangeOrigin,
+        /// Pull the version's bytes from `origin` and place them this way —
+        /// if a local sync directory wants them. `None` when the bytes are
+        /// unchanged (a newer version of content we already hold).
+        pull: Option<MaterializePlacement>,
     },
     /// Reconstruct a **tombstoned** file (`files` + one version, both already
     /// deleted) on behalf of a peer session's `Manifest` reconciliation. Used

@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::catalog::messages::{self, CatalogCommand};
-use crate::catalog::placement::{self, Placement};
+use crate::catalog::placement;
 use crate::catalog::previews::maybe_eager_preview;
 use crate::configuration::{Configuration, RuntimeConfiguration, SyncType};
 use crate::peer::relay::ChunkRelay;
@@ -71,6 +71,40 @@ fn version_needs_transfer(
         .flatten()
         .is_some_and(|state| state.deleted);
     !same_content || deleted
+}
+
+/// Ask the announcing peer for a version's bytes, unless no local sync
+/// directory would take them ([`placement::materialize_targets`] is the same
+/// decision `Materialize` places by). Call after recording the version, so the
+/// tombstone and tags it reads are the ones the bytes will be placed against.
+#[allow(clippy::too_many_arguments)]
+async fn pull_if_wanted(
+    configuration: &Configuration,
+    runtime_configuration: &Arc<RwLock<RuntimeConfiguration>>,
+    database: &mut CatalogStore,
+    change_origin: &ChangeOrigin,
+    file_id: tagsy_core::FileId,
+    content_hash: &str,
+    size: u64,
+    placement: messages::MaterializePlacement,
+) {
+    if placement::materialize_targets(configuration, database, file_id, &placement).is_empty() {
+        log::debug!(
+            "Not pulling {} [{}]: no local sync directory wants it",
+            file_id.to_string(),
+            content_hash.get(..8).unwrap_or(content_hash)
+        );
+        return;
+    }
+    crate::peer::fetch::request_pull_from_origin(
+        runtime_configuration,
+        change_origin,
+        file_id,
+        content_hash.to_owned(),
+        size,
+        placement,
+    )
+    .await;
 }
 
 /// Apply a file-lifecycle metadata change. Returns `Some(publish)` if `change`
@@ -250,16 +284,16 @@ pub(crate) async fn apply_change(
             )
             .await;
 
-            // Trigger a byte pull from the announcing peer to place the file
-            // into any matching local sync directory. If none matches, the
-            // pull still runs today but the bytes are dropped at placement;
-            // that is optimized separately.
+            // Pull the bytes from the announcing peer to place the file into
+            // any matching local sync directory.
             if transfer {
-                crate::peer::fetch::request_pull_from_origin(
+                pull_if_wanted(
+                    configuration,
                     runtime_configuration,
+                    database,
                     change_origin,
                     *file_id,
-                    content_hash.clone(),
+                    content_hash,
                     *size,
                     messages::MaterializePlacement::Create {
                         logical_path: logical_path.clone(),
@@ -343,11 +377,13 @@ pub(crate) async fn apply_change(
                 // Pull the new bytes to update any local sync directory that
                 // holds this file.
                 if transfer {
-                    crate::peer::fetch::request_pull_from_origin(
+                    pull_if_wanted(
+                        configuration,
                         runtime_configuration,
+                        database,
                         change_origin,
                         *file_id,
-                        content_hash.clone(),
+                        content_hash,
                         *size,
                         messages::MaterializePlacement::Change,
                     )
@@ -653,11 +689,13 @@ pub(crate) async fn apply_change(
             // hold this now-live file — only if the restore actually won
             // (otherwise the file stays tombstoned and wants no bytes).
             if restored {
-                crate::peer::fetch::request_pull_from_origin(
+                pull_if_wanted(
+                    configuration,
                     runtime_configuration,
+                    database,
                     change_origin,
                     *file_id,
-                    content_hash.clone(),
+                    content_hash,
                     *size,
                     messages::MaterializePlacement::Change,
                 )
@@ -816,6 +854,7 @@ pub(crate) async fn catalog_file(
     size: u64,
     observed_at: i64,
     origin: ChangeOrigin,
+    pull: Option<messages::MaterializePlacement>,
 ) {
     // Purge enforcement: a purged file id takes absolute priority over the
     // catalog. This reconciliation path re-materializes a file the peer's file
@@ -899,6 +938,24 @@ pub(crate) async fn catalog_file(
             file_id.to_string(),
             error
         );
+    }
+
+    // Pull the bytes the reconciliation asked for, if a local sync directory
+    // wants them. Decided here rather than in the session: only the writer
+    // sees the tags the peer's `TagManifest` just applied (queued ahead of
+    // this command) and this version's effect on the tombstone.
+    if let Some(placement) = pull {
+        pull_if_wanted(
+            configuration,
+            runtime_configuration,
+            database,
+            &origin,
+            file_id,
+            &content_hash,
+            size,
+            placement,
+        )
+        .await;
     }
 
     // Announce this reconcile-derived version onward so it
@@ -1098,71 +1155,7 @@ pub(crate) async fn materialize(
     }
 
     // Build the local placement targets for the arrived bytes.
-    let targets = match placement {
-        messages::MaterializePlacement::Create { logical_path, tags } => {
-            // New file: create it in every matching sync directory,
-            // deriving each directory's physical path from the
-            // logical path.
-            //
-            // Tag-filter using the *union* of the carried tags and
-            // the file's current DB tags. The carried tags cover a
-            // live `FileMetadataAdded` (whose `FileTagged`
-            // relationships may not be applied yet); the DB tags
-            // cover a `Manifest` reconcile pull, which carries empty
-            // tags because it cannot know them at pull time — but by
-            // the time this `Materialize` runs, the `TagManifest`'s
-            // `FileTagged` changes have been applied (they are
-            // enqueued before the pull's transfer completes), so the
-            // DB has them. Without this, reconcile-pulled files
-            // matched no TagBased directory and were dropped.
-            let db_tags = database
-                .tag_ids_for_file(file_id, store::SubtagRule::Exclude)
-                .map(|iter| iter.into_iter().collect::<Vec<TagId>>())
-                .unwrap_or_else(|error| {
-                    log::error!(
-                        "Materialize: failed to read tags for {}: {:?}; using carried tags only",
-                        file_id.to_string(),
-                        error
-                    );
-                    Vec::new()
-                });
-            let effective_tags = placement::effective_placement_tags(&tags, &db_tags);
-
-            let mut targets = Vec::new();
-            for sync_directory in &configuration.sync_directories {
-                if let SyncType::TagBased {
-                    tags: sync_directory_tags,
-                } = &sync_directory.sync_type
-                    && !placement::contains_all_tags(sync_directory_tags, &effective_tags)
-                {
-                    // Tag based directory the file does not match: skip only
-                    // this directory, still place into the others.
-                    continue;
-                }
-                let physical_path = sync_directory
-                    .sync_type
-                    .physical_for(&logical_path, file_id);
-                targets.push(Placement::Create {
-                    file_id,
-                    physical_path,
-                    sync_directory_path: sync_directory.path.clone(),
-                });
-            }
-            targets
-        }
-        messages::MaterializePlacement::Change => {
-            // New version of a known file: put it in place in every sync
-            // directory that should hold it (tag-filtered by current tags) —
-            // overwriting where held, creating where not (e.g. dropped by a
-            // delete this newer version overruled). Nothing if the file is
-            // still tombstoned. Peer-origin: no origin directory to skip; the
-            // sentinel empty path never matches a real sync directory.
-            let sentinel = ChangeOrigin::Local {
-                directory_path: std::path::PathBuf::new(),
-            };
-            placement::live_placements(configuration, database, &sentinel, file_id)
-        }
-    };
+    let targets = placement::materialize_targets(configuration, database, file_id, &placement);
     placement::place_content(command_sender, targets, content).await;
     // No `forward_to_peers` here: the announcement was already
     // forwarded when it was first handled (announce time). `origin`
@@ -1342,23 +1335,16 @@ pub(crate) async fn announce_upload(
     // peer-announced file takes. A new file is created in every matching
     // directory; an edit puts it in place where it belongs. Skipped when no
     // local directory would take the file; the outbox keeps it for peers.
-    let (placement, wanted_locally) = match &change {
+    let placement = match &change {
         Change::FileMetadataAdded {
             logical_path, tags, ..
-        } => (
-            messages::MaterializePlacement::Create {
-                logical_path: logical_path.clone(),
-                tags: tags.clone(),
-            },
-            !placement::placements_for(configuration, &origin, file_id, logical_path, tags)
-                .is_empty(),
-        ),
-        _ => (
-            messages::MaterializePlacement::Change,
-            !placement::live_placements(configuration, database, &origin, file_id).is_empty(),
-        ),
+        } => messages::MaterializePlacement::Create {
+            logical_path: logical_path.clone(),
+            tags: tags.clone(),
+        },
+        _ => messages::MaterializePlacement::Change,
     };
-    if wanted_locally {
+    if !placement::materialize_targets(configuration, database, file_id, &placement).is_empty() {
         let pending_fetches = pending_fetches.clone();
         let pull_scheduler = pull_scheduler.clone();
         let change_sender = change_sender.clone();

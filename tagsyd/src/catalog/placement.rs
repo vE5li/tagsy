@@ -437,6 +437,75 @@ pub(crate) fn live_placements(
     )
 }
 
+/// The local sync directories that should receive a peer version's bytes
+/// under `placement` — what `Materialize` places them into. Evaluated
+/// *before* a pull too: when it is empty no local directory wants the bytes,
+/// so they must not be pulled at all (they would only be dropped on arrival).
+/// Declining a pull is safe: a file that later becomes wanted (tagged into a
+/// directory) is fetched on demand by the `FileTagged` / `ReconcilePlacement`
+/// path.
+///
+/// - `Create` (a file new to us): every directory whose tags match the union of
+///   the carried tags and the file's current catalog tags. The carried tags
+///   cover a live `FileMetadataAdded` whose `FileTagged` relationships may not
+///   be applied yet; the catalog tags cover a `Manifest` reconcile, which
+///   carries none (its `TagManifest` is applied ahead of the file manifest).
+/// - `Change` (a new version of a known file): [`live_placements`], so nothing
+///   while the file is tombstoned.
+pub(crate) fn materialize_targets(
+    configuration: &Configuration,
+    database: &CatalogStore,
+    file_id: FileId,
+    placement: &messages::MaterializePlacement,
+) -> Vec<Placement> {
+    match placement {
+        messages::MaterializePlacement::Create { logical_path, tags } => {
+            let db_tags = database
+                .tag_ids_for_file(file_id, store::SubtagRule::Exclude)
+                .map(|iter| iter.into_iter().collect::<Vec<TagId>>())
+                .unwrap_or_else(|error| {
+                    log::error!(
+                        "materialize_targets: failed to read tags for {}: {:?}; using carried \
+                         tags only",
+                        file_id.to_string(),
+                        error
+                    );
+                    Vec::new()
+                });
+            let effective_tags = effective_placement_tags(tags, &db_tags);
+
+            let mut targets = Vec::new();
+            for sync_directory in &configuration.sync_directories {
+                if let SyncType::TagBased {
+                    tags: sync_directory_tags,
+                } = &sync_directory.sync_type
+                    && !contains_all_tags(sync_directory_tags, &effective_tags)
+                {
+                    // Tag based directory the file does not match: skip only
+                    // this directory, still place into the others.
+                    continue;
+                }
+                let physical_path = sync_directory.sync_type.physical_for(logical_path, file_id);
+                targets.push(Placement::Create {
+                    file_id,
+                    physical_path,
+                    sync_directory_path: sync_directory.path.clone(),
+                });
+            }
+            targets
+        }
+        messages::MaterializePlacement::Change => {
+            // Overwrite where held, create where not (e.g. dropped by a delete
+            // this newer version overruled). Peer-origin: no origin directory
+            // to skip; the sentinel empty path never matches a real one.
+            let sentinel = ChangeOrigin::Local {
+                directory_path: PathBuf::new(),
+            };
+            live_placements(configuration, database, &sentinel, file_id)
+        }
+    }
+}
+
 /// Build the list of sync directories that should receive a `ChangeFile`
 /// for `file_id`, applying the origin-skip and tag-match filters. Each target
 /// is a directory that *should* hold the file, whether or not it currently
@@ -602,5 +671,87 @@ mod tests {
         assert!(effective.contains(&carried_only));
         assert!(effective.contains(&db_only));
         assert_eq!(effective.len(), 3, "shared tag must not be duplicated");
+    }
+
+    /// One TagBased directory requiring `tag`: what a phone looks like.
+    fn tag_based_configuration(tag: TagId) -> Configuration {
+        serde_json::from_value(serde_json::json!({
+            "peers": [],
+            "sync_directories": [{
+                "path": "/sync/phone",
+                "sync_type": { "TagBased": { "tags": [tag.to_string()] } },
+            }],
+        }))
+        .expect("valid configuration")
+    }
+
+    fn create(tags: Vec<TagId>) -> messages::MaterializePlacement {
+        messages::MaterializePlacement::Create {
+            logical_path: LogicalPath::new("f.txt"),
+            tags,
+        }
+    }
+
+    /// A new file no local directory's tags match has no targets, so its bytes
+    /// are not pulled at all; matching tags, carried or already cataloged,
+    /// make it wanted.
+    #[test]
+    fn materialize_targets_for_new_file_follow_its_tags() {
+        let tag = TagId::new();
+        let configuration = tag_based_configuration(tag);
+        let database = CatalogStore::initialize(":memory:").expect("open in-memory db");
+        let file_id = FileId::new();
+
+        assert!(
+            materialize_targets(&configuration, &database, file_id, &create(Vec::new())).is_empty()
+        );
+        assert!(
+            materialize_targets(
+                &configuration,
+                &database,
+                file_id,
+                &create(vec![TagId::new()])
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            materialize_targets(&configuration, &database, file_id, &create(vec![tag])).len(),
+            1
+        );
+
+        // A reconcile carries no tags; the cataloged ones decide.
+        database.tag_file(tag, file_id, 1).unwrap();
+        assert_eq!(
+            materialize_targets(&configuration, &database, file_id, &create(Vec::new())).len(),
+            1
+        );
+    }
+
+    /// A new version of a known file is wanted only while the file is live and
+    /// tagged into a local directory.
+    #[test]
+    fn materialize_targets_for_new_version_follow_tags_and_tombstone() {
+        let tag = TagId::new();
+        let configuration = tag_based_configuration(tag);
+        let mut database = CatalogStore::initialize(":memory:").expect("open in-memory db");
+        let file_id = FileId::new();
+        database
+            .add_file(file_id, &LogicalPath::new("f.txt"), 0)
+            .unwrap();
+        database
+            .record_version_at(file_id, "v1", "local", 1, 100)
+            .unwrap();
+        let change = messages::MaterializePlacement::Change;
+
+        assert!(materialize_targets(&configuration, &database, file_id, &change).is_empty());
+
+        database.tag_file(tag, file_id, 1).unwrap();
+        assert_eq!(
+            materialize_targets(&configuration, &database, file_id, &change).len(),
+            1
+        );
+
+        assert!(database.remove_file(file_id, 200).unwrap());
+        assert!(materialize_targets(&configuration, &database, file_id, &change).is_empty());
     }
 }

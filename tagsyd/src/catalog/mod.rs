@@ -1104,6 +1104,7 @@ impl CatalogWriter {
                     size,
                     observed_at,
                     origin,
+                    pull,
                 } => {
                     files::catalog_file(
                         &configuration,
@@ -1116,6 +1117,7 @@ impl CatalogWriter {
                         size,
                         observed_at,
                         origin,
+                        pull,
                     )
                     .await;
                     continue;

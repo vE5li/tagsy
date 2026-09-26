@@ -864,6 +864,7 @@ pub async fn run_peer_session<S>(
                                 origin: ChangeOrigin::Peer {
                                     public_key: peer_public_key.to_owned(),
                                 },
+                                pull: None,
                             }) {
                                 log::error!(
                                     "Reconciliation: failed to enqueue catalog write for {} \
@@ -873,18 +874,15 @@ pub async fn run_peer_session<S>(
                             }
                         }
 
-                        // Files we are pulling as a result of catalog reconciliation
-                        // (below); excluded from the placement sweep so we do not
-                        // double-fetch them.
+                        // Files whose bytes reconciliation asks for (below);
+                        // excluded from the placement sweep, since the catalog
+                        // writer already decides their pull.
                         let pulling: HashSet<FileId> =
                             pulls.iter().map(|pull| pull.file_id).collect();
-                        // Start a content-addressed receive for each wanted
-                        // file, directing chunk requests toward this peer; it
-                        // serves the canonical chunks it holds and any other
-                        // holder can serve the rest via the relay. `placement`
-                        // is `Create` for files we've never seen (using the
-                        // manifest's `logical_path`) and `Change` for files we
-                        // already know — see `plan_file_sync`.
+                        // Catalog each wanted version and ask for its bytes.
+                        // `placement` is `Create` for files we've never seen
+                        // (using the manifest's `logical_path`) and `Change`
+                        // for files we already know — see `plan_file_sync`.
                         for MissingContent {
                             file_id,
                             content_hash,
@@ -924,37 +922,31 @@ pub async fn run_peer_session<S>(
 
                             // Hand the catalog write (files row + version) to
                             // `handle_changes`, the sole main-DB writer, rather
-                            // than writing on this session's own connection. The
-                            // byte pull below is a transfer, not a DB write, so it
-                            // stays here. `file_versions` is byte-independent, so
-                            // cataloging happens whether or not the pull completes.
+                            // than writing on this session's own connection.
+                            // `file_versions` is byte-independent, so cataloging
+                            // happens whether or not the bytes are pulled. The
+                            // writer then requests the pull back over this link
+                            // (`PeerCommand::StartReceive`) if a local sync
+                            // directory wants the file — it alone sees the tags
+                            // the `TagManifest` just applied.
                             if let Err(error) = change_sender.send(CatalogCommand::CatalogFile {
                                 file_id,
                                 logical_path,
                                 logical_path_modified_at,
-                                content_hash: content_hash.clone(),
+                                content_hash,
                                 size: size as u64,
                                 observed_at,
                                 origin: ChangeOrigin::Peer {
                                     public_key: peer_public_key.to_owned(),
                                 },
+                                pull: Some(placement),
                             }) {
                                 log::error!(
                                     "Reconciliation: failed to enqueue catalog write for {} \
                                      announced by {peer_name}: {error}",
                                     file_id.to_string()
                                 );
-                                continue;
                             }
-                            let purpose = ReceiverPurpose {
-                                file_id,
-                                content_hash: content_hash.clone(),
-                                origin: ChangeOrigin::Peer {
-                                    public_key: peer_public_key.to_owned(),
-                                },
-                                placement,
-                            };
-                            start_pull(file_id, content_hash, size as u64, purpose).await;
                         }
 
                         // Placement sweep: for every announced file whose catalog
