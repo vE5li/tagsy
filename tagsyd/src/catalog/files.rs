@@ -50,6 +50,29 @@ fn supersedes_latest(
     }
 }
 
+/// Whether recording a peer's version `content_hash` of `file_id` calls for
+/// pulling its bytes. Checked *before* recording it. Not when the version is
+/// the content we already hold as latest, recorded again: the bytes are
+/// unchanged — unless the file is tombstoned here, where the version revives
+/// it and the bytes dropped on delete must be placed again.
+fn version_needs_transfer(
+    database: &CatalogStore,
+    file_id: tagsy_core::FileId,
+    content_hash: &str,
+) -> bool {
+    let same_content = database
+        .latest_version(file_id)
+        .ok()
+        .flatten()
+        .is_some_and(|latest| latest.content_hash == content_hash);
+    let deleted = database
+        .file_deletion_state(file_id)
+        .ok()
+        .flatten()
+        .is_some_and(|state| state.deleted);
+    !same_content || deleted
+}
+
 /// Apply a file-lifecycle metadata change. Returns `Some(publish)` if `change`
 /// was a file variant, else `None`.
 #[allow(clippy::too_many_arguments)]
@@ -183,6 +206,8 @@ pub(crate) async fn apply_change(
                 }
             }
 
+            let transfer = version_needs_transfer(database, *file_id, content_hash);
+
             // Record the version into the catalog now, on announcement, with
             // the *originating* device's `observed_at` (preserved verbatim over
             // the wire), never our receive time — this is the content half of
@@ -229,18 +254,20 @@ pub(crate) async fn apply_change(
             // into any matching local sync directory. If none matches, the
             // pull still runs today but the bytes are dropped at placement;
             // that is optimized separately.
-            crate::peer::fetch::request_pull_from_origin(
-                runtime_configuration,
-                change_origin,
-                *file_id,
-                content_hash.clone(),
-                *size,
-                messages::MaterializePlacement::Create {
-                    logical_path: logical_path.clone(),
-                    tags: tags.clone(),
-                },
-            )
-            .await;
+            if transfer {
+                crate::peer::fetch::request_pull_from_origin(
+                    runtime_configuration,
+                    change_origin,
+                    *file_id,
+                    content_hash.clone(),
+                    *size,
+                    messages::MaterializePlacement::Create {
+                        logical_path: logical_path.clone(),
+                        tags: tags.clone(),
+                    },
+                )
+                .await;
+            }
             Some(true)
         }
         // A metadata-only `FileMetadataChanged` announcement — always from a
@@ -273,6 +300,8 @@ pub(crate) async fn apply_change(
                 )
                 .await;
             } else {
+                let transfer = version_needs_transfer(database, *file_id, content_hash);
+
                 // Record the new version into the catalog now, on
                 // announcement (independent of whether we pull the bytes), with
                 // the *originating* device's `observed_at` preserved verbatim —
@@ -313,15 +342,17 @@ pub(crate) async fn apply_change(
 
                 // Pull the new bytes to update any local sync directory that
                 // holds this file.
-                crate::peer::fetch::request_pull_from_origin(
-                    runtime_configuration,
-                    change_origin,
-                    *file_id,
-                    content_hash.clone(),
-                    *size,
-                    messages::MaterializePlacement::Change,
-                )
-                .await;
+                if transfer {
+                    crate::peer::fetch::request_pull_from_origin(
+                        runtime_configuration,
+                        change_origin,
+                        *file_id,
+                        content_hash.clone(),
+                        *size,
+                        messages::MaterializePlacement::Change,
+                    )
+                    .await;
+                }
             }
             Some(true)
         }

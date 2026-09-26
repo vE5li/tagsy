@@ -25,8 +25,8 @@ use crate::configuration::RuntimeConfiguration;
 use crate::operations;
 use crate::peer::fetch::{answer_local_chunk, spawn_content_receive};
 use crate::peer::plan::{
-    CreateTombstone, MissingContent, PeerDeletion, PeerMove, PeerRestore, SyncPlan, batch_manifest,
-    build_local_manifest, plan_file_sync,
+    CreateTombstone, MissingContent, NewerVersion, PeerDeletion, PeerMove, PeerRestore, SyncPlan,
+    batch_manifest, build_local_manifest, plan_file_sync,
 };
 use crate::peer::plan_purge::{batch_purge_manifest, build_local_purge_manifest, plan_purge_sync};
 use crate::peer::plan_tags::{
@@ -686,6 +686,7 @@ pub async fn run_peer_session<S>(
                         );
                         let SyncPlan {
                             pulls,
+                            versions,
                             deletions,
                             create_tombstones,
                             restores,
@@ -821,6 +822,51 @@ pub async fn run_peer_session<S>(
                             {
                                 log::error!(
                                     "Reconciliation: failed to enqueue move for {} \
+                                     announced by {peer_name}: {error}",
+                                    file_id.to_string()
+                                );
+                            }
+                        }
+
+                        // Catalog newer versions of content we already hold. The
+                        // bytes are unchanged, so nothing is transferred; the
+                        // file stays in the placement sweep below, which fetches
+                        // only if a local directory wants it and lacks it.
+                        for NewerVersion {
+                            file_id,
+                            content_hash,
+                            size,
+                            observed_at,
+                        } in versions
+                        {
+                            let logical_path = match database.logical_path_for_file_id(
+                                file_id,
+                                crate::store::DeletedRule::Include,
+                            ) {
+                                Ok(logical_path) => logical_path,
+                                Err(error) => {
+                                    log::error!(
+                                        "Reconciliation: no logical path for known file {} \
+                                         ({error:?}); skipping",
+                                        file_id.to_string()
+                                    );
+                                    continue;
+                                }
+                            };
+                            if let Err(error) = change_sender.send(CatalogCommand::CatalogFile {
+                                file_id,
+                                logical_path,
+                                // Ignored for a file we already know.
+                                logical_path_modified_at: 0,
+                                content_hash,
+                                size: size as u64,
+                                observed_at,
+                                origin: ChangeOrigin::Peer {
+                                    public_key: peer_public_key.to_owned(),
+                                },
+                            }) {
+                                log::error!(
+                                    "Reconciliation: failed to enqueue catalog write for {} \
                                      announced by {peer_name}: {error}",
                                     file_id.to_string()
                                 );
