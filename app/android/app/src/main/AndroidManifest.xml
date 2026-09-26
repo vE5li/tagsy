@@ -4,8 +4,12 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- tagsy: keep the tokio runtime + inotify alive under Doze. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!-- Required on API 34+ (Android 14) for a data-sync foreground service. -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Required on API 34+ (Android 14) for a special-use foreground service.
+         Not dataSync: on Android 15+ a dataSync service may not be started
+         from BOOT_COMPLETED and is capped at 6 h of runtime per day. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- tagsy: auto-start the sync service after boot (BootReceiver). -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Needed to post the ongoing notification on API 33+. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- tagsy: the sync directory lives in shared storage (Documents/tagsy)
@@ -59,11 +63,25 @@
             </intent-filter>
         </activity>
         <!-- tagsy: foreground service hosting the native runtime. Not
-             exported; the type must match FOREGROUND_SERVICE_DATA_SYNC. -->
+             exported; the type must match FOREGROUND_SERVICE_SPECIAL_USE. -->
         <service
             android:name=".TagsyService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Continuous peer-to-peer file synchronization daemon" />
+        </service>
+        <!-- tagsy: auto-start. Starts TagsyService after boot and after an
+             app update. Exported so the system can deliver the broadcasts. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
         <!-- tagsy: FileProvider used by the external-editor launcher
              (EditorChannel) to hand files to third-party editors as
              `content://` URIs. Raw filesystem paths under the app's private
