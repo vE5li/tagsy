@@ -196,9 +196,12 @@ pub struct SyncPlan {
 ///   with `Create { logical_path, tags: <empty> }`. Tags arrive independently
 ///   via `Sync::TagManifest`; `plan_placement` will re-place the file into any
 ///   TagBased sync directory that later matches.
-/// - **Equal latest**: identical state — nothing to do.
+/// - **Equal latest**: identical state — nothing to do, unless their latest
+///   `observed_at` is newer (the same bytes recorded again): request, since a
+///   newer version overrules an older delete we may hold.
 /// - **Sender's latest hash appears in our history**: they are behind. Their
-///   side will request from us when they process our manifest; we do nothing.
+///   side will request from us when they process our manifest; we do nothing —
+///   unless their latest `observed_at` is newer (a revert): request.
 /// - **Our latest hash appears in their history**: we are behind — request the
 ///   newer bytes (`Change` placement, we already hold the file row).
 /// - **Divergent**: neither side's latest appears in the other's history. Newer
@@ -503,9 +506,26 @@ fn decide_request(
         .expect("checked non-empty above")
         .1
         .as_str();
+    let ours_observed_at = database
+        .latest_version(entry.file_id)?
+        .map(|version| version.observed_at)
+        .unwrap_or(0);
+
+    // A version is ordered by its `observed_at`, not identified by its hash.
+    // When their latest hash is one we already hold (the same bytes recorded
+    // again, or a revert to an older hash), a newer `observed_at` still makes
+    // it a newer version — the content half of the three-way LWW, which must
+    // overrule an older delete we hold. Otherwise they are equal or behind.
+    let newer_known_content = |reason| {
+        if entry.latest_observed_at > ours_observed_at {
+            ReconcileDecision::Request(reason)
+        } else {
+            ReconcileDecision::Nothing
+        }
+    };
 
     if our_latest == their_latest {
-        return Ok(ReconcileDecision::Nothing);
+        return Ok(newer_known_content("newer version of our latest content"));
     }
 
     let our_hashes: HashSet<&str> = our_history
@@ -522,17 +542,16 @@ fn decide_request(
     let we_have_their_latest = our_hashes.contains(their_latest);
 
     match (they_have_our_latest, we_have_their_latest) {
-        // Their latest is somewhere in our history → they are strictly behind.
-        // They'll request from us when they process our manifest.
-        (_, true) => Ok(ReconcileDecision::Nothing),
+        // Their latest is somewhere in our history → they are behind (they'll
+        // request from us when they process our manifest), unless they
+        // recorded that content again more recently (a revert).
+        (_, true) => Ok(newer_known_content(
+            "newer version of content in our history",
+        )),
         // Our latest is somewhere in their history → we are strictly behind.
         (true, false) => Ok(ReconcileDecision::Request("we are behind")),
         // Neither side knows the other's latest hash → divergent.
         (false, false) => {
-            let ours_observed_at = database
-                .latest_version(entry.file_id)?
-                .map(|version| version.observed_at)
-                .unwrap_or(0);
             let request = entry.latest_observed_at > ours_observed_at;
             Ok(ReconcileDecision::Divergent {
                 ours_observed_at,
@@ -661,6 +680,109 @@ mod tests {
             "known file placement must be Change, got {:?}",
             plan.pulls[0].placement
         );
+    }
+
+    /// A peer whose latest hash equals ours but with a newer `observed_at`
+    /// (the same bytes recorded again) holds a newer version. It must be
+    /// wanted even while we hold the file tombstoned by an older delete: that
+    /// version overrules the delete everywhere else, and skipping it on equal
+    /// hashes left this device the only one still considering the file deleted.
+    #[test]
+    fn newer_version_of_same_content_overrules_our_older_delete() {
+        let mut database = memory_db();
+        let file_id = FileId::new();
+        database
+            .add_file(file_id, &LogicalPath::new("f.txt"), 0)
+            .unwrap();
+        database
+            .record_version_at(file_id, "v1", "local", 1, 100)
+            .unwrap();
+        assert!(database.remove_file(file_id, 200).unwrap());
+
+        let entry = ManifestEntry {
+            file_id,
+            history: vec![(1, "v1".to_owned(), 1), (2, "v1".to_owned(), 1)],
+            latest_observed_at: 300,
+            logical_path: LogicalPath::new("f.txt"),
+            logical_path_modified_at: 0,
+            deleted: false,
+            deleted_at: 0,
+            restored_at: 0,
+        };
+
+        let plan = plan_file_sync("peer", vec![entry], &database);
+        assert_eq!(plan.pulls.len(), 1);
+        assert_eq!(plan.pulls[0].content_hash, "v1");
+        assert_eq!(plan.pulls[0].observed_at, 300);
+        assert!(matches!(
+            plan.pulls[0].placement,
+            messages::MaterializePlacement::Change
+        ));
+    }
+
+    /// Equal latest hash and a `observed_at` no newer than ours: the peer
+    /// holds the same version (or an older one), so nothing is wanted.
+    #[test]
+    fn same_content_not_newer_is_not_wanted() {
+        let mut database = memory_db();
+        let file_id = FileId::new();
+        database
+            .add_file(file_id, &LogicalPath::new("f.txt"), 0)
+            .unwrap();
+        database
+            .record_version_at(file_id, "v1", "local", 1, 300)
+            .unwrap();
+
+        for latest_observed_at in [200, 300] {
+            let entry = ManifestEntry {
+                file_id,
+                history: vec![(1, "v1".to_owned(), 1)],
+                latest_observed_at,
+                logical_path: LogicalPath::new("f.txt"),
+                logical_path_modified_at: 0,
+                deleted: false,
+                deleted_at: 0,
+                restored_at: 0,
+            };
+            let plan = plan_file_sync("peer", vec![entry], &database);
+            assert!(plan.pulls.is_empty(), "observed_at={latest_observed_at}");
+        }
+    }
+
+    /// A peer that reverted to a hash in our history, more recently than our
+    /// latest version, holds a newer version: wanted, not "behind".
+    #[test]
+    fn newer_revert_to_known_content_is_wanted() {
+        let mut database = memory_db();
+        let file_id = FileId::new();
+        database
+            .add_file(file_id, &LogicalPath::new("f.txt"), 0)
+            .unwrap();
+        database
+            .record_version_at(file_id, "v1", "local", 1, 100)
+            .unwrap();
+        database
+            .record_version_at(file_id, "v2", "local", 1, 200)
+            .unwrap();
+
+        let entry = ManifestEntry {
+            file_id,
+            history: vec![
+                (1, "v1".to_owned(), 1),
+                (2, "v2".to_owned(), 1),
+                (3, "v1".to_owned(), 1),
+            ],
+            latest_observed_at: 300,
+            logical_path: LogicalPath::new("f.txt"),
+            logical_path_modified_at: 0,
+            deleted: false,
+            deleted_at: 0,
+            restored_at: 0,
+        };
+
+        let plan = plan_file_sync("peer", vec![entry], &database);
+        assert_eq!(plan.pulls.len(), 1);
+        assert_eq!(plan.pulls[0].content_hash, "v1");
     }
 
     /// A known file the peer moved while we were offline (its

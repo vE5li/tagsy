@@ -548,6 +548,25 @@ async fn phone_deletes_while_other_edits() {
     .await;
 }
 
+/// [`phone_deletes_while_other_edits`], but the later edit records the bytes
+/// the file already had: a newer version with an unchanged hash. It must still
+/// win over the older delete everywhere — including on the phone holding the
+/// tombstone, which sees a peer whose latest hash equals its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn phone_deletes_while_other_rewrites_same_content() {
+    script::check(two_phone_conflict(
+        vec![upload("central", "doc", "doc.txt", &["a", "b"])],
+        vec![
+            Step::Delete {
+                on: "phone_a",
+                file: "doc",
+            },
+            edit("phone_b", "doc", "doc @ doc.txt"),
+        ],
+    ))
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn phones_move_same_file() {
     script::check(two_phone_conflict(

@@ -160,33 +160,16 @@ pub(crate) async fn apply_change(
                     }
                 }
             } else {
-                // Skip only if this is the version we already hold as latest
-                // in the catalog, not merely present somewhere in history: a
-                // revert to an older hash is a genuine new version and must
-                // be appended (and its bytes re-pulled where wanted).
-                let current_hash = database
-                    .latest_version(*file_id)
-                    .ok()
-                    .flatten()
-                    .map(|version| version.content_hash);
-                if current_hash.as_deref() == Some(content_hash.as_str()) {
-                    log::debug!(
-                        "Ignoring no-op FileMetadataAdded for {} (already the current version)",
-                        file_id.to_string()
-                    );
-                    // Still forward so the announcement propagates the tree.
-                    super::forward::forward_to_peers(
-                        configuration,
-                        runtime_configuration,
-                        change,
-                        change_origin,
-                    )
-                    .await;
-                    return Some(false);
-                }
+                // Skip only if this is not newer than the version we already
+                // hold as latest. A version is ordered by its `observed_at`,
+                // not identified by its hash: a revert to an older hash, or
+                // the same bytes recorded again, is a genuine new version and
+                // must be appended — it is the content half of the three-way
+                // LWW, so it can overrule a delete (and its bytes are
+                // re-pulled where wanted).
                 if !supersedes_latest(database, *file_id, *observed_at) {
                     log::debug!(
-                        "Ignoring FileMetadataAdded for {}: an older version than our latest",
+                        "Ignoring FileMetadataAdded for {}: not newer than our latest version",
                         file_id.to_string()
                     );
                     super::forward::forward_to_peers(
@@ -269,26 +252,19 @@ pub(crate) async fn apply_change(
             size,
             observed_at,
         } => {
-            // Skip only if this hash is already our latest catalog version.
-            // It is NOT enough for the hash to appear somewhere in history: a
-            // revert back to an older hash (present in history but not the
-            // latest) is a genuine new version we must append (and re-pull
-            // the bytes for where wanted). A whole-history check here
-            // previously kept the wrong bytes on disk and hung `edit`.
-            let current_hash = database
-                .latest_version(*file_id)
-                .ok()
-                .flatten()
-                .map(|version| version.content_hash);
-            let superseded = !supersedes_latest(database, *file_id, *observed_at);
-            if current_hash.as_deref() == Some(content_hash.as_str()) || superseded {
+            // Skip only if this is not newer than our latest catalog version.
+            // A version is ordered by its `observed_at`, not identified by its
+            // hash: a revert back to an older hash, or the same bytes recorded
+            // again, is a genuine new version we must append (and re-pull the
+            // bytes for where wanted). Skipping a same-hash version left a
+            // device holding a tombstone the newer version had overruled
+            // everywhere else.
+            if !supersedes_latest(database, *file_id, *observed_at) {
                 log::debug!(
-                    "Ignoring FileMetadataChanged for {} (already the current version, or older \
-                     than it)",
+                    "Ignoring FileMetadataChanged for {} (not newer than our latest version)",
                     file_id.to_string()
                 );
-                // Already our latest catalog version. Announce onward so the
-                // change still propagates the tree.
+                // Announce onward so the change still propagates the tree.
                 super::forward::forward_to_peers(
                     configuration,
                     runtime_configuration,
