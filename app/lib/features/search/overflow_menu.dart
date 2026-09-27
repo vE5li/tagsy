@@ -1,5 +1,5 @@
 // The home AppBar's overflow menu: a single three-dot button that hosts the
-// low-frequency actions (deleted-search toggle, the file result view-mode
+// low-frequency actions (new file, deleted-search toggle, the file result view-mode
 // selectors, purge cached previews, copy public key) so they don't clutter the
 // AppBar. Sync status — peers, operations, activity — lives in the AppBar's
 // status button instead (`features/status/`).
@@ -14,6 +14,7 @@ class OverflowMenu extends StatefulWidget {
   const OverflowMenu({
     super.key,
     required this.session,
+    required this.onNewFile,
     required this.publicKey,
     required this.showDeleted,
     required this.onToggleShowDeleted,
@@ -22,6 +23,10 @@ class OverflowMenu extends StatefulWidget {
   });
 
   final TagsySession? session;
+
+  /// Invoked when the "New file" item is picked. The item is disabled while
+  /// there is no session.
+  final VoidCallback onNewFile;
 
   /// Non-null on Android, where the app owns the identity and can expose the
   /// public key; null on Linux (daemon owns the key). Drives whether the
@@ -49,6 +54,7 @@ class OverflowMenu extends StatefulWidget {
 /// Menu-item identifiers. Kept as a private enum so the switch in `onSelected`
 /// is exhaustive.
 enum _MenuAction {
+  newFile,
   toggleDeleted,
   viewModeList,
   viewModeTile,
@@ -92,6 +98,8 @@ class _OverflowMenuState extends State<OverflowMenu> {
 
   void _onSelected(_MenuAction action) {
     switch (action) {
+      case _MenuAction.newFile:
+        widget.onNewFile();
       case _MenuAction.toggleDeleted:
         widget.onToggleShowDeleted();
       case _MenuAction.viewModeList:
@@ -119,6 +127,15 @@ class _OverflowMenuState extends State<OverflowMenu> {
       icon: const Icon(Icons.more_vert),
       onSelected: _onSelected,
       itemBuilder: (context) => [
+        PopupMenuItem<_MenuAction>(
+          value: _MenuAction.newFile,
+          enabled: session != null,
+          child: const ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.note_add_outlined),
+            title: Text('New file'),
+          ),
+        ),
         PopupMenuItem<_MenuAction>(
           value: _MenuAction.toggleDeleted,
           child: ListTile(

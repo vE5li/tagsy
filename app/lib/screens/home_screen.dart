@@ -1,7 +1,8 @@
 // Shared home screen: a live search bar that renders returned tags at the top
 // and returned files immediately below. Both open the corresponding detail
 // screen on tap. Tag creation lives in the tag picker (reachable from any
-// file/tag detail screen and the share-review flow), not here.
+// file/tag detail screen and the share-review flow), not here. The overflow
+// menu's "New file" item opens [NewFileScreen] to compose a file from scratch.
 //
 // The screen intentionally does NOT fetch anything on load: an empty
 // `runQuery` scans the entire store, which is a real performance hazard as the
@@ -28,6 +29,7 @@ import '../rust/api.dart' as tagsy;
 import '../session/session.dart';
 import '../widgets/roving_focus_list.dart';
 import 'file_detail_screen.dart';
+import 'new_file_screen.dart';
 import 'tag_detail_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -315,6 +317,18 @@ class _HomeScreenState extends State<HomeScreen> {
     _rows.restoreRow(restoreIndex);
   }
 
+  /// Open the new-file composer. On success it replaces itself with the new
+  /// file's detail screen, so popping that lands back here.
+  Future<void> _newFile() async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => NewFileScreen(session: widget.session!),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final publicKey = widget.session?.publicKey;
@@ -326,6 +340,7 @@ class _HomeScreenState extends State<HomeScreen> {
           StatusIndicator(source: widget.session?.repository),
           OverflowMenu(
             session: widget.session,
+            onNewFile: _newFile,
             publicKey: publicKey,
             showDeleted: _showDeleted,
             onToggleShowDeleted: () {
