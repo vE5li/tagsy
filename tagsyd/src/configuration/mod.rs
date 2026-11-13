@@ -93,7 +93,8 @@ pub struct SyncDirectory {
     /// during the startup walk, never picked up when created or moved in while
     /// the watcher is live. **Defaults to true** (see
     /// [`default_respect_gitignore`]) — a config that omits the field, or that
-    /// predates it, honors `.gitignore`; set it to false to sync everything.
+    /// predates it, honors `.gitignore`; set it to false to sync everything
+    /// but git metadata (`.git`), which is never ingested either way.
     ///
     /// The full chain of `.gitignore` files from the sync root down to a file's
     /// own directory is honored, so a nested directory that is itself a git

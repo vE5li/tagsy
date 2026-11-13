@@ -23,7 +23,7 @@ mod watch;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub use commands::SyncDirectoryCommand;
 use ignore::gitignore::GitignoreBuilder;
@@ -77,12 +77,24 @@ enum SyncDirectoryError {
     FailedRemovingFile(#[source] Cause),
 }
 
+/// Whether `relative_path` lies inside a git repository's metadata: any
+/// component is `.git` — the directory, or the file a worktree or submodule
+/// carries in its place. Git's own state is machine-local (a peer's `index`
+/// overwriting this one corrupts the repository), so it is never ingested,
+/// whatever `respect_gitignore` says; git itself never lists `.git` in a
+/// `.gitignore`, which is why the matcher cannot be relied on to skip it.
+fn is_git_metadata(relative_path: &Path) -> bool {
+    relative_path
+        .components()
+        .any(|component| component == Component::Normal(".git".as_ref()))
+}
+
 struct OpenDirectory {
     path: PathBuf,
     sync_type: SyncType,
     database: DirectoryIndex,
     /// Whether files matched by a `.gitignore` are skipped on ingest. When
-    /// false, [`OpenDirectory::is_ignored`] short-circuits to false and no
+    /// false, [`OpenDirectory::is_ignored`] skips only git metadata and no
     /// ignore file is ever read. Also read by the `ListDirectories` command to
     /// reconstruct the config-accurate [`SyncDirectory`].
     respect_gitignore: bool,
@@ -95,9 +107,9 @@ struct OpenDirectory {
 
 impl OpenDirectory {
     /// Whether an ingest of the file at `relative_path` (relative to this
-    /// directory's root) should be skipped because a `.gitignore` rule matches
-    /// it. Always false when the directory did not opt into
-    /// `respect_gitignore`.
+    /// directory's root) should be skipped: because it is
+    /// [git metadata](is_git_metadata), always, or because a `.gitignore` rule
+    /// matches it, when the directory opted into `respect_gitignore`.
     ///
     /// The matcher is built **fresh per call** from the `.gitignore` files
     /// along the path's own ancestry — the sync root's, then each intermediate
@@ -152,6 +164,9 @@ impl OpenDirectory {
     /// the `ignore` crate so a trailing-slash directory rule (`build/`) matches
     /// a directory path but not a like-named file, matching git's semantics.
     fn is_ignored_impl(&self, relative_path: &Path, is_dir: bool) -> bool {
+        if is_git_metadata(relative_path) {
+            return true;
+        }
         if !self.respect_gitignore {
             return false;
         }
@@ -2203,18 +2218,38 @@ mod tests {
         assert!(!dir.is_ignored(Path::new("tagsy/app/src/main.dart")));
     }
 
-    /// With `respect_gitignore` off, no `.gitignore` is consulted at all — and
-    /// the implicit `.git` exclusion does not apply either, since the whole
-    /// check short-circuits.
+    /// With `respect_gitignore` off, no `.gitignore` is consulted at all.
     #[test]
-    fn respect_gitignore_disabled_ignores_nothing() {
+    fn respect_gitignore_disabled_ignores_no_gitignore_rule() {
         let sync_dir = temp_dir("gi-off");
         std::fs::write(sync_dir.join(".gitignore"), "*.log\n").unwrap();
 
         let dir = open_directory_at(&sync_dir, false);
 
         assert!(!dir.is_ignored(Path::new("app.log")));
-        assert!(!dir.is_ignored(Path::new(".git/config")));
+    }
+
+    /// Git metadata is ignored with or without `respect_gitignore`, and with
+    /// no `.gitignore` naming it — as files, and as directories to prune from
+    /// the watcher. Lookalikes are not.
+    #[test]
+    fn git_metadata_is_always_ignored() {
+        for respect_gitignore in [true, false] {
+            let sync_dir = temp_dir("gi-git-metadata");
+            let dir = open_directory_at(&sync_dir, respect_gitignore);
+
+            assert!(dir.is_ignored(Path::new(".git/config")));
+            assert!(dir.is_ignored(Path::new("repo/.git/objects/ab/cdef")));
+            // A worktree's or submodule's `.git` file.
+            assert!(dir.is_ignored(Path::new("repo/.git")));
+            assert!(dir.is_ignored_dir(Path::new("repo/.git")));
+            assert!(dir.is_ignored_dir(Path::new("repo/.git/objects")));
+
+            assert!(!dir.is_ignored(Path::new("repo/.gitignore")));
+            assert!(!dir.is_ignored(Path::new("repo/.github/ci.yml")));
+            assert!(!dir.is_ignored(Path::new("project.git/config")));
+            assert!(!dir.is_ignored_dir(Path::new("repo/src")));
+        }
     }
 
     /// A newly-added nested `.gitignore` is picked up on the next check with no

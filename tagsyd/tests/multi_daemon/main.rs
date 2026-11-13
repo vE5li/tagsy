@@ -116,6 +116,32 @@ async fn file_written_into_spoke_directory_reaches_hub() {
     cluster.assert_converged();
 }
 
+/// A repository's git metadata stays on its device, even with
+/// `respect_gitignore` off (as every harness directory has it) and no
+/// `.gitignore` naming it; the working tree around it syncs. Covers files
+/// present at startup and files written while the watcher runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn git_metadata_is_never_synced() {
+    let (mut cluster, central, phone, _) = hub_and_spoke();
+    cluster.write_file(phone, "phone", "old/.git/HEAD", b"ref: refs/heads/main\n");
+    cluster.write_file(phone, "phone", "old/README", b"present at startup");
+    cluster.start_connected().await;
+
+    cluster.write_file(phone, "phone", "new/.git/HEAD", b"ref: refs/heads/main\n");
+    cluster.write_file(phone, "phone", "new/.git/objects/ab", b"object");
+    cluster.write_file(phone, "phone", "new/README", b"written while running");
+    cluster.settle().await;
+
+    cluster.assert_converged();
+    let catalog = cluster.catalog(central).normalized();
+    let paths: Vec<&str> = catalog
+        .lines()
+        .filter_map(|line| line.strip_prefix("file "))
+        .map(|rest| rest.split_once(' ').expect("file line has fields").0)
+        .collect();
+    assert_eq!(paths, ["new/README", "old/README"]);
+}
+
 /// An upload no local directory takes waits in the outbox until a peer holds
 /// it, then is released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

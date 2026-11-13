@@ -25,9 +25,11 @@
 //!
 //! The disk is checked per node against that node's own catalog
 //! ([`check_disk`]) rather than across nodes, because each node's directory
-//! layout legitimately differs (Universal vs. TagBased). Each directory's
-//! index is checked too ([`check_index`]): the disk comparison works on paths,
-//! so it cannot see two files sharing one.
+//! layout legitimately differs (Universal vs. TagBased). Git metadata (any
+//! `.git` path component) in a TagBased directory is left out of that check:
+//! the daemon never ingests it, so it is local state the catalog does not
+//! describe. Each directory's index is checked too ([`check_index`]): the disk
+//! comparison works on paths, so it cannot see two files sharing one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -287,6 +289,10 @@ pub fn check_disk(
                     expected.push(format!("{path} {}", short(hash)));
                 }
             }
+            actual.lines.retain(|line| {
+                let (path, _hash) = line.rsplit_once(' ').expect("disk line is `path hash`");
+                !is_git_metadata(path)
+            });
         }
     }
     expected.diff(&actual).map(|diff| {
@@ -348,6 +354,13 @@ pub fn disk_contents(root: &Path) -> Snapshot {
         snapshot.push(format!("{} {}", relative.to_string_lossy(), short(&hash)));
     }
     snapshot
+}
+
+/// Whether `path` has a `.git` component, mirroring the daemon's rule.
+fn is_git_metadata(path: &str) -> bool {
+    Path::new(path)
+        .components()
+        .any(|component| component.as_os_str() == ".git")
 }
 
 /// The latest version as `hash:size` — deliberately without its number,
